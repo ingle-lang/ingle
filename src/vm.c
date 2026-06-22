@@ -3,6 +3,8 @@
 #include "builtin.h"
 #include "graphics.h"
 #include "cextern.h"
+#include "fault.h"      // the unified Fault — a builtin trap reports as a violated implicit
+                        // contract with the concrete operand values (docs/faults.md).
 #include "ember_rt.h"   // shared runtime: packed marshalling (value_box/unbox, array_box/unbox),
                         // also the C backend's runtime (M2a). The VM is the reference semantics.
 
@@ -34,6 +36,17 @@ static char       **g_prog_argv = NULL;
 void vm_set_program_args(int argc, char **argv) {
     g_prog_argc = argc;
     g_prog_argv = argv;
+}
+
+// The entry source path, set by the `run`/`trace` driver before execution and used as a
+// Fault's `where.file`. Process-wide like the program args (and, like them, read-only after
+// startup, so safe to share across workers). A runtime Fault pairs it with the surfacing
+// function name, which disambiguates the multi-module case (per-function source mapping is a
+// tracked follow-up — see docs/faults.md).
+static const char *g_source_path = NULL;
+
+void vm_set_source_path(const char *path) {
+    g_source_path = path;
 }
 
 // A call frame: the function executing, its instruction pointer, and the base of
@@ -218,6 +231,13 @@ struct VM {
     // it (a `requires` message ⇒ the input is out of domain; anything else ⇒ a counterexample).
     int          check_mode;
     const char  *check_msg;
+    // OFI-108: the `?`-PROPAGATION route — a bounded ring of (fn, line) hops recorded as an Err
+    // travels by `?` (OP_ROUTE_HOP fires on the failure branch), so an Err that reaches main shows
+    // HOW it propagated even though the frames have unwound by then. Cleared at every CALL (a call
+    // cannot occur while a `?` chain unwinds, so it ends any prior — handled — chain), which keeps
+    // the buffer to the current chain. Debug-only (OP_ROUTE_HOP is release-elided).
+    FaultHop     route_hops[FAULT_MAX_HOPS];
+    int          route_hop_count;
     // Verification loop (§5j, record-replay): `nondet_mode` is 0 normal, 1 record (capture each
     // nondeterministic scalar into `nondet_log`), 2 replay (return the recorded values in order;
     // `nondet_diverged` is set if the program asks for a value the recording does not have, i.e.
@@ -260,6 +280,137 @@ struct VM {
 
 static void runtime_error(const char *msg) {
     fprintf(stderr, "emberc: runtime error: %s\n", msg);
+}
+
+
+
+
+// FaultInt is a (name, integer) operand pair handed to runtime_fault. Every builtin trap's
+// violating operands (index/len, divisor/dividend, shift/width, …) are live integer C locals
+// at the trap, so an int64 list captures them with no Value-boxing and no allocation.
+typedef struct {
+    const char *name;
+    int64_t     v;
+} FaultInt;
+
+
+
+
+// fault_line returns the source line a frame is currently at. A trap/return advances ip past
+// the instruction, and a caller frame's ip is its return address, so lines[ip-1] is the site.
+static int fault_line(const CallFrame *frame) {
+    const Chunk *chunk = &frame->fn->chunk;
+    size_t off = (size_t)(frame->ip - chunk->code);
+    return chunk->lines != NULL ? chunk->lines[off > 0 ? off - 1 : 0] : 0;
+}
+
+
+
+
+// fault_fill_callstack fills a Fault's primary location (file/fn/line) from `frame` and its
+// `route` from the live call stack at this instant (newest frame first) — the synchronous
+// backtrace. Shared by every VM fault builder. (The `?`-PROPAGATION route — how an Err
+// travelled by `?` after its frames have already returned — is recorded separately, OFI-108.)
+static void fault_fill_callstack(Fault *f, VM *vm, const CallFrame *frame) {
+    f->file = g_source_path;
+    if (frame != NULL) {
+        f->fn   = frame->fn->name;
+        f->line = fault_line(frame);
+    }
+    int r = 0;
+    for (int i = vm->frame_count - 1; i >= 0 && r < FAULT_MAX_HOPS; i--, r++) {
+        const CallFrame *fr = &vm->frames[i];
+        f->route[r].fn   = fr->fn->name;
+        f->route[r].line = fault_line(fr);
+    }
+    f->route_count = r;
+}
+
+
+
+
+// runtime_fault is the structured sibling of runtime_error: it reports a builtin trap as a
+// violated IMPLICIT contract (MANIFESTO — a builtin's bound is a contract the LLM should
+// restore), carrying the concrete operand values projected from the live frame plus the
+// synchronous call-stack route. It assembles a Fault on the (cold) abort path — no hot-path
+// cost — and renders it to stderr in the active mode. The operands are read from the C locals
+// the caller passes (never the post-pop stack), so a value is never stale or hallucinated.
+static void runtime_fault(VM *vm, const CallFrame *frame, const char *code,
+                          const char *message, const char *why, const char *hint,
+                          const FaultInt *vals, int nvals) {
+    // During property-checking (--check) the fuzzer drives many trials and reports
+    // counterexamples itself; a per-trial render would be noise. Stay silent and let the
+    // trial unwind via VM_RUNTIME_ERROR, mirroring the contract path (OP_CONTRACT_CHECK).
+    if (vm->check_mode) {
+        return;
+    }
+    Fault f;
+    memset(&f, 0, sizeof f);
+    f.severity = FSEV_ERROR;
+    f.category = FCAT_RUNTIME;
+    f.code     = code;
+    f.message  = message;
+    f.why      = why;
+    f.hint     = hint;
+    fault_fill_callstack(&f, vm, frame);
+
+    int n = nvals < FAULT_MAX_VALUES ? nvals : FAULT_MAX_VALUES;
+    for (int i = 0; i < n; i++) {
+        f.values[i].name = vals[i].name;
+        snprintf(f.values[i].rendered, sizeof f.values[i].rendered,
+                 "%lld", (long long)vals[i].v);
+    }
+    f.value_count = n;
+
+    fault_render(&f, stderr);
+}
+
+
+
+
+// The integer-overflow trap is one implicit contract — "the result must fit the target
+// type" — reached from many arithmetic sites (add/sub/mul/div/neg) whose operands differ in
+// arity, so these two thin wrappers keep every call site a single statement (so the ARITH
+// macro stays clean).
+#define OVERFLOW_WHY  "arithmetic requires the result to fit the target integer type"
+#define OVERFLOW_HINT "use a wider integer type, or a wrapping operator (wrapping_add/_sub/_mul) for modular arithmetic"
+
+static void overflow_fault(VM *vm, const CallFrame *frame, int64_t lhs, int64_t rhs) {
+    FaultInt vals[2] = { { "lhs", lhs }, { "rhs", rhs } };
+    runtime_fault(vm, frame, "integer_overflow", "integer overflow",
+                  OVERFLOW_WHY, OVERFLOW_HINT, vals, 2);
+}
+
+static void overflow_fault1(VM *vm, const CallFrame *frame, int64_t v) {
+    FaultInt vals[1] = { { "value", v } };
+    runtime_fault(vm, frame, "integer_overflow", "integer overflow",
+                  OVERFLOW_WHY, OVERFLOW_HINT, vals, 1);
+}
+
+
+
+
+// contract_fault renders a violated requires/ensures/assert on the unified Fault channel, so
+// under --faults=agent a contract violation is agent JSON like a builtin trap (consistency:
+// one failure vocabulary). The synthesized message and the `contract_violation` tape event are
+// left UNCHANGED, so the --check classifier (which string-matches the message) is untouched.
+// Only called outside check_mode (OP_CONTRACT_CHECK returns earlier under check_mode). The
+// clause source text as `why` and named param values are a follow-up (OFI-111).
+static void contract_fault(VM *vm, const CallFrame *frame, const char *msg) {
+    const char *code = "assertion_failed";
+    if (strncmp(msg, "precondition", 12) == 0) {
+        code = "precondition_failed";
+    } else if (strncmp(msg, "postcondition", 13) == 0) {
+        code = "postcondition_failed";
+    }
+    Fault f;
+    memset(&f, 0, sizeof f);
+    f.severity = FSEV_ERROR;
+    f.category = FCAT_CONTRACT;
+    f.code     = code;
+    f.message  = msg;
+    fault_fill_callstack(&f, vm, frame);
+    fault_render(&f, stderr);
 }
 
 
@@ -541,7 +692,7 @@ static inline int nk_bits(uint8_t nk) {
                table; i64's bounds are the overflow check itself. */     \
             int64_t r;                                                   \
             if (builtin(AS_INT(va), AS_INT(vb), &r)) {                   \
-                runtime_error("integer overflow");                      \
+                overflow_fault(vm, frame, AS_INT(va), AS_INT(vb));                      \
                 return VM_RUNTIME_ERROR;                                 \
             }                                                            \
             if (!push(vm, INT_VAL(r))) {                                 \
@@ -557,7 +708,7 @@ static inline int nk_bits(uint8_t nk) {
             uint64_t ur;                                                 \
             if (builtin((uint64_t)AS_INT(va), (uint64_t)AS_INT(vb),      \
                         &ur)) {                                          \
-                runtime_error("integer overflow");                      \
+                overflow_fault(vm, frame, AS_INT(va), AS_INT(vb));                      \
                 return VM_RUNTIME_ERROR;                                 \
             }                                                            \
             if (!push(vm, INT_VAL((int64_t)ur))) {                      \
@@ -567,7 +718,7 @@ static inline int nk_bits(uint8_t nk) {
             int64_t r;                                                   \
             if (builtin(AS_INT(va), AS_INT(vb), &r) ||                   \
                 r < NK_MIN[nk] || r > NK_MAX[nk]) {                      \
-                runtime_error("integer overflow");                      \
+                overflow_fault(vm, frame, AS_INT(va), AS_INT(vb));                      \
                 return VM_RUNTIME_ERROR;                                 \
             }                                                            \
             if (!push(vm, INT_VAL(r))) {                                 \
@@ -994,6 +1145,15 @@ static Value call_native(VM *vm, int native_id, Value *args, int argc) {
             return INT_VAL(0);
         case NATIVE_GFX_SHOULD_CLOSE:
             return INT_VAL(ember_gfx_should_close());
+        case NATIVE_GFX_SET_EVENT_WAIT:
+            ember_gfx_set_event_waiting((int)AS_INT(args[0]));
+            return INT_VAL(0);
+        case NATIVE_GFX_HAD_INPUT:
+            return INT_VAL(ember_gfx_had_input());
+        case NATIVE_GFX_MEASURE_MISSES:
+            return INT_VAL(ember_gfx_measure_misses());
+        case NATIVE_GFX_FRAME_STEPS:
+            return INT_VAL(ember_gfx_frame_steps());
         case NATIVE_GFX_FRAME_BEGIN:
             ember_gfx_frame_begin((int)AS_INT(args[0]));
             return INT_VAL(0);
@@ -1071,6 +1231,8 @@ static Value call_native(VM *vm, int native_id, Value *args, int argc) {
         case NATIVE_GFX_TAPE_MARK:
             ember_gfx_tape_mark(AS_CSTRING(args[0]), AS_CSTRING(args[1]));
             return INT_VAL(0);
+        case NATIVE_GFX_FRAME_CAPTURE:
+            return INT_VAL(ember_gfx_frame_capture(AS_CSTRING(args[0])));
         case NATIVE_GFX_FILL_ROUND:
             ember_gfx_fill_round((int)AS_INT(args[0]), (int)AS_INT(args[1]), (int)AS_INT(args[2]),
                                  (int)AS_INT(args[3]), (int)AS_INT(args[4]), (int)AS_INT(args[5]),
@@ -1787,7 +1949,7 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                     // string/float tag checks and the width-bounds table.
                     int64_t r;
                     if (__builtin_add_overflow(AS_INT(a), AS_INT(b), &r)) {
-                        runtime_error("integer overflow");
+                        overflow_fault(vm, frame, AS_INT(a), AS_INT(b));
                         return VM_RUNTIME_ERROR;
                     }
                     if (!push(vm, INT_VAL(r))) {
@@ -1812,7 +1974,7 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                     uint64_t ur;
                     if (__builtin_add_overflow((uint64_t)AS_INT(a),
                                                (uint64_t)AS_INT(b), &ur)) {
-                        runtime_error("integer overflow");
+                        overflow_fault(vm, frame, AS_INT(a), AS_INT(b));
                         return VM_RUNTIME_ERROR;
                     }
                     if (!push(vm, INT_VAL((int64_t)ur))) {
@@ -1822,7 +1984,7 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                     int64_t r;
                     if (__builtin_add_overflow(AS_INT(a), AS_INT(b), &r) ||
                         r < NK_MIN[nk] || r > NK_MAX[nk]) {
-                        runtime_error("integer overflow");
+                        overflow_fault(vm, frame, AS_INT(a), AS_INT(b));
                         return VM_RUNTIME_ERROR;
                     }
                     if (!push(vm, INT_VAL(r))) {
@@ -1870,7 +2032,11 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 } else if (nk == 7) {                  // u64 unsigned divide
                     uint64_t a = (uint64_t)AS_INT(va), b = (uint64_t)AS_INT(vb);
                     if (b == 0) {
-                        runtime_error("division by zero");
+                        FaultInt vals[2] = { { "divisor", (int64_t)b }, { "dividend", (int64_t)a } };
+                        runtime_fault(vm, frame, "division_by_zero", "division by zero",
+                                      "division requires a non-zero divisor",
+                                      "guard the divisor with `if d != 0`, or return a Result for the zero case",
+                                      vals, 2);
                         return VM_RUNTIME_ERROR;
                     }
                     if (!push(vm, INT_VAL((int64_t)(a / b)))) {
@@ -1879,13 +2045,17 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 } else {
                     int64_t a = AS_INT(va), b = AS_INT(vb);
                     if (b == 0) {
-                        runtime_error("division by zero");
+                        FaultInt vals[2] = { { "divisor", b }, { "dividend", a } };
+                        runtime_fault(vm, frame, "division_by_zero", "division by zero",
+                                      "division requires a non-zero divisor",
+                                      "guard the divisor with `if d != 0`, or return a Result for the zero case",
+                                      vals, 2);
                         return VM_RUNTIME_ERROR;
                     }
                     // a/b can still leave the width (e.g. i8 -128 / -1 = 128).
                     if ((a == INT64_MIN && b == -1) ||
                         a / b < NK_MIN[nk] || a / b > NK_MAX[nk]) {
-                        runtime_error("integer overflow");
+                        overflow_fault(vm, frame, a, b);
                         return VM_RUNTIME_ERROR;
                     }
                     if (!push(vm, INT_VAL(a / b))) {
@@ -1899,7 +2069,11 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 int64_t b = AS_INT(pop(vm));
                 int64_t a = AS_INT(pop(vm));
                 if (b == 0) {
-                    runtime_error("modulo by zero");
+                    FaultInt vals[2] = { { "divisor", b }, { "dividend", a } };
+                    runtime_fault(vm, frame, "modulo_by_zero", "modulo by zero",
+                                  "modulo requires a non-zero divisor",
+                                  "guard the divisor with `if d != 0` before `%`",
+                                  vals, 2);
                     return VM_RUNTIME_ERROR;
                 }
                 int64_t r;
@@ -1926,7 +2100,7 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                     }
                 } else if (nk == 7) {                  // -u64 is valid only for 0
                     if (AS_INT(va) != 0) {
-                        runtime_error("integer overflow");
+                        overflow_fault1(vm, frame, AS_INT(va));
                         return VM_RUNTIME_ERROR;
                     }
                     if (!push(vm, INT_VAL(0))) {
@@ -1937,7 +2111,7 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                     // Negation can leave the width: -INT64_MIN, -(i8 -128) = 128,
                     // or any non-zero unsigned (the result would be negative).
                     if (a == INT64_MIN || -a < NK_MIN[nk] || -a > NK_MAX[nk]) {
-                        runtime_error("integer overflow");
+                        overflow_fault1(vm, frame, a);
                         return VM_RUNTIME_ERROR;
                     }
                     if (!push(vm, INT_VAL(-a))) {
@@ -1999,7 +2173,11 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 int64_t a  = AS_INT(pop(vm));
                 int bits = nk_bits(nk);
                 if (nb < 0 || nb >= bits) {
-                    runtime_error("shift amount out of range");
+                    FaultInt vals[2] = { { "shift", nb }, { "width", (int64_t)bits } };
+                    runtime_fault(vm, frame, "shift_out_of_range", "shift amount out of range",
+                                  "shifting requires 0 <= amount < width",
+                                  "the shift amount must be in [0, width); mask it or check the range first",
+                                  vals, 2);
                     return VM_RUNTIME_ERROR;
                 }
                 uint64_t mask = (bits == 64) ? ~0ull : (((uint64_t)1 << bits) - 1);
@@ -2016,7 +2194,11 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 int64_t a  = AS_INT(pop(vm));
                 int bits = nk_bits(nk);
                 if (nb < 0 || nb >= bits) {
-                    runtime_error("shift amount out of range");
+                    FaultInt vals[2] = { { "shift", nb }, { "width", (int64_t)bits } };
+                    runtime_fault(vm, frame, "shift_out_of_range", "shift amount out of range",
+                                  "shifting requires 0 <= amount < width",
+                                  "the shift amount must be in [0, width); mask it or check the range first",
+                                  vals, 2);
                     return VM_RUNTIME_ERROR;
                 }
                 int64_t r;
@@ -2089,7 +2271,7 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                     // Report on the trace seam first (structured, for an LLM author),
                     // then as the runtime error that aborts the run.
                     emit_semantic_event(tracer, frame, vm, "contract_violation", msg);
-                    runtime_error(msg);
+                    contract_fault(vm, frame, msg);
                     return VM_RUNTIME_ERROR;
                 }
                 VM_NEXT();
@@ -2363,7 +2545,12 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 ObjArray *a = AS_ARRAY(arr);
                 int64_t i = AS_INT(idx);
                 if (i < 0 || (size_t)i >= a->length) {
-                    runtime_error("array index out of bounds");
+                    FaultInt vals[2] = { { "index", i }, { "len", (int64_t)a->length } };
+                    runtime_fault(vm, frame, "index_out_of_bounds",
+                                  "array index out of bounds",
+                                  "indexing requires 0 <= index < len",
+                                  "valid indices are 0..len-1; guard with `if i < arr.len()`, or use `arr.get(i)` which returns an Option",
+                                  vals, 2);
                     return VM_RUNTIME_ERROR;
                 }
                 if (a->elem_kind == AEK_INLINE_STRUCT) {
@@ -2415,7 +2602,12 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 }
                 int64_t i = AS_INT(idx);
                 if (i < 0 || (size_t)i >= a->length) {
-                    runtime_error("array index out of bounds");
+                    FaultInt vals[2] = { { "index", i }, { "len", (int64_t)a->length } };
+                    runtime_fault(vm, frame, "index_out_of_bounds",
+                                  "array index out of bounds",
+                                  "indexing requires 0 <= index < len",
+                                  "valid indices are 0..len-1; guard with `if i < arr.len()`, or use `arr.get(i)` which returns an Option",
+                                  vals, 2);
                     return VM_RUNTIME_ERROR;
                 }
                 if (a->elem_kind == AEK_INLINE_STRUCT) {
@@ -2520,7 +2712,12 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 }
                 int64_t idx = AS_INT(iv);
                 if (idx < 0 || (size_t)idx >= a->length) {
-                    runtime_error("remove_at index out of range");
+                    FaultInt vals[2] = { { "index", idx }, { "len", (int64_t)a->length } };
+                    runtime_fault(vm, frame, "remove_at_out_of_range",
+                                  "remove_at index out of range",
+                                  "remove_at requires 0 <= index < len",
+                                  "valid indices are 0..len-1; check `i < arr.len()` before removing",
+                                  vals, 2);
                     return VM_RUNTIME_ERROR;
                 }
                 Value removed;
@@ -2550,7 +2747,11 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 ObjArray *a = AS_ARRAY(arr);
                 int64_t lo = AS_INT(lov), hi = AS_INT(hiv);
                 if (lo < 0 || hi < lo || (size_t)hi > a->length) {
-                    runtime_error("slice bounds out of range");
+                    FaultInt vals[3] = { { "lo", lo }, { "hi", hi }, { "len", (int64_t)a->length } };
+                    runtime_fault(vm, frame, "slice_out_of_range", "slice bounds out of range",
+                                  "slicing requires 0 <= lo <= hi <= len",
+                                  "clamp the bounds to 0..len, with lo <= hi",
+                                  vals, 3);
                     return VM_RUNTIME_ERROR;
                 }
                 if (!push(vm, alloc_slice(RT(vm), a, (size_t)lo, (size_t)hi))) {
@@ -2567,7 +2768,11 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 ObjArray *a = AS_ARRAY(arr);
                 int64_t lo = AS_INT(lov), hi = AS_INT(hiv);
                 if (lo < 0 || hi < lo || (size_t)hi > a->length) {
-                    runtime_error("slice bounds out of range");
+                    FaultInt vals[3] = { { "lo", lo }, { "hi", hi }, { "len", (int64_t)a->length } };
+                    runtime_fault(vm, frame, "slice_out_of_range", "slice bounds out of range",
+                                  "slicing requires 0 <= lo <= hi <= len",
+                                  "clamp the bounds to 0..len, with lo <= hi",
+                                  vals, 3);
                     return VM_RUNTIME_ERROR;
                 }
                 size_t n = (size_t)(hi - lo);
@@ -2795,7 +3000,12 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 }
                 int64_t v = AS_INT(pop(vm));
                 if (nk != 7 && (v < NK_MIN[nk] || v > NK_MAX[nk])) {
-                    runtime_error("value out of range for the target integer type");
+                    FaultInt vals[3] = { { "value", v }, { "min", NK_MIN[nk] }, { "max", NK_MAX[nk] } };
+                    runtime_fault(vm, frame, "value_out_of_range",
+                                  "value out of range for the target integer type",
+                                  "the value must fit the target integer type's range",
+                                  "the value is outside [min, max]; use a wider type, or check the range first",
+                                  vals, 3);
                     return VM_RUNTIME_ERROR;
                 }
                 if (!push(vm, INT_VAL(v))) {
@@ -2860,6 +3070,7 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 }
                 const Function *callee = &vm->heap->prog->functions[func_index];
                 CallFrame *new_frame = &vm->frames[vm->frame_count++];
+                vm->route_hop_count = 0;   // OFI-108: a call ends any prior `?`-propagation chain
                 new_frame->fn    = callee;
                 new_frame->ip    = callee->chunk.code;
                 new_frame->slots = vm->sp - argc;
@@ -2889,6 +3100,7 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 }
                 const Function *callee = &vm->heap->prog->functions[func_index];
                 CallFrame *new_frame = &vm->frames[vm->frame_count++];
+                vm->route_hop_count = 0;   // OFI-108: a call ends any prior `?`-propagation chain
                 new_frame->fn    = callee;
                 new_frame->ip    = callee->chunk.code;
                 new_frame->slots = vm->sp - argc;
@@ -2926,6 +3138,7 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 }
                 const Function *callee = &vm->heap->prog->functions[func_index];
                 CallFrame *new_frame = &vm->frames[vm->frame_count++];
+                vm->route_hop_count = 0;   // OFI-108: a call ends any prior `?`-propagation chain
                 new_frame->fn    = callee;
                 new_frame->ip    = callee->chunk.code;
                 new_frame->slots = vm->sp - (argc + 1);   // self + explicit args
@@ -2997,6 +3210,7 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 }
                 const Function *callee = &vm->heap->prog->functions[cl->fn_index];
                 CallFrame *new_frame = &vm->frames[vm->frame_count++];
+                vm->route_hop_count = 0;   // OFI-108: a call ends any prior `?`-propagation chain
                 new_frame->fn    = callee;
                 new_frame->ip    = callee->chunk.code;
                 new_frame->slots = base;
@@ -3815,6 +4029,20 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 }
                 VM_NEXT();
             }
+            VM_CASE(OP_ROUTE_HOP): {
+                // Record a `?`-propagation hop (OFI-108): the Err is being returned early from this
+                // frame by `?`. The buffer was cleared at the last CALL (a call can't happen while a
+                // `?` chain unwinds, so any earlier — necessarily handled — chain is gone), so the
+                // buffer holds exactly the current chain: append, newest-first by construction since
+                // hops unwind deepest→shallowest. Never touches the stack, so it can't perturb the
+                // value being returned or the early-return drops that follow. Release-elided.
+                if (vm->route_hop_count < FAULT_MAX_HOPS) {
+                    FaultHop *h = &vm->route_hops[vm->route_hop_count++];
+                    h->fn   = frame->fn->name;
+                    h->line = fault_line(frame);
+                }
+                VM_NEXT();
+            }
             VM_CASE(OP__COUNT):
                 runtime_error("corrupt bytecode: invalid opcode");
                 return VM_RUNTIME_ERROR;
@@ -3883,6 +4111,20 @@ int vm_exited(const VM *vm, int *code) {
 }
 
 
+
+
+// vm_route copies the recorded `?`-propagation route (OFI-108) into `route` (capacity
+// FAULT_MAX_HOPS), setting *count. The driver attaches it to an unhandled-Err-at-main Fault,
+// where the synchronous call stack is useless because the propagating frames have returned.
+void vm_route(const VM *vm, FaultHop *route, int *count) {
+    int n = vm->route_hop_count < FAULT_MAX_HOPS ? vm->route_hop_count : FAULT_MAX_HOPS;
+    for (int i = 0; i < n; i++) {
+        route[i] = vm->route_hops[i];
+    }
+    *count = n;
+}
+
+
 VM *vm_create(const CompiledProgram *prog) {
     VM *vm = malloc(sizeof(VM));
     Heap *heap = malloc(sizeof(Heap));
@@ -3928,6 +4170,7 @@ VM *vm_create(const CompiledProgram *prog) {
     vm->group_depth = 0;
     vm->check_mode  = 0;
     vm->check_msg   = NULL;
+    vm->route_hop_count  = 0;
     vm->nondet_mode     = 0;
     vm->nondet_log      = NULL;
     vm->nondet_count    = 0;

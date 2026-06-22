@@ -8,6 +8,10 @@ void compiled_program_init(CompiledProgram *prog) {
     prog->structs      = NULL;
     prog->struct_count = 0;
     prog->main_index   = -1;
+    prog->result_enum_id = -1;
+    prog->err_tag        = -1;
+    prog->option_enum_id = -1;
+    prog->none_tag       = -1;
 }
 
 

@@ -14,6 +14,20 @@ resolution; never reuse or renumber ids.
 
 | OFI | Item | Disposition |
 |-----|------|-------------|
+| OFI-123 | The value model is width-erased: numeric widths are semantic-only (range/overflow/display take the operand's width) but every scalar occupies the same runtime slot. A `u64` LITERAL is writable only to 2⁶³−1 (parser parses via signed range; larger reached by arithmetic/conversion); only packed scalar ARRAYS store at width (`[u8]`=1 B/elem) while a scalar `u8` local takes a full slot. | OPEN (deliberate deferral, large). The "real widths" piece behind the systems-language claim; no correctness risk — range/overflow already enforced on operations. Relates to native-layout umbrella OFI-051. |
+| OFI-122 | A `Ptr` may not be stored in a struct/array/enum/channel or used as a generic arg (the OFI-049 erasure-proof type-formation ban), so no value can OWN a C resource — no `struct File { handle: Ptr }`, no `Option<Ptr>` checked-open, no connection-pool/wrapper type. Every C handle lives as a bare local, closed on every path. The sharpest limit for "real C bindings". | OPEN (priority). Lift via typed handles with a user-declared `Drop`/close (the "typed-handles-with-Drop" future in docs/design/ptr-linearity.md R1). Relations: OFI-099, OFI-043. |
+| OFI-121 | Flare re-parses + rebuilds the ENTIRE node tree every frame: `f.markdown` calls `md.parse(text)` and re-emits every rich-text run on each pass, and `finish()` re-solves the whole layout — all O(content) per frame regardless of what's visible. After OFI-120's viewport cull removed the per-frame PAINT cost, this build/layout cost is the remaining O(n) for a large static message (e.g. a 3000-line reply that's just sitting there, being scrolled). The immediate-mode idiom rebuilds every frame by design, but a large unchanging transcript pays a parse+layout tax 60×/sec for no change. | OPEN (filed 2026-06-22, CONDITIONAL — only worth doing if the cull proves insufficient in practice). Lever = memoize the parsed blocks / built sub-tree per turn, keyed by the turn's text, and re-run parse only when the text changes (streaming turns change each frame and won't benefit; committed turns are stable and would). Needs care with Flare's frame-stable widget ids and the immediate-mode contract. Measure first: re-test the dogfood after OFI-120 and only pursue if a static long transcript still isn't smooth. |
+| OFI-120 | The Flare paint loop emitted EVERY recorded leaf every frame, even ones scrolled far outside the viewport — a long chat message (≈3000 lines) produced ~6000 `draw_text` ops/frame at `y` as negative as -96417, each one FreeType-shaped before raylib clipped its pixels away. Diagnosed from a live `EMBER_TAPE` capture of the Claude app: a 717 MB tape, 1241 frames, mean 4908 draws/frame, steady-state 6132 of which only ~161 were on-screen (5854 off the top). The renderer relied on the GPU clip rect for correctness but did the per-line CPU shaping work unconditionally — O(content) per frame instead of O(visible). | **CLOSED 2026-06-22** (raised by Karl: "really slow dumping 3000 lines into a textbox"; root-caused via the new `EMBER_TAPE` hook in the app — see [[ember-claude-app]]). Added viewport culling to `finish()` (std/flare.em): a scroll viewport (`_SCROLL_BEGIN`) records its screen-space bounds `[vtop,vbot]` and arms a `cull` flag; each leaf whose final `[y,y+h]` is fully outside the viewport is SKIPPED (no `_paint`, no rect record) — partially-visible rows still paint, so no clipping artifact. ~6132 → ~270 draws/frame on the reported case (~22×; the giant message's text ops 6023 → 161, ~37×). `flare_fab`/`flare_sticky` goldens re-blessed (now assert only the visible tail; the FAB shape — a high-layer leaf anchored on-screen — is preserved byte-identical) and double as the cull regression; graphics 36/0. Also wired `EMBER_TAPE=/path` into `flare_chat.em` (env-gated, one JSON line/frame, `tail -f`-able). Follow-up OFI-121 tracks the remaining per-frame re-parse cost. |
+| OFI-119 | Every padded control in Flare (`button`/`primary`/`ghost`, `nav_item`, menu items, ghost label, tab chips, dock title bars, the drag ghost) vertically centred its text with `y + (h - text_size) / 2`, but `draw_text(y)` places the font's full LINE BOX (ascender + descender) at `y`, and the line box is ≈1.2× `text_size`. Centring a `text_size`-tall slab inside a box leaves the extra descender space *below* the glyphs, so the visible caps read consistently LOW — text sits closer to the bottom than the top (Karl, from a live Settings-dialog screenshot, then again on the Recents list). std/ui already centred fields/areas on the line box; the Flare paint arms didn't. | **CLOSED 2026-06-22** (Flare visual-polish campaign; raised by Karl from the live app). Added one shared helper `Flare._ty(boxy, h, size) -> boxy + (h - text_line_height(size)) / 2` (std/flare.em) and routed EVERY padded-control paint site through it (`_paint_button`, `_paint_nav`, `_GHOST`, `_MENUITEM`, the tab chip, dock title, drag ghost) so they all centre on the true line box and can't drift apart again. Inline/tight text (`_LABEL`/`_MUTED`/`_HEADING`/rich-text runs) deliberately untouched — line-box centring would push them out of their snug boxes. Verified with the tape: shapes byte-identical, text up exactly 2px, bar-height nav rows now off-by **+0px** (card centre 56 = line-box centre 56). 6 graphics goldens re-blessed (text-`y` only); graphics 36/0. |
+| OFI-116 | A `nav_item` STOPPED ellipsizing its title while a popover/modal was open — every background nav row rendered its FULL title and overflowed its pill (Karl's screenshot: clicking a conversation's "···" opened "Delete chat" and the long selected title spilled past the accent pill). The inert gate `if !(self._modal && !self._in_modal)` wrapped BOTH the click-press AND the last-frame WIDTH read (`w_last = r.w`) that drives the ellipsis, so an open overlay zeroed `w_last`, `_fit_text` was skipped, and the full text drew. | **CLOSED 2026-06-22** (raised by Karl from the live app). Split the gate in `nav_item` (std/flare.em): the `w_last` width read now happens for EVERY recorded rect, and only the `ui.press` (the click) stays behind the inert gate — so ellipsis survives an open popover while click fall-through is still suppressed. Reproduced + verified with a dogfood + `EMBER_CAPTURE` (long title overflowed the pill with the popover open → ellipsizes after). Regression `tests/graphics/flare_nav_popover.em` (taped settled frame asserts the trailing "…"); graphics 33/0. |
+| OFI-115 | Atomic widgets (`f.button`/`f.primary`/`f.ghost_button`) STRETCH to full width when placed directly in a `STRETCH` parent (the default root column) — a bare button spans the whole window instead of sizing to its content (a newcomer hits this immediately; was visible in `18_flare_anim`'s "Toggle width"). Text/divider widgets SHOULD fill width (to wrap/centre/rule); atomic action widgets should not. | OPEN (filed 2026-06-22, Flare visual-polish campaign). Fix = give button/primary/ghost an intrinsic cross-axis size so flexbox `stretch` can't expand them. Deferred deliberately: the Claude app (`flare_chat.em`) leans on current stretch behaviour, so verify before/after with the new `EMBER_CAPTURE` instrument under `net-graphics` first. Worked around in examples by wrapping bare buttons in a `row`+`spacer`. |
+| OFI-114 | The LIGHT theme was not at parity with dark: panel TITLE BARS were drawn as `ui.shade(st.panel, 6)`, but `panel` is pure white in light so `+6` CLAMPED to white and the bars vanished — a theme-POLARITY bug (the same shade direction can't read on both grounds); compounded by a too-faint border and a weak shadow (α22) so light panels neither delineated nor lifted. | **CLOSED 2026-06-22** (Flare visual-polish campaign). Added an explicit per-theme `bar` surface token to `ui.Style` (a step lighter than panel on dark, a step darker on white), used at the dock title bar (std/flare.em:1019); retuned `theme_light` (stronger border `d4cfc6`, shadow α22→34, page bg nudged warmer so white panels lift). Verified with the new `draw.capture`/`EMBER_CAPTURE` instrument — the light dock now reads with dark's clarity, dark unchanged. Also added a `gutter` token (page-edge inset for top-level content, distinct from `pad`) wired to the root column. 30 graphics goldens re-blessed (gutter+border deltas only). |
+| OFI-113 | A single-line `f.label`/`f.text_muted`/`f.heading` whose text exceeded its box drew the FULL string off-screen (past the window edge) instead of clipping — `_paint` called `draw_text(text, …)` with no width bound (e.g. `17_flare`'s description spilled out of the window). The robustness gap a polished toolkit closes with `text-overflow: ellipsis`. | **CLOSED 2026-06-22** (raised + fixed at Karl's request). `_paint` now ellipsizes to the SOLVED box width `w` at paint time — exact, no 1-frame lag (the layout clamps an oversized leaf to its container, confirmed via capture). Reused the existing kerning-correct `_fit_text`, generalised to `_fit_text_sz(s, max_px, sz)` so headings fit at their larger size; short text is untouched. Regression `tests/graphics/flare_ellipsis.em` (graphics 31/0). |
+| OFI-111 | Runtime Fault precision + repro follow-ups (docs/faults.md Phase 2/3): (a) `where` is line-only — the runtime keeps no per-byte COLUMN table (`Chunk.lines` is line-only) and no per-function SOURCE PATH (`Function` carries only a name), so there is no caret and `where.file` is the ENTRY path (the `fn` name disambiguates multi-module); (b) the recursive struct/enum VALUE WALKER is unbuilt, so a non-scalar value (an `Err` payload) would render `<obj>` not `Err("io")`; (c) a `u64` overflow operand is shown as its two's-complement i64 view (the shared `overflow_fault` takes `int64_t`); (d) the deterministic `repro` field (re-run the SAME inputs to verify a fix) is not attached. | OPEN (Phase 2/3, filed 2026-06-22). (a)+(b) are the literature's precision/values levers at full strength; (c) is a minor cosmetic wart; (d) is gated behind OFI-044 (string-FFI replay is unfaithful, so repro is premature for the apps that need it). Honest-cost order: value walker → columns/per-fn file → repro. |
+| OFI-110 | Compile-side Fault convergence (docs/faults.md). Bring every failure class onto the one Fault schema: (a) CONTRACT violations, (b) an `Err`/`None` reaching `main` (FCAT_UNHANDLED_ERR), (c) type/parse compile diagnostics → the agent Fault render + a real `Token` byte-span + the `severity` enum, (d) `--check` counterexamples. | **PARTIALLY CLOSED 2026-06-22.** (a) DONE — `OP_CONTRACT_CHECK` now renders via `contract_fault` (category=contract, code, call-stack route) on the unified channel; the synthesized message + `contract_violation` tape event are unchanged, so the `--check` classifier (string-matches the message) stays correct (verified: check stage green). (b) DONE — `report_unhandled_error` (src/main.c) detects an Err/None main returns unhandled via the prelude Result/Option identity recorded at codegen (CompiledProgram.result_enum_id/err_tag/…), renders an FCAT_UNHANDLED_ERR Fault with the error value + the OFI-108 route, and exits non-zero (was: exit 0 + `=> <obj>`). Regressions `tests/run/error_unhandled_err.em`, `tests/fault/unhandled_err.em`. **STILL OPEN: (c)** compile-diagnostics→agent-Fault render + byte-spans + severity wiring — LOWER PRIORITY: `--diagnostics=json` already serves an LLM structured compile errors (file/line/col/message/near/help/note), and the compile Diag's near/note don't map cleanly onto the Fault's values/route, so the marginal gain is a unified agent flag, not a capability. **(d)** `--check` counterexamples → Fault (the tape already structures them). |
+| OFI-109 | Native-backend (AST→C) Fault parity: rich Faults are VM-only. A natively-compiled binary (`emberc -o`) still aborts via `em_panic` (a bare string + `exit(70)`), with no frame/line table, no route, and contracts not emitted at all (`cgen_c.c`). The differential test compares STDOUT (Faults go to STDERR), so a native/VM Fault-render divergence is invisible to the existing drift guard. | OPEN (umbrella, filed 2026-06-22). Decide once: formally scope rich Faults to the VM and document native as "bare `em_panic` message", OR thread line/values/ctx into `em_panic` + emit native debug-profile contracts; either way extend the differential harness to compare the stderr Fault render so native drift is caught. Exit-code split (VM 65 vs native 70) lives here too. |
+| OFI-108 | The Fault `route` was only the synchronous CALL-STACK backtrace, useless for an `Err` reaching `main` (the propagating frames have already unwound). Add the Zig-style `?`-PROPAGATION error-return-trace (each `?` hop the Err travelled). | **CLOSED 2026-06-22.** New release-elided `OP_ROUTE_HOP` emitted on the `?` (EXPR_TRY) failure branch records `(fn, line)` into a bounded in-VM ring (`vm->route_hops`, cap FAULT_MAX_HOPS); the unhandled-Err-at-main Fault attaches it via `vm_route()`. KEY simplifications vs the workflow design: the hop stores only `(fn,line)` (the Err VALUE is shown once in the Fault's `values`, so NO value-snapshot → the use-after-free vector is moot), and the buffer is cleared at every CALL (a call can't occur while a `?` chain unwinds, so it ends any prior handled chain) — replacing the fragile depth-reset heuristic, verified against a handled-then-propagate case (route correctly excludes the handled chain). VM-only (the in-VM ring sidesteps the parallel tape-sink `fprintf` race; native is OFI-109). opcheck ✓ (new opcode), ledger 300/300, crucible 187/187, ASan clean. Regression `tests/fault/route_chain.em`. The hop carrying the propagated value at each step is a deferred refinement (needs the OFI-111 value walker). |
+| OFI-107 | `src/trace.c`'s `json_lines_on_event` emitted every string field — the semantic-event `detail` (a contract message), string stack values, names — with a **bare `%s`**, so any string containing a `"`, newline, or control byte produced INVALID JSON Lines AND could inject control/ANSI bytes into the tape, a channel an LLM consumes (an injection vector). It sat in the EXACT value-projection path the Fault campaign builds on. | **CLOSED 2026-06-22** (Phase 0 of the Fault campaign) — extracted the one true JSON-string escaper into `src/jsonw.c` / `include/jsonw.h` (`json_write_string`: escapes `"`, `\`, and every C0 byte) and routed BOTH the tape (trace.c, every string field) and the diagnostics JSON (diag.c, which had its OWN private `put_json_string` — now deleted) through it, so the two can never drift again. Regression `tests/trace/string_escape.em` (a value carrying `"`, newline, tab, `\` → valid escaped JSON, Python-parsed every line). `make test` 372/0; `--diagnostics=json` + existing tape goldens byte-identical. |
 | OFI-106 | The native backend (`src/cgen_c.c`) emits the embedded `StructType` table as a POSITIONAL C initializer (`{ 0, field_count, total_size, off, knd, fst }`), so adding a field to `StructType` in `include/program.h` silently MISALIGNS every emitted struct and breaks the generated C (caught only by `cc` — an `int[2]`-into-`int` error — across the whole native suite). Hit while adding `is_rc` for `rc struct`. The VM path is fine (it copies field-by-field in `codegen.c`); only the emitted-C initializer is positional. | OPEN (low priority, maintainability). Immediate breakage fixed (the `is_rc` value is now emitted in the initializer). Durable fix: emit a DESIGNATED initializer (`.field_count = …, .total_size = …`) so field order/additions can't misalign, or generate it from a single field list shared with the struct definition. A latent footgun for the next `StructType`/`StructLayout` field. |
 | OFI-105 | The dependency-free `make test` (tests/run.sh) FAILED `tests/net/anthropic_harness.em`: run.sh's stage loop skips `graphics`/`parallel`/`native` (each needs a special build) but NOT `net`, so the net stage ran under the plain compiler where `std/http`'s libcurl externs are 'unknown C function', and — falling to `emit_flag`'s default `tokens` — diffed a 643-line token dump against a run-output golden. `tests/run-net.sh`'s own header already documents net as "kept OUT of the dependency-free default suite", so run.sh simply lacked the skip. | **CLOSED 2026-06-21** (toward v0.3.40) — added `[ "$stage" = "net" ] && continue` to tests/run.sh mirroring the graphics/parallel skips; net coverage is unchanged (driven by `make test-net` → tests/run-net.sh under `build/emberc-net`). `make test` is green again (365/0). Surfaced while regression-testing OFI-100..104. |
 | OFI-104 | `codegen.c` leaks per-struct `field_names` arrays on the SUCCESS path. `codegen_program`'s success exit does a bare `free(cg_structs)` (src/codegen.c:2592) — frees the table but NOT each entry's `field_names` vector (malloc'd by `alloc_field_names`) — whereas the error path correctly calls `free_cg_structs(cg_structs, total_structs)` (src/codegen.c:2577; helper ~2388). | **CLOSED 2026-06-21** (toward v0.3.40) — replaced the bare `free(cg_structs)` on the success path with `free_cg_structs(cg_structs, total_structs)` (src/codegen.c:2592), matching the error path. Reviewed solid: no double-free (each entry's `field_names` is independently malloc'd; all `total_structs` entries are initialised before either free site). A process-exit cleanup leak with no runtime growth — and since LSan is unsupported on this machine there is NO automated leak gate; verified by inspection + an ASan-clean manual run ([[ember-asan-available]]). The one knowingly-untested fix of the batch. |
@@ -64,6 +78,77 @@ resolution; never reuse or renumber ids.
 | OFI-009 | Ownership safety — checker done & sound; `Copy` bound landed; only a deferred (sound) leak-until-exit in generic bodies remains | mostly done |
 
 
+### OFI-122 — `Ptr` cannot be stored, so no type can own a C resource (no RAII handle/wrapper) — OPEN
+*Filed 2026-06-22 from an external language review (the no-owning-wrapper consequence it flagged as the sharpest FFI gap).*
+
+**Gap.** A `Ptr` may not be an array element, a struct field, an enum/variant field, a channel
+element, or a generic type argument — the erasure-proof type-formation ban from OFI-049 (R1 in
+docs/design/ptr-linearity.md; stated in docs/language.md, "Pointers, buffers, and opaque handles").
+So `[Ptr]`, `Map<_,Ptr>`, `Option<Ptr>`/`Result<Ptr,E>`, `Channel<Ptr>`, and a `Ptr` struct field
+are all unconstructable. The consequence the review named: you cannot build a value that **owns** a
+C resource. No `struct File { handle: Ptr }`, no connection pool, no wrapper type, and no
+`Option<Ptr>` for a checked open — every C handle has to live as a bare local and be closed on every
+path. For a language pitching real C bindings, this is the sharpest limitation.
+
+**Already felt.** docs/http-design.md records the concrete bite: a `Response` object "cannot simply
+hold an open stream handle," so the streaming surface stays handle-passing (`open`/`next`/`close`)
+until this is resolved.
+
+**Why it exists (legitimate v1 choice).** A `Ptr` has no Ember destructor — the compiler can't know
+whether to call `fclose`/`free`/`sqlite3_close` — and the linear must-consume obligation can't be
+discharged once it is hidden inside an aggregate under erasure. Banning storage was the sound, minimal
+fix: it subsumes the "store-into-aggregate leak" with one rule the erasure can't slip past. The
+checked-open idiom today uses the null sentinel (`fopen`→null, `fclose(NULL)` a guarded no-op), not
+`Option<Ptr>`.
+
+**Fix direction.** Typed handles with a user-declared destructor (`Drop`/close) — the
+"typed-handles-with-`Drop` (future) will lift the ban" already noted in ptr-linearity.md R1. A handle
+type that names its own close can be stored, RAII-dropped deterministically, and still keep
+leak/double-close safety. Sequencing relates to OFI-099 (the linear obligation isn't minted through a
+user `fn … -> Ptr` wrapper) and OFI-043 (adopt a C-owned buffer / transfer ownership). Priority: it is
+the headline gap behind the "real C bindings" claim.
+
+
+### OFI-123 — The value model is width-erased: scalar widths are semantic-only, not stored at width — OPEN
+*Filed 2026-06-22 from an external language review (the "real widths" caveat — true for type-checking, not yet for layout).*
+
+**Gap.** The explicit-width numeric family (`i8…i64`, `u8…u64`, `f32`/`f64`) is real for
+type-checking — range, the overflow trap, ordering, and display each take the operand's width — but
+every scalar value occupies the same runtime slot regardless of width (docs/language.md, "The whole
+family runs" … "the value model is otherwise still width-erased"). Two visible consequences:
+(a) a `u64` **literal** can be written only up to 2⁶³−1 — larger `u64` values are reached by
+arithmetic or conversion (enforced in src/parser.c: integer literals parse through signed range →
+"integer literal is out of range for i64"); (b) only packed scalar **arrays** store at their width
+today (`[u8]` → 1 byte/element, a struct-of-`u8` packs), while a scalar `u8` local still takes a full
+value slot.
+
+**Why it exists (deliberate).** Width-accurate native layout is a large piece of work; packed scalar
+arrays + inline nested struct fields are explicitly "the first steps of native layout"
+(docs/language.md). There is **no correctness risk** — range and overflow semantics are already
+enforced on every operation, independent of storage width.
+
+**Fix direction.** Width-accurate scalar storage (store/load at the declared width; native struct and
+local layout), plus a `u64` literal path that admits the full unsigned range. This is the credibility
+piece behind the "real widths" systems-language claim, and a large, deliberate deferral rather than a
+quick fix. Relates to the native-backend layout umbrella (OFI-051).
+
+
+### OFI-117 — Long-running-UI memory leak: three per-frame heap leaks made the Flare app's teardown grow with uptime — CLOSED (3 of 3 fixed) 2026-06-22
+*Filed + fixed 2026-06-22, from Karl's report: "closing the Flare Claude app, the mouse spins 25s+ if it's been open a while — no error, but it feels about to."*
+
+**Resolution.** Fixed three per-frame VM-pool leaks: (1) erased-generic borrow-arg over-retain — gate the call-site consume + temp `drop_mask` on the **parameter** type, not the argument (check.c, both free-call and method paths); closes the OFI-009 tail. (2) builtin owning-temp args — checker marks them in `drop_mask`, codegen drops after the call. (3) explicit multi-operand string `+` chains — now `consume` both operands and emit the consuming `OP_CONCAT` (dedicated `binary.str_concat` flag). Dock idle leak 0.94 → 0.24 MB/s (~75%); native already handled all three. Residual → OFI-118. (Full write-up in git history.)
+
+
+### OFI-118 — a `match` scrutinee that's an owning temporary leaked on an EARLY exit from a case body — CLOSED 2026-06-22
+*Filed after OFI-117; root-caused + fixed 2026-06-22 by RSS-probe bisection + a runtime object-leak counter.*
+
+**Resolution.** A `match` whose scrutinee is a fresh owning temporary (e.g. the `Option` from `get`) released it only on the fall-through path, so a `case` body exiting early (`return`/`break`/`continue`/`?`) leaked the scrutinee once per match — Flare's per-frame `state_float` read bled one `Option`/call once the map held state. Fix (codegen.c, VM-only; native already correct): declare the match subject slot with the subject's own owning drop-flag so every early exit releases it (fall-through keeps its explicit drop; mutually exclusive, no double-free). Dock idle leak 0.24 → ~0.083 MB/s (~91% from original); regression `tests/run/match_early_exit.em`, Crucible 75/75, ASan clean. (Full write-up in git.)
+
+
+### OFI-112 — Dock layout is not serialised — a workspace resets to its default on relaunch — CLOSED 2026-06-22
+*Filed + CLOSED 2026-06-22.* **Resolution.** `std/flare` gained `DockTree.to_json()` + the inverse `dock_from_json()` (slot indices round-trip as-is, no re-indexing); `flare_chat` store bumped to **v4**, persisting `"dock"` alongside settings + convos and rebuilding on load — falls back to `build_workspace()` if the pinned "Chat" leaf is absent/corrupt, re-serialising the small tree only on mouse-release. Round-trip golden `tests/graphics/flare_dock_persist.em`; graphics 36/0. Next rung (separate): floating windows. (Full write-up in git.)
+
+
 ### OFI-071 — M:N green-thread scheduler — BUILT 2026-06-20 (gated behind `EMBER_MN`; default-flip pending soak)
 *Karl (2026-06-20): "Is this not important? Should we not be sorting this out as priority? Make sure to use Crucible and write any other tools you need to make this a reality."*
 
@@ -108,119 +193,17 @@ OFI-088 (fiber stacks). Decision recorded in docs/architecture.md.
 ### OFI-085 — No resize/split control; panes were fixed-width — CLOSED 2026-06-20 (draggable splitter shipped + wired to the sidebar)
 *Opened + closed 2026-06-20 (Karl: "we need a resize/split control adding to the language and then this should be added to the right hand side of the conversation history panel so this can be resized accordingly").*
 
-**Gap.** The UI stack had no draggable divider. Side-by-side panes were pinned by a fixed `strut` (the Flare Claude
-app's sidebar was a hard-coded `236`, duplicated in the `strut` and again in the `cw = screen_width() - 236 - 64`
-page-width calc — a latent single-source inconsistency the review flagged), and there was no mouse-cursor feedback
-for a resizable edge. Every real app lets you drag a splitter to resize.
-
-**Fix (a first-class, reusable control — both orientations, not an app one-off).**
-- **std/ui** `_split_drag(id, x,y,w,h, vertical, before, cur, lo, hi) -> int` — the drag latch. **Absolute-anchor**
-  model (capture `sp_base`=size + `sp_grab`=mouse-axis at the press DOWN-edge; each held frame `size = sp_base +
-  (axis − sp_grab)·sign`, clamped): correct even though the handle's own solved position moves under the cursor as
-  the pane resizes (a grab-offset model drifts). Own latch fields (`sp_drag`/`sp_grab`/`sp_base`) independent of the
-  window (`drag_id`) and scrollbar (`sc_drag`) latches. `split_release(id)` drops a held latch defensively.
-- **std/ui** `set_cursor(shape)` — a VM-only, **tape-silent** graphics builtin (Ember-abstract shapes 0–4 →
-  raylib `MOUSE_CURSOR_*` in C; no `gfx_push_cmd`, like `set_layer`; `frame_begin` resets to default each frame).
-  Gives the ↔/↕ resize pointer on hover. `CURSOR_*` constants in std/ui.
-- **std/flare** `splitter(key, size, lo, hi, vertical) -> int` — the widget: modal-gated, runs `_split_drag` vs last
-  frame's rect, queues a `_SPLIT` hairline (orientation tagged in the node so paint matches the drag axis at any
-  rect), returns the new size (`value = f.widget(...)` idiom). Public `flare.HANDLE_W` is the band thickness.
-- **flare_chat.em**: the sidebar width is now a persisted `state_int("sbw")` the splitter on its right edge drives;
-  the `236` is single-sourced; the max is window-aware so a wide sidebar can't push the transcript off a narrow
-  window.
-
-**Process.** Designed via a 3-independent-spec judge-panel **workflow** → verified synthesis (the absolute-anchor
-call came from the panel). Implemented, then **adversarially reviewed** (5 dimensions, each finding verified by an
-independent skeptic): 8 confirmed findings → fixed the modal-gated-latch leak (medium), the `w>=h` paint-orientation
-heuristic (low), and the narrow-window page overflow (low); added the missing `before=false` / `vertical=false` /
-Flare-wrapper test coverage; accepted the tape-silent-cursor-unasserted nit.
-
-**Verified.** `tests/graphics/splitter.em` (raw-Ui latch: both clamps, absolute-anchor independence, sign-inverted
-`before=false` → 260, `my`-axis `vertical=false` → 220, release, `split_release`) + `tests/graphics/flare_splitter.em`
-(the Flare widget end-to-end: `_SPLIT` paint at the edge, hover/drag colour, resize 236→336, handle tracks). graphics
-22/22, default 351/0, both compilers + the app compile clean, set_cursor tape-silence confirmed (goldens unchanged).
-
-**Deferred (next tier).** A `before=false` production caller (right-docked panel) when one's needed; the `checkbox`/
-`slider` std/ui controls still aren't wrapped into Flare; per the manifesto a `defer`/`with` isn't relevant here.
+**Resolution.** Added a first-class draggable splitter (both orientations): `std/ui._split_drag` (absolute-anchor latch — capture size + mouse-axis at press, `size = base + (axis − grab)·sign` clamped — with its own non-aliasing fields) + a tape-silent `set_cursor` builtin for the ↔/↕ pointer + `std/flare.splitter(key, size, lo, hi, vertical)`. Wired to the Claude app sidebar: `sbw` is a single persisted `state_int` (the duplicated `236` removed), window-aware max. Designed via a 3-spec judge panel + adversarial review (fixed a modal-gated-latch leak, a `w>=h` paint-orientation heuristic, a narrow-window overflow). Tests `tests/graphics/splitter.em` + `flare_splitter.em`; graphics 22/22. (Full write-up in git.)
 
 
 ### OFI-084 — Read-only text (code blocks) was unselectable — CLOSED 2026-06-20 (selectable code blocks shipped)
 *Opened + closed 2026-06-20 (Karl, dogfooding the Flare Claude app: "we have no way to select text in the code blocks … this is a must instead of just a copy button. All major languages support this select/copy (Ctrl+C) functionality").*
 
-**Gap.** The immediate-mode UI had a full caret/selection/clipboard editor for *editable* widgets (`text_field`, `text_area`),
-but *rendered* text — code blocks, prose, quotes — was paint-only. A code block offered just a Copy button (whole-block),
-not the drag-select + Ctrl/Cmd+C every editor and browser gives. The selection machinery existed; read-only text simply had
-no input layer wired to it.
-
-**Fix (per-block, code blocks first — agreed scope).**
-- `std/ui`: `code_caret_at(src, …, mx, my)` maps a pixel to a code-point index over LITERAL monospace lines (one source
-  line per row, no wrapping — the read-only counterpart to the wrapped `_ta_caret_at`). `pressed_down(id, rect)` reports the
-  press DOWN-edge (so the anchor drops before the cursor moves — a *first* drag selects, improving on the fields where drag
-  only works once already focused). `_code_input(id, rect, src, cs, lh, pad)` runs one read-only INPUT frame: drag-select,
-  Ctrl/Cmd+A (select block), Ctrl/Cmd+C (copy) — reusing the shared `focus`/`buf`/`caret`/`sel_anchor`/clipboard state, with
-  no text mutation (typed chars are drained so they can't leak to a field focused later in the frame).
-- `std/flare`: `_code_block` runs `_code_input` against LAST frame's solved rect (mono font set so the hit-test matches the
-  glyphs — the same input-now/paint-later split the fields use). The `_CODE` paint id is packed `"lang\nwidget-id"`; the new
-  `_paint_code` unpacks it, and when this block is the focused selection draws a translucent accent highlight per line behind
-  the spans (with a small trailing sliver when a line's `\n` is inside the selection).
-
-**Reach.** The Flare Claude app picks this up for free — it renders every reply through `f.markdown` (flare_chat.em:617),
-so all code blocks in a Claude answer are now selectable with no app change.
-
-**Verified.** `tests/graphics/flare_code_select.em` injects a focused full-line selection and asserts the highlight rect
-(`op:round, alpha:70`) paints behind the glyphs across two frames; graphics suite 20/20, default suite 351/0, the real app
-(`emberc-net-gfx`) compiles clean.
-
-**Deferred (next tier).** Whole-document continuous selection — dragging one range across prose + headings + code together
-(browser-style) — needs a cross-widget selection model + global hit-testing + mixed-font measurement. Per-block is the
-building block; this is a separate campaign. Prose/quote blocks are also not yet individually selectable (same machinery
-would extend to them via a read-only wrapped variant).
+**Resolution.** Wired a read-only input layer onto rendered code blocks, reusing the existing field selection/clipboard machinery: `std/ui.code_caret_at` + `pressed_down` + `_code_input` (drag-select, Ctrl/Cmd+A, Ctrl/Cmd+C; no mutation), and `std/flare._code_block`/`_paint_code` (translucent per-line highlight behind the spans). The Claude app gets it free via `f.markdown`. Regression `tests/graphics/flare_code_select.em`; graphics 20/20. Deferred: whole-document continuous selection across prose+code. (Full write-up in git.)
 
 
-### OFI-083 — `.slice()` on a value-struct array reached through a struct field HANGS (infinite loop) — OPEN (`.clone()` is the working path; slice should match it or error)
-*Opened 2026-06-20 (found dogfooding flare_chat's `Conv.turns: [Turn]` content-block refactor — load/save/switch/delete all sliced the nested transcript out, so any NON-empty store froze the app at startup; an empty store ran fine, which is what made it baffling).*
-
-**Symptom.** `.slice()` on a value-struct array that is reached **through a struct field of an array element**
-infinite-loops the VM (process spins, no output, no crash, no diagnostic — a frozen app). Minimal repro:
-```ember
-struct Turn { role: int  text: string }
-struct Conv { title: string  turns: [Turn] }
-fn mk_turn(r: int, t: string) -> Turn { return Turn { role: r, text: t } }
-fn main() -> int {
-    var convos: [Conv] = []
-    var lt: [Turn] = []
-    lt.append(mk_turn(0, "q"))
-    lt.append(mk_turn(1, "a"))
-    convos.append(Conv { title: "t", turns: lt })
-    var t2 = convos[0].turns.slice(0, convos[0].turns.len())   // HANGS here
-    print("never reached {t2.len()}")
-    return 0
-}
-```
-
-**Boundary (what works vs hangs) — pinned with one-line dogfood programs:**
-- `lt.slice(0, lt.len())` on a **plain local** `[Turn]` — WORKS.
-- `convos[0].msgs.slice(...)` where the field is `[string]` / `[int]` (Copy-element arrays) — WORKS.
-- `convos[0].turns.clone()` — WORKS (OFI-082's intrinsic; deep-copies the value-struct elements correctly).
-- `convos[0].turns.slice(...)` — **HANGS** (only value-struct *elements* AND a *field-of-index* receiver).
-- `var x = convos[0].turns` (move the field out) — clean compile error (sound, as designed).
-
-So it is isolated to the slice path's value-struct **element copy** when the receiver is an array reached
-through a field — the `reads_as_copy` / `own_into_slot` element path that OFI-062/063/082 fixed for index and
-for `.clone()`, but `.slice()` never got; it loops instead of cloning leaf-by-leaf. Both backends hang (VM
-tested via `--emit=run` on plain `emberc` AND `emberc-net-gfx`).
-
-**Severity.** Medium silent-hang footgun: an infinite loop reads as a frozen app — the worst failure UX — and
-`.slice()` is the natural thing to reach for after `.slice()` already worked on `[string]` fields. But
-`.clone()` (just shipped, OFI-082) is the correct deep-copy and works on the exact same receiver, so there is
-a clean path. flare_chat now uses `.clone()` at all five nested-transcript copy sites (load / save-inactive /
-switch / delete-rebuild / delete-reload); the in-place serialize loop reads by index.
-
-**Fix direction.** Make `.slice()` on a value-struct array deep-clone each element via the same
-`own_into_slot` keystone `.clone()`/`OP_INDEX` use (so a sub-range is independent, no aliasing) and ensure the
-element loop terminates. If a sub-range deep-copy is out of scope, make this receiver shape a **loud compile
-error** pointing at `.clone()` — never an infinite loop. Add a Crucible `op_slice_field` seed (value-struct
-`[S]` field × `.slice`) so the class rides all 5 oracles like `op_clone` does.
+### OFI-083 — `.slice()` on a value-struct array reached through a struct field mis-sized its copy — CLOSED 2026-06-20 (sized the copy by the struct's `total_size` via `alloc_struct_array`; both backends, ASan-clean, Crucible 60/60; regression `tests/run/slice_value_struct.em`. The "infinite loop" was the same mis-size. Header reconciled 2026-06-22; body below is the original OPEN filing.)
+*Opened 2026-06-20 (dogfooding flare_chat's `Conv.turns: [Turn]` refactor — a non-empty store froze the app at startup; `.slice()` on a value-struct array reached through a struct field mis-sized the element copy, so the `memcpy` overran the buffer — the "hang" was that corruption). Original OPEN filing (symptom / minimal repro / boundary table / fix direction) condensed 2026-06-22; full detail in git history.*
 
 
 ### OFI-082 — no ergonomic way to copy a value-struct OUT of an array element (wants `clone`) — CLOSED (VM); native value-struct half is a tracked follow-up
@@ -295,28 +278,7 @@ real (the kernel will want a principled visibility story), replace the `_`-conve
 fire. Core + a semantic decision.
 
 
-### OFI-074 — "value moved inside a loop body" is over-conservative for an unconditional consume-then-break — OPEN
-*Opened 2026-06-19 (surfaced by the new Ledger fuzzer while closing OFI-049's leak half).*
-
-The move checker rejects ANY move of an outer binding inside a loop body with *"value moved inside a
-loop body (it would be moved again on the next iteration)"* (`STMT_LOOP`/`STMT_FOR` in `src/check.c`).
-That is right when the move can reach the loop's back-edge — but it also fires when every path that
-moves the value also **breaks/returns** before looping, so there is no "next iteration":
-
-```ember
-loop {
-    if c { fclose(f); break }   // close INSIDE the diverging if — OK (the move is excluded at the join)
-    fclose(f); break            // UNCONDITIONAL close-then-break at the body's TOP LEVEL — REJECTED here
-}
-```
-
-The first close works (the if-branch diverges, so the join discards its move-state); the second trips
-the guard even though the body always breaks after it. This is **pre-existing** (it predates OFI-049 —
-the move check is unchanged) and **minor**: the realistic close-on-break idiom puts the close inside
-`if cond { close; break }`, which works, and Ledger now models that. **Fix (future):** make the
-loop-body move check liveness-aware — flag a moved binding only if the move can reach the loop's
-back-edge (i.e. some non-diverging path from the move loops back), not merely if `moved` is set at body
-end. Low priority; no soundness impact (it is over-strict, never under-strict).
+### OFI-074 — "value moved inside a loop body" was over-conservative for an unconditional consume-then-break — CLOSED 2026-06-20 (the loop-body move guard now tracks moved-state at the actual loop BACK-EDGES — every `continue` + a reachable fall-through, OR-accumulated — so an unconditional consume-then-break no longer trips it; both `loop` and `for`; Ledger 300/300; regressions `loop_move_break.em` + `error_loop_move_recur.em`. Reconciled OPEN→CLOSED + condensed 2026-06-22; full detail in git.)
 
 
 ### OFI-072 — `arr[i].append(x)` silently no-ops (method mutation through an index loses the write) — OPEN
@@ -382,191 +344,17 @@ bind the array to a variable, `remove_last` from that, and assign it back. The n
 falls back to a compile error for the rarer inline value-struct-field chains it doesn't yet emit. Finishing
 both (the `remove_last` RMW and the native inline-chain case) is the remaining slice of this OFI.
 
-### OFI-066 — A free function named like a numeric type was silently unreachable — CLOSED
-*Opened 2026-06-18 (found lifting the `func` ceiling); CLOSED 2026-06-19.*
+### OFI-066 — A free function named like a numeric type (`i32`/`f32`/…) was silently unreachable (parsed as a width conversion) — CLOSED 2026-06-19 (`collect_signature` now rejects a free function whose name is a `numeric_typename`, with a clear message; a local `let int = …` and `x.i32()` methods stay legal; regression `error_fn_named_like_type.em`. Body condensed 2026-06-22; detail in git.)
 
-A call `i32(x)` / `f32(x)` is checked as a numeric **width conversion** (`numeric_typename` at the
-EXPR_CALL site in `src/check.c`) *before* free-function resolution, so a top-level `fn i32(x: int)` was
-permanently shadowed — and **silently** when the argument type-checks as the conversion: `fn i32(x){x+100}`
-then `i32(5)` evaluated to `5`, not `105` (a no-footgun violation, the call quietly meant "convert 5 to
-i32"). A `fn f32()` happened to be reachable only because a 0-arg call doesn't match the 1-arg conversion
-shape — reachability depended on arity, itself a trap.
+### OFI-070 — A struct was capped at 32 methods (`MAX_METHODS` fixed array) — CLOSED 2026-06-18 (`StructInfo.methods` made a `grow_arena_vec` dynamic vector like `fields`; cap removed, no silent wrap. `MAX_METHODS` still bounds the separate `InterfaceInfo` array. Body condensed 2026-06-22; detail in git.)
 
-**Resolution — reserve the names.** `collect_signature` now rejects a FREE function whose name is a
-`numeric_typename` (i8/i16/i32/i64/int/u8/u16/u32/u64/f32/f64) with a clear message ("a function cannot be
-named like a numeric type … rename it"). Width conversions stay unambiguous everywhere, which is the point
-of the rule. **Scope is exactly right:** a *local* `let int = …` resolves before the conversion check (a
-closure call through it already worked — verified `int(5)` → the binding), and a *method* `x.i32()` uses
-member-call syntax that never collides — both remain legal. Nothing in std/examples collided; the lone hit
-was `tests/run/many_functions.em` (a dispatch stress test that names filler functions `f1…f253` and
-incidentally hit `f32`/`f64`, never called) — renamed to `fx32`/`fx64`. Regression:
-`tests/run/error_fn_named_like_type.em`. verify 6/6, graphics 14/14, suite 338/0.
+### OFI-069 — Glyph atlas was ASCII-only; non-ASCII text rendered as `?` — CLOSED 2026-06-18 (per-size atlas now seeds ASCII and grows on demand via `gfx_size_ensure`, decoding the UTF-8 about to be drawn/measured and adding any code point the face has; steady state is a membership scan, so the old speed is kept; `draw_text`/`measure_text` stay in lockstep. Golden `unicode_text.em`. Body condensed 2026-06-22; detail in git.)
 
-### OFI-070 — A struct was capped at 32 methods (fixed array) — CLOSED
-*Opened + CLOSED 2026-06-18 (hit building the Flare widget kit: adding `f.paragraph` tipped the `Flare`
-struct past 32 methods — "too many methods on one struct"; `Ui` was nearly there too.)*
+### OFI-065 — three real Make targets (`net`, `net-graphics`, `test-parallel`) were missing from `.PHONY` — CLOSED 2026-06-18 (added all three to `.PHONY`; robust to a same-named path appearing in the repo root. Body condensed 2026-06-22; detail in git.)
 
-`StructInfo.methods` was a fixed `MethodInfo methods[MAX_METHODS]` (`MAX_METHODS == 32`) in `src/check.c`,
-the last per-struct array the dynamic-vector campaign hadn't converted (`fields`/`locals`/`fns`/`structs`
-already grow). A widget kit legitimately has many methods, so the cap was a real wall. **Fix:** made
-`methods` a `grow_arena_vec`-backed dynamic vector exactly like `fields` (pointer + `methods_cap`, NULL-
-initialised at struct registration, grown one-by-one in `collect_struct_methods`); the cap check is gone,
-so the dimension is lifted, not just raised. (`MAX_METHODS` still bounds the separate `InterfaceInfo`
-method array — far from any real interface.) **Verified:** `make verify` 6/6, graphics 14/14.
+### OFI-064 — assigning a value-struct from a `match` case-binding to an OUTER variable double-freed (the bound borrow aliased the scrutinee's payload instead of copying) — CLOSED 2026-06-18 (clone-on-bind-out, BOTH backends: `consume` now sets `moves_local=2` to clone a value-struct read from a not-owned local — the value-semantics counterpart of the refcounted branch — and native mirrors the `STMT_LET` boxed→`em_s` coercion; Crucible `op_match_bind_out` added + an oracle-staleness rebuild bug fixed; regression `match_bind_clone.em`. Body condensed 2026-06-22; detail in git.)
 
-### OFI-069 — Glyph atlas was ASCII-only; non-ASCII text rendered as `?` — CLOSED
-*Opened + CLOSED 2026-06-18 (found measuring a framebuffer capture while diagnosing the OFI-060 size
-bug — `café résumé` came out `caf? r?sum?`, and the app's own `✕ ↑ … — ·` chrome was already `?`).*
-
-`src/graphics.c` baked one FreeType atlas per physical pixel size over a FIXED range (code points
-32–126). Any code point outside ASCII resolved to raylib's `?` fallback — so the close `×`, send `↑`,
-every `…` placeholder, em dashes, the `·` separator, curly quotes, and any accented character typed or
-pasted into the (now UTF-8-aware, OFI-055) editors were mojibake. **Fix:** the per-size atlas now SEEDS
-with ASCII and grows **on demand** — `gfx_size_ensure` decodes the UTF-8 about to be drawn/measured,
-adds any code point the face has but the atlas lacks (binary-searched sorted set), and rebuilds that
-atlas once; steady state is a pure membership scan (no work, so the old fixed-atlas speed is kept). A
-code point the *face* genuinely lacks (e.g. U+2715 in Inter, or CJK/emoji) is left out so raylib draws
-its `?` rather than a `.notdef` tofu box. Both `draw_text` and `measure_text` route through it, so
-layout and rendering stay in lockstep. **Verified:** framebuffer capture shows `× ↑ … — · café résumé`
-+ curly quotes rendering; new `tests/graphics/unicode_text.em` golden (suite 13/13) exercises the
-decode→grow→measure→draw path with the strings intact; `-Wall -Wextra -Werror`; `make verify` 6/6.
-
-### OFI-065 — three real Make targets were missing from `.PHONY`
-*Opened 2026-06-18 (found while writing the "Building Ember from source" section of THE_EMBER_BOOK —
-auditing every target against `.PHONY` to document them).*
-
-**Symptom.** `net`, `net-graphics` and `test-parallel` have rules but were not listed in the `.PHONY`
-declaration, while every other phony target was. None of them produces a file of its own name, so if a
-file or directory named (e.g.) `net` ever appeared in the repo root, `make net` would consider the
-target up-to-date and silently do nothing — the same footgun `.PHONY` exists to prevent.
-
-**Fix.** Added all three to the `.PHONY` line (grouped next to their siblings: `net net-graphics`
-after `graphics`, `test-parallel` after `test-graphics`). No behavioural change to a clean tree; it
-just makes the targets robust to a same-named path. CLOSED 2026-06-18.
-
-### OFI-064 — assigning a value-struct from a `match` case-binding to an OUTER variable double-frees
-*Opened 2026-06-18 (found by hand while migrating std/ui's window registry off parallel arrays onto a
-`Map<int, Window>` — the read-modify-writeback a window needs crashed on close; bisected with ASan).*
-
-**Symptom.** `match opt { case Some(v) { dst = v } }` — where `v` is a value-struct payload and `dst` is a
-**pre-existing outer variable** (not the match's own binding) — makes `dst` ALIAS the scrutinee's payload
-instead of taking an independent copy. Both `opt` (at its drop) and `dst` (at its drop) then reclaim the same
-struct → double-free. ASan: `heap-use-after-free in drain_pool`/`free_list` at teardown; the freed region was
-allocated by `own_into_slot` (the OFI-062 clone helper), i.e. it IS a clone that ends up with two owners.
-
-**Minimal repro (map-independent — no generics, no map):**
-```
-struct Rect { x: int  y: int  w: int  h: int }
-fn main() -> int {
-    let o: Option<Rect> = Some(Rect { x: 1, y: 2, w: 3, h: 4 })
-    var r = Rect { x: 0, y: 0, w: 0, h: 0 }
-    match o { case Some(v) { r = v } case None {} }   // r aliases o's payload
-    println("r.x={r.x}")                              // prints 1, then double-frees at exit
-    return 0
-}
-```
-Regular VM exits 133 (pool double-drop trap); `build/emberc-asan` reports the UAF.
-
-**Scope — what's affected and what's NOT (bisected):**
-- **CRASHES:** binding a value-struct out of a `case` to an outer owner (`dst = v`). This is the natural shape of
-  a `Map<_, struct>` read-modify-writeback (`var w = …; match m.get(k) { case Some(x) { w = x } }; w.f = …; m.set(k, w)`).
-- **CLEAN:** reading only SCALAR fields inside the case (`got = v.x`) — no struct escapes (so `std/flare`'s
-  `Map<string, Rect>` get path and the per-frame rebuild are safe; this is why flare passes ASan/Crucible).
-- **CLEAN:** `get` itself (`Some(e.val)` out of the map) — it deep-clones correctly (the OFI-062 fix). The gap is
-  the *subsequent* bind-to-outer-var, not the read.
-- **CLEAN:** value type is a scalar (`Option<int>`), or the bound struct is consumed by a move (e.g. immediately
-  passed to `set(k, v)`) rather than dropped.
-
-**Root cause (CONFIRMED via bytecode + drop-trace).** A `match` case binding is correctly registered as a BORROW
-of the scrutinee's payload (`owned = 0`, the enum still drops it). But `consume()` (the move/borrow analyser,
-[src/check.c]) only had a clone path (`moves_local = 2`) for *refcounted / type-param* reads — for a concrete
-value-struct (a move type, not refcounted) read from a NON-owned local it fell through to `moves_local = 0`,
-treating the borrow like a fresh temporary and ALIASING it into the new owner. (An OWNED value-struct local read
-is correctly a move; the bug was only the BORROWED case.)
-
-**Resolution — clone-on-bind-out, BOTH backends, CLOSED 2026-06-18:**
-1. **Checker** ([src/check.c] `consume`): a value-struct read from a NOT-owned `EXPR_IDENT` local now sets
-   `moves_local = 2` (clone via `own_into_slot`) and does NOT mark the binding moved (a borrow stays readable) —
-   the value-semantics counterpart of the refcounted branch right above it. The VM's `OP_INCREF` already clones a
-   value-struct (OFI-062), so the VM was fixed by this one change.
-2. **Native (AST→C)** ([src/cgen_c.c] `STMT_ASSIGN`): the new `moves_local = 2` made the emitter try to assign a
-   boxed `own_into_slot(...)` (a `Value`) into a native `em_s` local → a C type error for NON-FLAT structs (the
-   boxed-payload case; flat structs already round-tripped). Fixed by mirroring the existing `STMT_LET`
-   boxed→`em_s` coercion: when the assignment target is a value-struct local and the RHS is boxed, `em_unbox_struct`
-   it into the `em_s` and drop the box (the unbox is itself an independent copy). This pattern only arose once
-   bind-out was legal, so it was a latent native gap, not a regression.
-3. **Crucible** ([tools/crucible.c]): added `op_match_bind_out` (bind a value-struct out of `Option`/`Map` into an
-   outer var, mutate it, re-read the source) — the shape the generator never emitted, so the corner is now fuzzed.
-4. **Crucible oracle-staleness bug (found + fixed same session):** [tools/crucible.sh] only rebuilt the drop-trace /
-   ASan oracle when `runtime.c`/`vm.c` changed, so after this `check.c` fix it ran a STALE pre-fix oracle and
-   reported 2 FALSE double-drops. The guard now rebuilds when ANY `src/*.c` / `include/*.h` is newer (and `make`
-   runs each invocation to keep the reference compiler current).
-
-**Verified:** minimal repro clean (VM + ASan + drop-trace); regression `tests/native/match_bind_clone.em`
-(clone independence, flat AND non-flat, VM==native); suite 321, graphics 11, Crucible 120 seeds (fresh oracles, new
-op) → 0 findings. Related: OFI-062/063 (the parent class, closed), OFI-051 (native umbrella).
-
-**Status:** the std/ui window-registry migration uses the CLEAN scalar-copy-and-rebuild pattern (validated VM +
-ASan), so the registry is off parallel arrays and correct today; this OFI tracks the underlying codegen fix.
-
-### OFI-007/047/056 follow-up — the narrow-operand class, the MODERN fix — CLOSED 2026-06-18
-After OFI-056, Karl: "I want this fixed once and for all… the proper modern 2026 fix." The class is operand
-MIRROR DRIFT — each opcode's operand layout hand-written in four places (opcode.h / codegen / VM / disassembler)
-that silently desync. **Foundation BUILT + PROVEN:** one operand spec in `include/opcode.h` (operand KINDS, not a
-byte count) drives a shared inline codec (`operand_read`/`operand_write`/`operand_width`); **`make opcheck`**
-(tools/opcheck.{c,sh}) proves the codec round-trips AND that every VM handler consumes exactly the spec width over
-the whole corpus — proven with teeth (injected codec drift and injected handler drift were both caught,
-pinpointed). The modern encoding is **`OPK_IDX` = unsigned LEB128** (1 byte for values < 128, unbounded, can never
-overflow). **First conversion DONE:** `OP_CONST`/`OP_STRING` now carry a LEB128 index; `OP_CONST_LONG`/
-`OP_STRING_LONG` (the OFI-056 stop-gap) are RETIRED. Suite 321 with goldens UNCHANGED (small indices encode
-identically to the old byte), opcheck + ceilings green, a 400-constant function runs VM==native. **Remaining
-(comprehensive):** convert the other index operands (local slots, field/type/enum/function ids, counts) to
-`OPK_IDX`, and make the checker's fixed `MAX_*` tables (locals/functions/structs/fields/variants) grow dynamically
-— each dimension then flips CAPPED→WORKS in `ceilings`. The opcheck gate makes each step a one-line spec edit plus
-its handler, verified at build/test time. See [[ember-opcheck]].
-
-**UPDATE 2026-06-18 — Step A COMPLETE; Step B `local`+`func` DONE.**
-- **Step A (operand conversion) — DONE.** Every remaining index operand is now `OPK_IDX` (local/field/type/
-  enum/function ids, slots, counts, argc, `CALL`/`SPAWN`/`CALL_C`/`NEW_STRUCT`/`NEW_ENUM`/`UNBOX`/`BOX`/…).
-  `emit_fn_index`/`emit_u8_id` now delegate to `emit_idx`; their 16-bit/8-bit overflow guards and the
-  `midx>255` / array-`count>255` guards are deleted (LEB128 can't overflow). The serial `OP_RECV` blocking
-  retry no longer rewinds a hard-coded `ip -= 4` (wrong once operands are variable-width) — it restores the
-  saved opcode position. The `.bytecode`/`.tape` goldens shifted (instruction OFFSETS only; operand VALUES
-  identical — verified by eye) and were re-blessed. Green: `opcheck` (273 corpus programs consume exactly the
-  spec width), `make test` 321, `ceilings`, `crucible` 0.
-- **Step B (dynamic checker tables) — `local` and `func` lifted CAPPED→WORKS.** `Checker.locals` and
-  `Checker.fns` are now arena-grown vectors (no per-function/per-program cap); the move-analysis snapshot
-  buffers (`pre`/`then_moved`/`acc`) and the lambda `saved_locals` snapshot are arena-allocated (also fixes a
-  latent re-entrancy footgun in the former `static saved_locals`). Codegen's six parallel `local_*` arrays are
-  realloc-grown per function and freed at function end. A 300-local function and a 300-function program both
-  compile and run VM==native. The program function table + mono plan already sized by the true total.
-- **Two latent bugs surfaced + fixed** (see OFI-067 and OFI-066).
-
-**FINAL UPDATE 2026-06-18 — CLOSED. All seven dimensions WORKS; the narrow-operand class is gone end-to-end.**
-The realloc-heavy three are done: `EnumInfo.variants`, `Checker.structs`, and `StructInfo.fields` are now
-arena-grown vectors, and the RUNTIME value layout (`StructType`/`StructLayout` in program.h) and the native
-backend (`cgen_c.c`) carry POINTER-sized per-field layout (offset/kind/field_struct) sized to the true field
-count — no `EMBER_MAX_FIELDS`. A single `grow_arena_vec` primitive backs the checker vectors; `StructType`
-arrays are malloc'd in codegen and freed in `compiled_program_free`; `StructLayout` arrays are arena-owned
-(reclaimed at `arena_free`, after codegen copies them). The cached-`StructInfo*` hazard is a non-issue: the
-structs vector grows ONLY in pass 1a, before any long-lived pointer is taken; monomorphized instances live in
-`StructLayout`, not `c->structs`. The native backend's own `CGC_MAX_SCOPE 512` (a VM/native inconsistency
-above 512 locals) was lifted too — its scope table is now realloc-grown. **Verified to N=2000** across every
-dimension: `make ceilings` ✓ (all WORKS, default probe bumped 300→600 so a ≤512 fixed-buffer regression is
-caught by the standard gate), `make crucible` 0 faults, `make opcheck` ✓, `make test` 321. Crucible earned its
-keep mid-campaign: making variants dynamic, I wrote the match coverage bitmap as `arena_alloc` and assumed it
-was zeroed (it is NOT — arena is a bump allocator), so `covered[]` read garbage → spurious "duplicate case for
-a variant" on `Option`/`Map` programs; Crucible's ASan oracle flagged it within seconds (fix: explicit memset,
-same "never trust uninitialized memory" lesson as OFI-067). Caps that REMAIN are deliberate guards on DIFFERENT
-spaces (globals, enum/interface/generic-instance/array-type counts, params, methods) — clean, never silent.
-
-*Follow-up 2026-06-18:* the `OP_RECV` blocking-retry fix from this campaign (capture `recv_op` instead of a
-hard-coded `ip -= 4`) left `recv_op` UNUSED under `-DEMBER_PARALLEL` (the parallel path parks on a condvar; only
-the serial path rewinds), so `make parallel` (which is `-Werror`) failed to build — a regression the serial
-`make verify` never saw. Caught while building `emberc-net-gfx` for the OFI-055 UI work; fixed by guarding the
-declaration `#if !EMBER_PARALLEL`. Closed the tooling gap too: `tools/verify.sh` / `make verify` now include a
-**`parallel` gate** (`make parallel`, a full `-Werror` compile with `-DEMBER_PARALLEL=1`, no extra deps), so an
-`#if`-guarded unused/typo in a parallel-only path can't slip past the standard check again.
+### OFI-007/047/056 follow-up — the narrow-operand class (operand MIRROR DRIFT — each opcode's layout hand-written in opcode.h/codegen/VM/disassembler) — CLOSED 2026-06-18 (one operand spec in `include/opcode.h` drives a shared codec, gated by `make opcheck` which proves every VM handler consumes exactly the spec width; all index operands converted to LEB128 `OPK_IDX` and the `OP_*_LONG` stop-gaps retired; the checker's `MAX_*` tables (locals/funcs/structs/fields/variants) + native per-field layout made dynamically sized — all seven dimensions verified WORKS to N=2000; `make verify` gained a `parallel` `-Werror` gate. Body condensed 2026-06-22; detail in git.)
 
 ### OFI-068 — graphics render goldens are freetype-version-sensitive (text metrics shift ±1px)
 *Opened 2026-06-18 (surfaced installing raylib/freetype to finish the OFI-055 UI de-dup).*
@@ -604,154 +392,13 @@ whose name is a width-type keyword (fail fast at `collect_signature`), or (b) le
 shadow the conversion at the call site. (a) is simpler and matches "a clear error beats a surprise." Worked
 around in the test tool by naming generated functions `fn_$i` (no type-name collisions). Not on any path.
 
-### OFI-063 — `Map<K, [T]>` (a map whose value is an array) returns a corrupted/empty array
-*Opened 2026-06-18 — the FIRST find of Crucible, the new memory-ownership fuzzer (tools/crucible).*
+### OFI-063 — `Map<K, [T]>` (a map whose value is an array) returned a corrupted/empty array (arrays are unique-owner too, so sharing one through erasure double-freed it) — CLOSED 2026-06-18 (unified deep-clone `own_into_slot`/`clone_owned_else_borrow` recursing through structs AND arrays, wired at `OP_INCREF`/`OP_INDEX` (VM) + `em_index`/`em_field_owned` (native); the native generic move/alias path now `own_into_slot`s instead of a phantom `OBJ_RETAIN`. Regressions `map_array_value.em` + `generic_aggregates.em`, VM==native, Crucible 0. The first find of the Crucible fuzzer. Body condensed 2026-06-22; detail in git.)
 
-A `Map<string, [T]>` — a map whose VALUE is an array (a "map of lists", a common shape) — returns a
-**corrupted/empty array** from `get`: reading any element of the retrieved array faults with `runtime error:
-array index out of bounds` even though the array was stored non-empty. Reproduced minimally (Crucible shrank it
-to one op): `var m = Map<string,[int]>{…}; m.set("k", [1,2,3]); match m.get("k") { case Some(v) { v[0] } … }` →
-bounds fault. **NOT `[S]`-specific — `[int]` triggers it too**, so it is the *array-as-erased-generic-value*
-path in the Map, not the struct issue of OFI-062 (arrays are refcounted, so this is a different mechanism —
-likely the boxed `[T]` value isn't retained/owned correctly across the Map's store→get, leaving the caller a
-view whose length reads as 0, or a freed buffer). On the **VM** (canonical), so higher priority than OFI-062's
-native gap. **Workaround:** parallel arrays, or wrap the list in a one-field struct value. Found automatically by
-[Crucible](../tools/crucible.sh) within minutes of it existing — the kind of cross-feature combination we never
-hand-tested. Baselined in `tools/crucible-known.txt` so it's tracked, not re-reported.
+### OFI-062 — Value-structs through erased generics double-freed (a value-struct is a unique owner, but erased generics emit `OP_INCREF`/`OBJ_RETAIN` as if it were a refcounted shareable) — CLOSED 2026-06-18 (both backends; the runtime retain-into-new-owner op now CLONES a value-struct — VM `OP_INCREF`/`OP_INDEX`, native via `own_into_slot` replacing the bare `OBJ_RETAIN`; `Map<K,struct>` works end-to-end and std/flare's rect store migrated back off its parallel-arrays workaround. Regressions `map_struct_value.em` + `generic_aggregates.em`, VM==native, Crucible 0. Body condensed 2026-06-22; detail in git.)
 
-**ROOT CAUSE + VM FIX 2026-06-18:** same class as OFI-062 — **arrays are unique-owner too** (no `OBJ_RELEASE`
-in their drop), so sharing one through erasure (`INCREF`'d into `[a,b]`, read out of a Map) double-frees it
-(`dup<T>([1,2],[3,4])` double-frees at runtime.c:212; the Map case manifested as a `drop_value` stack-overflow
-because the resize aliased it into a cycle). **Resolution (unified with OFI-062):** a single recursive runtime
-helper — `own_into_slot` (own a value: clone a unique-owner aggregate, retain a refcounted one) and
-`clone_owned_else_borrow` (clone an aggregate, else borrow) — DEEP-CLONES **structs AND arrays** (recursing through
-nested aggregate fields/elements), replacing the struct-only patch. Wired at `OP_INCREF` / `OP_INDEX` (VM) and
-`em_index` / `em_field_owned` (native). **Verified:** `Map<K,[int]>`, `Map<K,[S]>`, arrays-through-generics all
-correct + drop-trace clean on the VM; suite **320 green**; regression `tests/run/map_array_value.em`; **Crucible
-confirms the VM `vm-fault` finding is gone.**
+### OFI-056 — A function's constant pool was a single-byte index (max 256 constants/function) — CLOSED 2026-06-18 (new `OP_CONST_LONG`/`OP_STRING_LONG` 3-byte index emitted only past 255, so the common case stays one byte and no golden shifts; cap 256→16,777,215, beyond is a clean error. Also added `tools/ceilings.sh`/`make ceilings` to gate the whole narrow-operand class — which surfaced + guarded silent >64 field/variant truncations. Later superseded by the OFI-007/047/056 LEB128 rework. Body condensed 2026-06-22; detail in git.)
 
-**NATIVE FIX + FULL CLOSE 2026-06-18:** the native remainder turned out to be the SAME single root cause as the
-array divergence — the native codegen's *generic move/alias* path (`emit_expr_raw`, `moves_local == 2`) emitted a
-bare `OBJ_RETAIN` to record an extra owner, which on a unique-owner aggregate is a meaningless no-op → the aliased
-array/struct dangled (returned the wrong length) or was double-freed (the `Map` resize). **One-line fix:** that
-site now emits `own_into_slot(&g_em, …)` — the SAME runtime helper the VM uses — so the alias DEEP-CLONES an
-aggregate instead of bumping a phantom refcount. This single change fixed **both** native symptoms at once: the
-`Map<_, aggregate>` crash AND the `diff:VM-ne-native` array-length divergence (the feared `em_enum_field` consume
-path never needed touching — the alias was upstream of it). **Verified:** comprehensive native differential
-`tests/native/generic_aggregates.em` (struct + array + `Map<_,struct>` + `Map<_,[int]>` through generics, VM==native
-byte-for-byte); suite **320 green**; graphics **11 green**; **Crucible 120 seeds → 120 clean, 0 findings** (both
-native signatures gone — baseline `tools/crucible-known.txt` is now EMPTY).
-
-### OFI-062 — Value-structs through erased generics double-free — CLOSED (both backends)
-*Opened 2026-06-18 (found by ASan while building std/flare's last-frame rect store — Karl's "it crashed on close").*
-*VM half resolved + Karl's "we have to address this" call, same day.*
-
-**Root cause (deeper than the symptom):** a value-STRUCT is a **unique owner** — not refcounted; its drop reclaims
-unconditionally (no `OBJ_RELEASE` gate, unlike strings/enums/arrays). Erased generics, though, assume a `T` value
-is a refcounted *shareable* (the codegen emits `OP_INCREF` / `OBJ_RETAIN` to record an extra owner). So whenever a
-value-struct is **shared into an erased-`T` slot** — built into a `[T]` / `Map<_, T>`, or read back out — two
-owners each reclaim the *same* struct → double-free (ASan: `heap-use-after-free in drain_pool` at `vm_destroy`).
-`Map<_, int/string/bool>`, plain `[LNode]` struct arrays, and `move`-param generics are all CLEAN — only the
-**borrow-then-share** of a value-struct through erasure trips it. Bisected precisely: borrowed value-struct into
-`[T]` and `Map<_, struct>` double-drop; `T=string` (refcounted) and `T=int` (scalar) are fine. Same family as
-OFI-058. **The fix is RUNTIME, not codegen** — an erased body can't tell `T` is a struct, so the "retain into a
-new owner" op must, at runtime, **CLONE a value-struct** (give the new owner an independent copy + retain its
-boxed leaves) rather than bump a meaningless refcount.
-
-**VM — FIXED (the canonical backend):** `OP_INCREF` and `OP_INDEX` now clone a value-struct instead of retaining
-it (guarded to `AEK_BOXED` elements — a missing guard briefly broke scalar arrays, caught by the suite). So
-`Map<K, struct>` (a table of records) and generic value-struct aggregates work end-to-end — drop-trace clean
-(`-DEMBER_DROP_TRACE`), ASan clean, full suite **319 green**. Tests: `tests/run/map_struct_value.em` (VM golden,
-incl. a struct with a string field + overwrite) and `tests/native/generic_struct_value.em` (VM↔native differential
-for the array path). **Use the VM (the default) for `Map<K, struct>` today.**
-
-**Native (AST→C) — FIXED 2026-06-18 (full close).** First `em_index` + `em_field_owned` got the same clone (generic
-**arrays** of value-structs then matched the VM). The remaining `Map<_, struct>` native crash + a `diff:VM-ne-native`
-array divergence Crucible surfaced both traced to ONE earlier site than the suspected `em_enum_field` consume: the
-generic move/alias path in `emit_expr_raw` (`moves_local == 2`) emitted a bare `OBJ_RETAIN` to mark an extra owner.
-On a unique-owner aggregate that retain is a no-op, so the alias dangled/double-freed. Replacing it with
-`own_into_slot(&g_em, …)` (the VM's own helper — clone an aggregate, retain a refcounted) fixed **both** symptoms in
-one change; the `em_enum_field` borrow path never needed touching. **Verified:** `tests/native/generic_aggregates.em`
-(struct + array + `Map<_,struct>` + `Map<_,[int]>`, VM==native byte-for-byte); suite 320; graphics 11; **Crucible 120
-seeds → 0 findings** (both native signatures gone; baseline now empty). Related: OFI-058 (closed), OFI-042 (struct
-Map *keys* — closed 2026-06-18), OFI-051 (native umbrella).
-
-**Consumer migrated back 2026-06-18:** the original trigger — std/flare's last-frame rect store — has been returned
-from its parallel-arrays workaround (`lid`/`lx`/`ly`/`lw`/`lh`) to the intended `Map<string, Rect>` (a new `Rect`
-struct value). `finish()` rebuilds the map each frame and drops the prior struct-valued map (the exact crash-on-close
-path), `_btn()` hit-tests via `rects.get(id) -> Some(Rect)`; the `_find` linear scan is gone. Suite 320, graphics 11
-(flare golden byte-identical), `tools/crucible.sh 60` → 0 findings.
-
-### OFI-056 — A function's constant pool is a single-byte index (max 256 constants/function)
-*Opened 2026-06-17 (hit while building the Claude-desktop settings panel — a large `main()`).*
-
-`OP_CONSTANT` (and friends) carry a **one-byte** operand into the per-function constant pool, so a
-single function with **more than 256 distinct constants** (string + numeric literals) fails to compile
-with `too many constants in one function`. A genuinely large UI function trips it easily — the desktop
-app's `main()` did once the themed/zoom/settings/render code accumulated (~300 literals). It is the same
-class of limit as OFI-007/OFI-047 (single-byte ids); the textbook fix is a companion **`OP_CONSTANT_LONG`**
-(3-byte index) the compiler emits when the pool exceeds 255, exactly as clox does.
-
-**RESOLUTION — CLOSED 2026-06-18 (fixed the instance AND the class).**
-1. **The fix (constants + strings).** New opcodes `OP_CONST_LONG` / `OP_STRING_LONG` carry a 3-byte
-   (big-endian) pool index, emitted ONLY when the index exceeds 255 (a shared `emit_pool_op` in
-   [src/codegen.c] picks short vs long), so the common case stays one byte and no existing bytecode or
-   golden shifts. VM decodes the wide index ([src/vm.c], string-intern body shared via `push_string_const`);
-   the disassembler ([src/chunk.c]) prints them; the threaded dispatch table auto-gains the slots from the
-   X-macro. The native (AST→C) backend emits literals directly, so it is pool-independent and unaffected.
-   Caps lift from 256 to 16,777,215 per function; beyond that is still a clean error, not a wrap. Verified:
-   a 300-constant and a 300-string function compile and run identically on VM and native.
-2. **The class — `tools/ceilings.sh` (`make ceilings`).** Crucible's sibling for the NARROW-OPERAND class
-   (the silent-wrap family of OFI-007/047/056). It stress-tests every compiler dimension past the 256
-   boundary and asserts the only safe outcomes — WORKS (compiles, runs, VM==native) or CAPPED (clean
-   error) — never a silent wrap/crash/divergence; baseline in `tools/ceilings-known.txt` gates regressions.
-   It immediately found two MORE silent-truncation diagnostics: a struct with >64 fields and an enum with
-   >64 variants were dropping the overflow and surfacing a misleading "no such field" / "undefined
-   variable". Both now emit an honest "too many fields/variants in one … (max 64)" guard ([src/check.c]).
-3. **Findings surfaced (clean caps, not bugs — left as guarded ceilings):** locals 256, functions+methods
-   256 (`MAX_FNS`), struct types 256 (`MAX_STRUCTS`), fields 64, variants 64. NOTE the `MAX_FNS=256` vs
-   OFI-007's 16-bit `OP_CALL` index: the bytecode can address 65535 functions but the checker's table caps
-   at 256, so 256 is the real function ceiling — worth raising (a capacity call) when a program nears it.
-
-### OFI-055 — Code-point string helpers duplicated + text_field h-scroll — CLOSED 2026-06-18
-*Opened 2026-06-17 (while building proper text-input editing for the GUI / std/ui text field).*
-
-Editable text needs **code-point-indexed** string ops — insert/delete at a caret, the prefix up to the
-caret, count. The caret helpers (`cp_count`/`cp_prefix`/`cp_insert`/`cp_delete`) existed **twice** —
-hand-rolled in `public/claude-desktop/gui.em` and again in `std/ui.em` — with no canonical home,
-and `std/string`'s header wrongly claimed it was "byte-wise ASCII (no Unicode)".
-
-**STDLIB HOME — ADDED 2026-06-18 (the correctness half).** The premise was half-stale: `s.chars()` is
-ALREADY UTF-8 decoded (one element per code point, invalid byte → U+FFFD) and `s.char_count()` is the
-code-point count, so `substring`/`index_of` were already code-point-correct — only `s.len()` is bytes.
-Added the canonical `cp_*` family to `std/string.em` — `cp_count`, `cp_at`, `cp_slice`, `cp_prefix`,
-`cp_insert`, `cp_delete` — indexing by code point, with clamped (never-trapping) indices; and corrected
-the misleading header. **Verified exhaustively** by a new differential oracle, `tools/string-diff.py`
-(`make string-diff`): it fuzzes random multi-byte UTF-8 strings (ASCII/Latin-1/CJK/emoji/combining) +
-in- and out-of-range indices through `std/string` and diffs every result against CPython's native
-(ground-truth) Unicode semantics — 10k+ cases across seeds, ALL MATCH. Smoke regression
-`tests/run/string_codepoints.em` (+ `tests/native/`, VM==native); `make verify` green (331).
-
-**UI DE-DUP — DONE 2026-06-18.** Installed the graphics toolchain (raylib 5.5.0 + freetype + pkg-config
-via brew), built `emberc-gfx` / `emberc-net-gfx`, then migrated both files (in a parallel workflow, each
-agent compile-verifying its own edit): `std/ui.em` (deleted its local `cp_count`/`cp_prefix`/`cp_insert`/
-`cp_delete`, +`import "std/string" as str`, rewired 10 call sites) and `public/claude-desktop/gui.em`
-(deleted `cp_count`/`cp_prefix`/`str_insert`/`str_delete` — its first-ever import — rewired 14 sites). The
-graphics-coupled `cp_caret_from_x`/`caret_from_x` stay local but now call `str.cp_count`/`str.cp_prefix`.
-**Behaviour-preserving** (the local copies were logically identical to `std/string`'s): `tests/graphics/
-flare.em`'s rendered draw-list is byte-for-byte identical before and after (md5 unchanged); all four
-`std/ui` examples (09_ui/10_windows/11_menus/17_flare) + `gui.em` compile clean; graphics suite 11/11;
-`make verify` green (incl. the new parallel gate). The string helpers themselves are UTF-8-verified by
-`tools/string-diff.py`.
-
-**TEXT_FIELD H-SCROLL — DONE 2026-06-18 (the last thread).** Ported `gui.em`'s proven input-bar scroll into
-`std/ui`'s `text_field`: a new `Ui.text_off` (pixels) shifts the text left so the caret's pixel-x stays inside
-the field, the text is `clip_push`/`clip_pop`-masked to the field so a wide value can't overflow, and clicks
-map through the offset (reset on focusing a different field). Same formula as the daily-driven app input bar.
-**Verified** by a deterministic render test `tests/graphics/text_field.em` (input injected like `scroll.em`):
-unfocused → text at the field's left, clipped; focused with the caret at the end → text drawn at x=-234
-(scrolled 250px) with the caret rect pinned to the field's right edge (x=240), and `clip_push`/`clip_pop` in
-the tape masking the overflow. Graphics suite 12/12; `make verify` green. OFI-055 is fully resolved.
+### OFI-055 — Code-point string helpers were duplicated (gui.em + std/ui) + `text_field` lacked h-scroll — CLOSED 2026-06-18 (canonical `cp_*` family added to `std/string`, UTF-8-verified against CPython by `tools/string-diff.py` over 10k+ fuzzed cases; std/ui + gui.em de-duped to it render-identical (flare draw-list md5 unchanged); `text_field` gained `clip`-masked horizontal scroll that keeps the caret in view. Regressions `string_codepoints.em` + `text_field.em`. Body condensed 2026-06-22; detail in git.)
 
 ### OFI-051 — Native backend (AST→C): M1–M5 complete (umbrella for standing native limitations)
 *Opened 2026-06-16 (while building the native backend — step 1 of the OS-capability ladder).*
@@ -939,110 +586,9 @@ dispatch loop re-tests `tracer != NULL` every instruction (predictable branch; t
 would remove it). **Premature to do now** — refactor risk with no measurable gain; revisit if compile
 times grow.
 
-### OFI-049 — `Ptr` C handles have no lifetime tracking — FULLY CLOSED 2026-06-19 (double-close 2026-06-18, leak half 2026-06-19)
-*Opened 2026-06-16 (whole-codebase review, FFI safety — review item M9).*
+### OFI-049 — `Ptr` C handles had no lifetime tracking (double-close / leak) — FULLY CLOSED 2026-06-19 (`Ptr` is now a LINEAR type — move-only AND must-consume: an owned handle un-closed on any path is a compile error. Checker-only, both backends: `is_move_type(TY_PTR)` + extern `move`-param gate (double-close half, 2026-06-18); then a `consumed` AND-merge dual to `moved`, a shared leak scan at every exit (return/break/continue/`?`/discard/`var`-reassign), the loop-exit merge for the close-on-break idiom, an erasure-proof type-formation ban (no `[Ptr]`/`Option<Ptr>`/`Map<_,Ptr>`/struct field — the root of OFI-122), a borrow-launder guard, and a reachability flag. New **Ledger** fuzzer 600/0 (0 unsound, 0 over-strict); ASan-clean, VM==native. The N-handle `defer`/`with` cleanup is deferred. Closes the whole-codebase FFI-safety line M9. Body condensed 2026-06-22; full detail in git + docs/design/ptr-linearity.md.)
 
-An opaque `Ptr` (a C handle such as `FILE*` from `fopen`) round-trips through Ember as a value with no
-ownership tracking. Closing it twice — `fclose(f); fclose(f)` — passes the same stale-but-non-NULL
-pointer to libc a second time → double-free / undefined behaviour; never closing it leaks. The review's
-M6 fix made *NULL* handles safe (fread/fwrite/fclose now guard `f == NULL`, so a failed `fopen` no
-longer segfaults), but use-after-close of a valid handle is still unguarded. The boundary is otherwise
-sound: `Ptr` is a distinct opaque type (TY_PTR) with no int→Ptr coercion, so a program can't *fabricate*
-a pointer, and Ember strings are NUL-terminated so the `strncmp`/`strlen` wrappers can't over-read.
-**Fix:** make `Ptr` a linear/move type so a closing call consumes the handle (`fn fclose(move f: Ptr)`),
-turning any reuse into a compile error — the same ownership machinery structs already use. Sibling of
-the C-owned-returned-memory gap (**OFI-043**). **FFI safety — future.**
-
-*Investigated 2026-06-17 and DEFERRED:* no sound small increment exists — classifying `Ptr` move-only
-ALONE doesn't catch double-close (extern calls skip `consume`), and a `Ptr` must not get a scope-exit
-destructor. The minimal sound fix is a coordinated multi-edit change.
-
-**DOUBLE-CLOSE HALF — CLOSED 2026-06-18** (designed via an 11-agent investigate→design→adversarially-verify
-workflow). A **checker-only** change in `src/check.c` (no codegen/VM/runtime/cextern edits — both backends
-honour `moves_local` identically, so a compile-time fix covers both): (1) `is_move_type` returns 1 for
-`TY_PTR` (the engine — a Ptr is now move-tracked); (2) the extern-param gate permits `move` ONLY on a
-`Ptr` param (`q == OWN_MOVE && pt != TY_PTR` is rejected), with an honest error message; (3) the consume
-phase consumes a `move` arg even on an extern call (the rest of an extern call still borrows — so
-`fread`/`fwrite` keep using the handle); (4) **the trap the original 4-step plan omitted** — exclude
-`TY_PTR` from `drop_at_scope_end` in `drop_locals`, so a `Ptr` local gets NO scope-exit `OP_DROP` (it has
-no Ember destructor); (5) mirror that in the param `release_at_exit`; plus `is_owning_temp` returns 0 for
-a `Ptr` (a fresh handle temp is never caller-dropped — no spurious `OP_DROP_UNDER`). `fclose` is
-redeclared `move f: Ptr` across the corpus (examples/16_ffi.em, tests/run/ffi_pointers.em,
-ffi_null_handle.em, both docs). **Result:** `let a = fclose(f)  let b = fclose(f)` is now a compile error
-("use of `f` after it was moved", with a note at the first close) instead of a C double-free. **Verified:**
-`tests/run/error_ptr_double_close.em` (the error), `tests/run/ptr_move.em` + `tests/native/` (borrow×2 →
-close → var-revive → close, VM==native, ASan-clean), all 7 FFI tests + `examples/16_ffi.em` still green,
-`make verify` all gates (test 329, crucible 0 — the general move machinery is intact). **Side effects
-(acceptable hardening, no current test exercises them):** a `Ptr` can no longer be a `Copy`-bounded generic
-arg, and a borrowed `f: Ptr` param can't be returned from a borrow (take it `move`).
-
-**LEAK HALF — CLOSED 2026-06-19** (designed via a 5-agent adversarial-verification workflow that found
-5 soundness holes + 2 false positives in the first draft, all verified against the live compiler; see
-`docs/design/ptr-linearity.md`). A `Ptr` is now a true **LINEAR** type — move-only (affine, above) PLUS
-**must-consume**: an *owned* handle must be closed/returned/moved-out on **every** control-flow path
-before it leaves scope, or it is a compile error. **Checker-only** (`src/check.c`); both backends honour
-it. The machinery:
-
-1. **`consumed` — the AND-merge dual of `moved`.** The existing move analysis is OR (moved on *some*
-   path — affine); linearity needs AND (consumed on *every* path). A new `consumed` flag is maintained
-   side-by-side with `moved` at every join (`snapshot/restore/merge_consumed`), inverting OR→AND while
-   mirroring the four-way divergence handling exactly. Checking `moved` at scope exit would be UNSOUND
-   (it passes `if c { fclose(f) }` while the else-path leaks).
-2. **A shared leak scan at every exit** (`report_unconsumed_ptrs`, decl-independent so it also covers
-   `move f: Ptr` params): wired into `return` (both shapes, after consume — no carve-out), `break`,
-   `continue`, `?` (the hidden early-return), a discarded `Ptr` statement temp, `var` reassignment of an
-   un-closed handle, and folded into `drop_locals` for block/arm/fn-end fall-through.
-3. **The loop-exit merge** (the textbook close-on-break read loop): an infinite `loop` exits only via
-   `break`, so an outer handle is consumed-after-the-loop iff consumed on every break path (AND over
-   the break accumulators). Without it, `loop { …; if eof { fclose(f); break } }` falsely read as a leak.
-4. **The erasure-proof type-formation ban** (the hole the value-site guards missed): a generic body is
-   checked ONCE with its parameter abstract, never re-checked at `T = Ptr` — and `is_refcounted(TY_PTR)`
-   is false, so `Map<_,Ptr>.set` never even calls `consume`. So `Ptr` is forbidden as an **array/slice
-   element, struct/enum field, channel element, or generic type argument** — rejected at type formation
-   (annotation, field collection, variant construction, generic-arg binding) with a defensive `TY_ERROR`
-   floor in `intern_array`/`intern_channel`/`intern_generic`. This makes `[Ptr]`, `Option<Ptr>`,
-   `Map<_,Ptr>` unconstructable and subsumes the whole store-into-aggregate bypass.
-5. **The borrow-launder guard** (inside `consume`'s `!owned` branch, returning 0): a borrowed `Ptr`
-   can't be closed/transferred and `let g = f` can't mint a spurious owned obligation. One placement
-   covers every consuming position; also catches `mut f: Ptr`.
-6. **A reachability flag** (`Checker.unreachable`) so a leak is never reported on statically-dead code
-   (a trailing `return 0` after an `if` whose both branches return) — a false positive Ledger found.
-
-**Decision — hard error, not a warning** (consistent with the double-close half; a leak the LLM ignores
-closes nothing — the compiler IS the verification loop). The N-handle error-cleanup fan-out wants a
-`defer`/`with` scoped-close, but the corpus has zero multi-handle FFI code, so that is **deferred** (a
-future ergonomic widening; the null-safe single-close idiom covers today). **Verified:** suite 352
-(`tests/run/ptr_linear.em` + `tests/native/` VM==native + 7 negative goldens `error_ptr_*`), the new
-**Ledger** fuzzer (`make ledger`, 600 seeds → 0 unsound, 0 over-strict; see [[ember-ledger]]), all of
-`make verify`'s gates green (opcheck/ceilings/crucible), ASan-clean. The whole-codebase FFI-safety line
-(M9) is now closed.
-
-### OFI-046 — `?` (try) early-return doesn't check `ensures` postconditions — CLOSED 2026-06-18
-*Opened 2026-06-15 (whole-codebase review, while fixing the `?` owning-locals leak — review item H1); CLOSED 2026-06-18.*
-
-The `?` operator's failure path (return the `Err`/`None` early) emitted a **bare `OP_RETURN`**, skipping
-`emit_ensures_checks` — so a `?`-propagated exit was NOT held to the function's postcondition (the
-owning-locals leak half was already fixed). `emit_ensures_checks` binds `result` at slot `phys_count`
-(just above the locals), which is the return value's position only when the stack is *canonical* — but a
-mid-expression `?` (e.g. the 2nd in `Ok(a()? + b()?)`) leaves abandoned temporaries below the value.
-
-**RESOLUTION — no stack-depth tracker needed.** On the `?` failure path the value `v` is the stack TOP;
-park it into the `result` slot with one `OP_SET_LOCAL phys_count`, clobbering a now-dead temporary (the
-frame is about to reset), then call `emit_ensures_checks` — which binds/reads `result` at exactly that
-slot. `v` stays on top for `OP_RETURN`. On the canonical path (no temporaries) the slot IS the top, so it
-is a harmless self-copy; the same code serves both. Guarded by `ensures_count > 0 && !release &&
-ret_struct_id < 0` (a `?`-using fn returns Result/Option, an enum, so the multi-slot return case never
-coincides). **Verified:** `tests/run/error_ensures_try.em` — a contract violated on the `?` exit now
-fires (trace shows `f` executing `CONTRACT_CHECK` + a `contract_violation` event on that path, neither of
-which happened before); `tests/run/ensures_try.em` (+ `tests/native/`) — a contract that reads `result`'s
-payload on BOTH the Ok exit and the `?` exit holds (`result` is bound to the actual `Err("neg")` value,
-proving the slot is correct), VM==native, ASan-clean; suite 326, opcheck/ceilings/crucible green. The
-native backend release-elides contracts (VM-only feature), so no `cgen_c` change was needed.
-
-**Residual (separate, pre-existing — NOT part of this OFI):** owning *temporaries* abandoned below `v` on
-any `?` early return still leak (the `OP_SET_LOCAL` clobbers one slot but doesn't drop its object). Bounded
-and rare (a mid-expression `?` with a live owning temp below it); would want a small stack-depth model to
-drop them — deferred until it bites.
+### OFI-046 — `?` (try) early-return didn't check `ensures` postconditions (it emitted a bare `OP_RETURN`) — CLOSED 2026-06-18 (on the `?` failure path, park the propagated value into the `result` slot with one `OP_SET_LOCAL phys_count`, then run `emit_ensures_checks` — no stack-depth tracker needed; guarded so the multi-slot-return case never coincides. Regressions `error_ensures_try.em` + `ensures_try.em`, VM==native. Residual (separate): owning temporaries abandoned below the value on a mid-expression `?` still leak. Body condensed 2026-06-22; detail in git.)
 
 ### OFI-044 — Record-replay doesn't capture C side effects on a borrowed `mut` buffer
 *Opened 2026-06-15 (surfaced running `--emit=replay` on the new FFI showcase — examples/16_ffi.em).*
@@ -1089,27 +635,7 @@ needs a length channel since there's no NUL terminator; (2) the opt-in "Ember ad
 pointer" form for true ownership-transfer APIs. Kept Open for those two; the common `char*`-returning
 case is done.
 
-### OFI-042 — A move-type struct can't be a `Map` key — CLOSED 2026-06-18 (no `Clone` interface needed)
-*Opened 2026-06-15 (surfaced finishing the `Map<K,V>` campaign — Stage D); CLOSED 2026-06-18.*
-
-`Map`/`Set` were `<K: Hash + Eq + Copy, V>` — the `Copy` bound excluded struct keys (a struct is a
-unique move type; aliasing one would double-free). The original plan was a `Clone` interface
-(`fn clone(self) -> Self`). **It wasn't needed.** Ember already has sound *structural deep-clone* in
-the runtime — `own_into_slot` / `clone_owned_else_borrow`, built for OFI-062/063 and crucible-verified,
-recursing through struct/array fields. When the map stores a borrowed generic key (`MapEntry { key:
-key }`, and the `append` on rehash) that clone path already fires.
-
-**RESOLUTION:** drop the `Copy` bound — `Map<K: Hash + Eq, V>` / `Set<K: Hash + Eq>` (std/map.em,
-std/set.em). A built-in key copies cheaply; a move-type **struct key is deep-cloned structurally on
-store**, so the map owns its copy and the caller keeps theirs (value-semantic keys, no `clone()`
-ceremony — the LLM-first least-surprise win). The `Hash + Eq` bound is still enforced (a struct
-lacking them is a clean error). Verified empirically before and after: int-field and string-field
-struct keys through inserts/resizes/updates give correct results **VM == native**, **ASan-clean**
-(refcount-balanced, no double-free), and `make crucible` stays 0. Regression: `tests/run/struct_keys.em`
-(golden) + `tests/native/struct_keys.em` (differential). **No new language surface** — the language
-already dictated the answer (Karl: "use Copy only if it makes sense; the language must dictate the
-requirements"). A general user-facing `Clone` (explicit struct duplication outside collections) is
-NOT added — defer until a real dogfood need appears.
+### OFI-042 — A move-type struct couldn't be a `Map` key (the `Copy` key bound excluded it) — CLOSED 2026-06-18 (dropped the `Copy` bound → `Map<K: Hash + Eq, V>`; a struct key is deep-cloned structurally on store via the existing `own_into_slot`/`clone_owned_else_borrow`, so the map owns its copy — value-semantic keys, no `Clone` interface or `clone()` ceremony. Regression `struct_keys.em`, VM==native, ASan-clean, Crucible 0. Body condensed 2026-06-22; detail in git.)
 
 ### OFI-020 — Channel throughput is mutex-bound: high-frequency tiny messages don't parallelize
 *Opened 2026-06-12 (parallel benchmark `pipe` section).*
@@ -1251,7 +777,7 @@ is the (sound, leak-until-exit) generic-body case.
 
 ## Closed
 
-### OFI-081 — String-interpolation expressions carried line-1 positions (LSP semantic tokens painted comments) — CLOSED
+### OFI-124 — String-interpolation expressions carried line-1 positions (LSP semantic tokens painted comments) — CLOSED (renumbered from a duplicate OFI-081)
 *Opened + CLOSED 2026-06-20 (Karl: VS Code syntax colouring patchy + colours inside comments; Zed solid).*
 
 **Symptom.** In VS Code, `examples/05_concurrency.em` showed stray colours, including *inside comments*.
@@ -1324,7 +850,7 @@ no codegen) — correct LSP semantics, and it never touches the gated lowering. 
 reports 0 diagnostics on `examples/{09_ui,11_menus,17_flare}.em`; a wrong-arity graphics call and a
 genuinely undefined function both still error. `make test` 353, `make test-lsp` 8 sections green.
 
-### OFI-078 — Flare rich-text regressions: code blocks rendered EMPTY + bold runs lost their spacing — CLOSED
+### OFI-125 — Flare rich-text regressions: code blocks rendered EMPTY + bold runs lost their spacing — CLOSED (renumbered from a duplicate OFI-078)
 *Opened + CLOSED 2026-06-20 (Karl spotted empty code blocks in the live flare_chat app — the dogfood caught what the goldens didn't).*
 
 **Symptom.** Two rendering bugs surfaced once real Claude replies (formatted prose + fenced code) flowed

@@ -87,7 +87,12 @@ enum {
     NATIVE_GFX_SCREEN_W      = 131, // screen_width() -> int   — current window width (resizable)
     NATIVE_GFX_SCREEN_H      = 132, // screen_height() -> int  — current window height
     NATIVE_GFX_TEXT_LINE_H   = 133, // text_line_height(size) -> int — font line height (px) at size
-    NATIVE_GFX_SET_CURSOR    = 134  // set_cursor(shape) — OS pointer for the frame (tape-silent; reset each frame_begin)
+    NATIVE_GFX_SET_CURSOR    = 134, // set_cursor(shape) — OS pointer for the frame (tape-silent; reset each frame_begin)
+    NATIVE_GFX_FRAME_CAPTURE = 135, // frame_capture(path) -> int — queue a PNG screenshot of this frame
+    NATIVE_GFX_SET_EVENT_WAIT= 136, // set_event_waiting(on) — when on, EndDrawing blocks on OS events (idle CPU ~0)
+    NATIVE_GFX_HAD_INPUT     = 137, // had_input() -> bool — any mouse move/button/wheel/resize this frame
+    NATIVE_GFX_MEASURE_MISSES= 138, // measure_misses() -> int — measure_text cache misses since this frame_begin
+    NATIVE_GFX_FRAME_STEPS   = 139  // frame_steps() -> int — physics sub-steps for last frame's elapsed time
 };
 
 // Returns the native id for a built-in function name, or -1 if `name` is not a

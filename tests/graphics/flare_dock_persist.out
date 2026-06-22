@@ -1,0 +1,4 @@
+orig:   root=3 nodes=3 [act0:Conversations act1:Chat,Inspector] r=220,
+loaded: root=3 nodes=3 [act0:Conversations act1:Chat,Inspector] r=220,
+ROUND-TRIP OK
+empty: root=-1 nodes=0

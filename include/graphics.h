@@ -16,6 +16,10 @@ void ember_gfx_window_close(void);
 int  ember_gfx_should_close(void);            // 1 when the user asked to close
 void ember_gfx_frame_begin(int bg_color);     // start a frame, clear to bg_color
 void ember_gfx_frame_end(void);               // present the frame, pump OS events
+void ember_gfx_set_event_waiting(int on);     // on: EndDrawing blocks on OS events (idle CPU ~0); off: free-run
+int  ember_gfx_had_input(void);               // 1 if any mouse move/button/wheel/resize occurred this frame
+int  ember_gfx_measure_misses(void);          // measure_text cache misses (real FreeType measures) since frame_begin
+int  ember_gfx_frame_steps(void);             // fixed physics sub-steps spanning the last frame's wall-time (>=1)
 void ember_gfx_draw_rect(int x, int y, int w, int h, int color);
 void ember_gfx_draw_text(const char *text, int x, int y, int size, int color);
 int  ember_gfx_key_down(int keycode);          // 1 while the key is held
@@ -40,6 +44,7 @@ void ember_gfx_clip_pop(void);                 // end the most recent clip regio
 int  ember_gfx_tape_open(const char *path);    // start the UI tape -> file; 1 on success
 void ember_gfx_tape_close(void);               // stop recording, flush + close
 void ember_gfx_tape_mark(const char *kind, const char *label); // record an interaction
+int  ember_gfx_frame_capture(const char *path); // queue a PNG screenshot of this frame; 1 if queued
 // Rich primitives for a modern look. Colors are 0xRRGGBB; `alpha` is 0..255 (so widgets can layer
 // translucent fills, borders, gradients, and soft shadows). `radius` is a corner radius in pixels
 // (0 = square). These flow through the same deferred layer/clip/tape pipeline as draw_rect.

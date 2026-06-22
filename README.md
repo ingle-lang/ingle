@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/ember.png" alt="Ember" width="240">
+</p>
+
 # Ember
 
 **Ember is a statically-typed, brace-delimited systems programming language** in the lineage of

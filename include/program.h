@@ -86,6 +86,14 @@ typedef struct {
     StructType *structs;
     int         struct_count;
     int         main_index;   // -1 if there is no main
+    // Runtime identity of the prelude Result/Option failure variants, so the driver can detect
+    // an `Err`/`None` that reaches `main` unhandled and report it as a Fault (docs/faults.md,
+    // FCAT_UNHANDLED_ERR). Each is the base enum id (an enum instance's ObjStruct.type_id) and
+    // the failure variant's tag; -1 when that enum is absent from the program.
+    int         result_enum_id;
+    int         err_tag;
+    int         option_enum_id;
+    int         none_tag;
 } CompiledProgram;
 
 void compiled_program_init(CompiledProgram *prog);

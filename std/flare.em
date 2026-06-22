@@ -28,6 +28,7 @@ import "std/layout" as lay
 import "std/markdown" as md
 import "std/highlight" as hl
 import "std/string" as str
+import "std/json" as json
 
 
 // Layout constants, re-exported so an app only imports std/flare. (Mirror std/layout's values.)
@@ -77,6 +78,11 @@ let _OFFSET_BEGIN = 31 // a paint-queue bracket: shift the enclosed widgets' PAI
 let _OFFSET_END   = 32 // close a paint-offset bracket
 let _FLIP_BEGIN = 33   // FLIP: auto-animate a subtree that MOVED in the layout solve (spring old→new position)
 let _FLIP_END   = 34   // close a FLIP bracket
+let _CLIP_BEGIN = 35   // clip the enclosed widgets to a node's solved rect (a dock panel's content body)
+let _CLIP_END   = 36   // close a clip bracket (clip_pop)
+let _DANGER = 37        // a destructive-action button — a red fill (delete / remove), like _PRIMARY
+let _VITEM  = 38        // a virtualized-list item: a transparent row container whose solved height the paint
+                        //  loop records into vrows[] so next frame's window math knows each item's size
 
 // HANDLE_W is the on-screen thickness (px) of a splitter's hit band — wide enough to grab, a hairline to look
 // at. Public so a caller can account for it when computing the remaining content width beside a resized pane.
@@ -103,13 +109,37 @@ struct Rect {
 }
 
 
+// VClip is the visible window virtual_begin() returns: build items [start, end) and skip the rest. Mirrors
+// Dear ImGui's ListClipper DisplayStart/DisplayEnd.
+struct VClip {
+    start: int
+    end: int
+}
+
+
+// DropHit is where a drag-to-redock release would land: `kind` 0 = nowhere, 1 = beside a panel, 2 = an
+// OUTER workspace edge. `panel` is the target panel id (kind 1); `side` is 0 left / 1 right / 2 top / 3
+// bottom (the redock()/dock_root_edge() side); (rx,ry,rw,rh) is the preview rectangle the overlay paints
+// so the user sees exactly where the panel will go. Computed each frame from the cursor and the solved tree.
+struct DropHit {
+    kind: int
+    panel: string
+    side: int
+    rx: int
+    ry: int
+    rw: int
+    rh: int
+}
+
+
 // theme_light is the warm "parchment + clay" Claude look — the house default.
 fn theme_light() -> ui.Style {
     return ui.Style {
-        bg: ui.rgb(247, 245, 242), panel: ui.rgb(255, 255, 255), hover: ui.rgb(244, 242, 238),
+        bg: ui.rgb(244, 242, 237), panel: ui.rgb(255, 255, 255), hover: ui.rgb(243, 240, 235),
         pressed: ui.rgb(232, 228, 221), ink: ui.rgb(38, 36, 32), muted_ink: ui.rgb(124, 120, 112),
-        accent: ui.rgb(196, 110, 78), accent_ink: ui.rgb(255, 255, 255), border: ui.rgb(220, 216, 209),
-        track: ui.rgb(228, 224, 217), radius: 10, pad: 10, text_size: 19, row_h: 36, shadow: 22
+        accent: ui.rgb(196, 110, 78), accent_ink: ui.rgb(255, 255, 255),
+        danger: ui.rgb(190, 64, 52), danger_ink: ui.rgb(255, 255, 255), border: ui.rgb(212, 207, 198),
+        track: ui.rgb(228, 224, 217), bar: ui.rgb(245, 243, 238), radius: 10, pad: 10, gutter: 18, text_size: 19, row_h: 36, shadow: 34
     }
 }
 
@@ -119,8 +149,9 @@ fn theme_dark() -> ui.Style {
     return ui.Style {
         bg: ui.rgb(38, 38, 36), panel: ui.rgb(46, 46, 43), hover: ui.rgb(58, 58, 54),
         pressed: ui.rgb(54, 54, 50), ink: ui.rgb(237, 234, 228), muted_ink: ui.rgb(150, 147, 139),
-        accent: ui.rgb(204, 122, 90), accent_ink: ui.rgb(255, 255, 255), border: ui.rgb(58, 57, 53),
-        track: ui.rgb(58, 57, 53), radius: 10, pad: 10, text_size: 19, row_h: 36, shadow: 55
+        accent: ui.rgb(204, 122, 90), accent_ink: ui.rgb(255, 255, 255),
+        danger: ui.rgb(214, 92, 78), danger_ink: ui.rgb(255, 255, 255), border: ui.rgb(58, 57, 53),
+        track: ui.rgb(58, 57, 53), bar: ui.rgb(55, 55, 51), radius: 10, pad: 10, gutter: 18, text_size: 19, row_h: 36, shadow: 55
     }
 }
 
@@ -249,6 +280,18 @@ struct Flare {
     // finish() and read in _btn() to hit-test this frame's clicks. A struct-valued Map is safe now
     // that unique-owner aggregates deep-clone through erased generics (OFI-062/063 closed 2026-06-18).
     rects: map.Map<string, Rect>
+    // Per-frame dock geometry: each docked panel's solved CONTENT body rect (the area below its title
+    // bar), keyed by panel id. dock_begin() fills it (after springing/snapping each panel); dock_panel()
+    // reads it to anchor that panel's content float. Rebuilt every dock_begin, so a closed panel drops out.
+    ds: map.Map<string, Rect>
+    dpin: [string]                  // panels PINNED this frame (no close ✕ — a permanent anchor); app sets it
+                                    // via dock_pin() before dock_begin, which consumes then clears it.
+    // Panel-drag latch (drag a title bar to re-dock). pdrag holds the panel id being dragged ("" = none);
+    // pox/poy capture the cursor at the press so a move-threshold tells a drag from a plain click. Owned by
+    // the Flare layer (the dock is a Flare construct), independent of ui's sp_drag/scroll/window latches.
+    pdrag: string
+    pox: int
+    poy: int
     _submit: bool                   // set when Enter is pressed in a focused text_field; read via submit()
     mono: int                       // monospace font slot for code blocks + inline `code` (-1 = not loaded)
     italic: int                     // italic font slot for inline *emphasis* (-1 = not loaded)
@@ -260,6 +303,27 @@ struct Flare {
     _modal: bool                    // a modal is active this frame → background widgets are inert
     _in_modal: bool                 // currently building the modal's OWN content → its widgets stay live
     _modal_was: bool                // a modal was opened last frame (seeds _modal at the next begin())
+    // Set true whenever a spring/FLIP moved this frame (above the at-rest epsilon). The app reads it via
+    // is_animating() AFTER finish() to decide whether to keep free-running or settle to event-waiting (idle
+    // CPU). Reset each begin(); _spring (build phase) and _flip_axis (paint phase) both raise it.
+    _anim: bool
+    // Physics sub-steps for this frame = how many fixed 1/60s spring ticks the last frame's wall-time spanned
+    // (frame_steps()). 1 at a steady 60fps, more when frames are heavy — so a redock's FLIP runs in real time
+    // instead of slow motion. Set in begin(), but ONLY when _realtime is enabled (set_realtime).
+    _steps: int
+    // Opt-in to wall-clock animation catch-up. OFF by default so the fixed-timestep physics is byte-for-byte
+    // DETERMINISTIC (golden-testable, the headless suite depends on it); a real app turns it ON via
+    // set_realtime(true) so heavy frames don't drag animations into slow motion. When off, _steps stays 1.
+    _realtime: bool
+    // Immediate-mode list virtualization (one list per frame — the transcript). vrows persists each item's
+    // last-measured height so virtual_begin can place rows without building them; vstart/vend is the window
+    // built this frame; _vk counts _VITEM markers in the paint walk to map each back to its row. See
+    // virtual_begin(). Restores forrestthewoods's "a single screen's worth is cheap" for unbounded content.
+    vrows: [int]
+    vcount: int
+    vstart: int
+    vend: int
+    _vk: int
 
 
     // begin starts a frame: snapshot input, reset the layout tree, open the root column (it fills
@@ -273,9 +337,14 @@ struct Flare {
         self._modal = self._modal_was   // a modal was open last frame → gate the background this frame
         self._modal_was = false
         self._in_modal = false
+        self._anim = false              // springs/FLIP raise this again if anything moves this frame
+        self._steps = 1                 // deterministic fixed timestep by default (golden-stable); set_realtime
+        if self._realtime {             // opts into wall-clock catch-up so heavy frames don't slow animations
+            self._steps = frame_steps()
+        }
         self.lo.reset()
         let pad = self.ui.style.pad
-        let _ = self.lo.open(COL, START, STRETCH, pad, pad)
+        let _ = self.lo.open(COL, START, STRETCH, pad, self.ui.style.gutter)
         self.rnode = []
         self.rkind = []
         self.rtext = []
@@ -303,6 +372,10 @@ struct Flare {
         self.lo.solve(0, 0, screen_width(), screen_height())
         self.rects = map.Map<string, Rect>{ buckets: [], count: 0 }
         var scroll_dy = 0
+        var cull = false            // inside a scroll viewport: skip leaves whose rect is FULLY off-screen
+        var vtop = 0                // active viewport bounds (screen space) for the cull test
+        var vbot = 0
+        self._vk = 0                // _VITEM counter: the k-th virtual row painted is item vstart + k
         var ox = 0                  // paint-offset accumulators (f.at / FLIP); a stack so brackets nest
         var oy = 0
         var oxs: [int] = []
@@ -334,9 +407,13 @@ struct Flare {
                     scroll_dy = ov               // sentinel to the true bottom; also guards a content shrink)
                 }
                 clip_push(vx, vy, vw, vh)
+                cull = true              // leaves in this viewport that fall fully outside it are skipped,
+                vtop = vy                // not just clipped — a 3000-line message paints only its ~visible
+                vbot = vy + vh           // rows, turning O(content) per frame into O(visible).
             } else if kind == _SCROLL_END {
                 clip_pop()
                 scroll_dy = 0
+                cull = false
             } else if kind == _MODAL_BEGIN {
                 // A floating dialog: lift onto the modal layer (so it draws over everything), dim the whole
                 // window as a scrim, then paint the centred panel surface. Its children follow on this layer.
@@ -391,15 +468,31 @@ struct Flare {
                     ox = ox - dx
                     oy = oy - dy
                 }
+            } else if kind == _CLIP_BEGIN {
+                let n = self.rnode[i]                    // clip content to the dock panel's body (the float's rect)
+                clip_push(self.lo.x(n) + ox, self.lo.y(n) + oy, self.lo.w(n), self.lo.h(n))
+            } else if kind == _CLIP_END {
+                clip_pop()
+            } else if kind == _VITEM {
+                let idx = self.vstart + self._vk         // learn this virtual row's real height for next frame
+                if idx < self.vrows.len() {
+                    self.vrows[idx] = self.lo.h(self.rnode[i])
+                }
+                self._vk = self._vk + 1
             } else {
                 let n = self.rnode[i]
                 let x = self.lo.x(n) + ox
                 let y = self.lo.y(n) - scroll_dy + oy
                 let w = self.lo.w(n)
                 let h = self.lo.h(n)
-                self._paint(kind, self.rtext[i], self.rid[i], x, y, w, h)
-                if self.rid[i].len() > 0 {
-                    self.rects.set(self.rid[i], Rect { x: x, y: y, w: w, h: h })
+                // Viewport cull: a leaf entirely above or below the scroll viewport contributes nothing —
+                // raylib would clip every pixel, but we'd still have shaped the glyph runs. Skip it outright.
+                // The bounds test keeps any leaf that OVERLAPS the viewport (partially-visible rows still paint).
+                if !cull || (y + h > vtop && y < vbot) {
+                    self._paint(kind, self.rtext[i], self.rid[i], x, y, w, h)
+                    if self.rid[i].len() > 0 {
+                        self.rects.set(self.rid[i], Rect { x: x, y: y, w: w, h: h })
+                    }
                 }
             }
             i = i + 1
@@ -411,6 +504,24 @@ struct Flare {
     // bg is the active theme's background colour (pass to draw.begin()).
     fn bg(self) -> int {
         return self.ui.style.bg
+    }
+
+
+    // is_animating reports whether any spring or FLIP moved this frame (above the at-rest epsilon). Read it
+    // AFTER finish() — FLIP runs during the paint walk — to drive idle frame-gating: while it's true the UI
+    // is still in motion and the loop must keep free-running; once it (and input) go quiet the app can settle
+    // to event-waiting (set_event_waiting) and stop burning CPU on identical frames.
+    fn is_animating(self) -> bool {
+        return self._anim
+    }
+
+
+    // set_realtime opts this Flare into wall-clock animation timing: when ON, each frame advances springs/FLIP
+    // by however many fixed 1/60s ticks the last frame actually took, so a heavy frame (e.g. a redock that
+    // drops to 20fps) catches up instead of playing in slow motion. OFF by default to keep the fixed-timestep
+    // physics deterministic for the golden suite — a real app calls set_realtime(true) once at startup.
+    fn set_realtime(mut self, on: bool) {
+        self._realtime = on
     }
 
 
@@ -576,6 +687,137 @@ struct Flare {
     fn scroll_end(mut self, key: string) {
         self.lo.close()
         self._queue(0, _SCROLL_END, "", key)     // node index unused; finish() handles the marker
+    }
+
+
+    // ---- immediate-mode list virtualization (Dear ImGui ListClipper, adapted) ---------------------------
+    // virtual_begin opens a virtualized list INSIDE a scroll viewport: only the rows whose extent falls in
+    // the viewport (plus an overscan) are actually built this frame; the skipped rows above and below are
+    // replaced by spacer struts of their summed height, so the scroll height, scrollbar and sticky-follow are
+    // identical to building everything. Per-row heights are LEARNED from last frame's solved rows (estimated
+    // until first seen — react-window's variable-height model), so the window is right after one frame of lag,
+    // exactly like Flare's other last-frame reads. Pass the SAME key as the enclosing scroll_begin so it reads
+    // that viewport + offset. Returns [start, end): loop i over it, each row inside virtual_item(i)/
+    // virtual_item_end(); close with virtual_end(). This turns an unbounded transcript from O(total) work per
+    // frame into O(visible) — "a single screen's worth", which is what makes immediate mode cheap.
+    fn virtual_begin(mut self, key: string, count: int) -> VClip {
+        let est = self._vrow_est()
+        loop {                                       // grow the persistent heights to `count` (new rows estimated)
+            if self.vrows.len() >= count {
+                break
+            }
+            self.vrows.append(est)
+        }
+        self.vcount = count
+
+        var total = 0                                // Σ rows == the spacer-filled content height the scroll sees
+        var i = 0
+        loop {
+            if i >= count {
+                break
+            }
+            total = total + self.vrows[i]
+            i = i + 1
+        }
+        let vph = self._si(key + ".vh", 0)           // last frame's viewport height + clamped offset (sticky-safe:
+        var overflow = total - vph                   // the 1e6 stick sentinel clamps to the bottom, mirroring finish())
+        if overflow < 0 {
+            overflow = 0
+        }
+        var off = self._si(key + ".off", 0)
+        if off > overflow {
+            off = overflow
+        }
+
+        let over = vph / 2 + 1                        // overscan half a viewport each side → no blank on fast scroll
+        let top = off - over
+        let bot = off + vph + over
+        var start = count
+        var end = count
+        var found = false
+        var y = 0
+        i = 0
+        loop {
+            if i >= count {
+                break
+            }
+            let h = self.vrows[i]
+            if !found && y + h > top {
+                start = i
+                found = true
+            }
+            if found && y >= bot {
+                end = i
+                break
+            }
+            y = y + h
+            i = i + 1
+        }
+        if !found {
+            start = count                            // viewport past all content (degenerate) → build nothing
+        }
+        self.vstart = start
+        self.vend = end
+
+        var spacer_top = 0                           // summed height of the rows skipped ABOVE the window
+        i = 0
+        loop {
+            if i >= start {
+                break
+            }
+            spacer_top = spacer_top + self.vrows[i]
+            i = i + 1
+        }
+        self.strut(0, spacer_top)
+        return VClip { start: start, end: end }
+    }
+
+
+    // virtual_item opens one virtualized row: a transparent full-width container whose SOLVED height the paint
+    // walk records into vrows[] (via the _VITEM marker) so next frame's window math knows this row's real size.
+    // Build the row's content between this and virtual_item_end().
+    fn virtual_item(mut self, i: int) {
+        let node = self.lo.open(COL, START, STRETCH, 0, 0)
+        self._queue(node, _VITEM, "", "")
+    }
+
+
+    fn virtual_item_end(mut self) {
+        self.lo.close()
+    }
+
+
+    // virtual_end closes the list: a final spacer strut for the rows skipped BELOW the window.
+    fn virtual_end(mut self) {
+        var spacer_bot = 0
+        var i = self.vend
+        loop {
+            if i >= self.vcount {
+                break
+            }
+            spacer_bot = spacer_bot + self.vrows[i]
+            i = i + 1
+        }
+        self.strut(0, spacer_bot)
+    }
+
+
+    // _vrow_est is the height to assume for a not-yet-measured row: the mean of the rows we HAVE measured, so
+    // the total height + scrollbar are a sensible guess from the first frame (falls back to ~two text rows).
+    fn _vrow_est(self) -> int {
+        if self.vrows.len() == 0 {
+            return self.ui.style.row_h * 2
+        }
+        var sum = 0
+        var i = 0
+        loop {
+            if i >= self.vrows.len() {
+                break
+            }
+            sum = sum + self.vrows[i]
+            i = i + 1
+        }
+        return sum / self.vrows.len()
     }
 
 
@@ -847,44 +1089,421 @@ struct Flare {
     }
 
 
-    // dock lays out and renders a DockTree at the given rect: it solves the tree, then paints every
-    // panel as a themed frame (soft shadow, rounded fill, hairline border, a title bar) at its solved
-    // rect. FLIP-style — each panel's drawn rect SPRINGS toward its solved target, so docking, closing,
-    // or resizing a panel animates smoothly (deterministic, fixed timestep). The springs are keyed
-    // "id/@d*", under each panel's scope, so f.forget(id) disposes a closed panel's animation state
-    // too. Scope is saved/restored so dock() is a clean top-level call. Body content is a placeholder
-    // for now; real per-panel widgets land with the docking UX (T5).
-    fn dock(mut self, mut tree: DockTree, x: int, y: int, w: int, h: int) {
+    // dock_begin lays out and renders a DockTree's CHROME at the given rect, and wires its interaction. It
+    // solves the tree, draws every draggable divider (between split children — drag to re-proportion the
+    // panes, live), then paints every panel as a themed frame (soft shadow, rounded fill, hairline border,
+    // a title bar with a close ✕). Each panel's drawn rect SPRINGS toward its solved target (FLIP), so
+    // docking, closing and resizing animate smoothly — EXCEPT during an active divider drag, where the
+    // panes SNAP so the resize feels direct (no rubber-banding behind the cursor). It records each panel's
+    // content body rect (below the title bar) for dock_panel() to fill. Returns the leaf INDEX whose close
+    // button was clicked this frame, or -1; the caller closes it and disposes its state:
+    //   let hit = f.dock_begin(tree, x, y, w, h)
+    //   if hit >= 0 { let id = tree.close(hit); f.forget(id) }
+    //   let ids = tree.leaves()                       // build content for each surviving panel
+    //   ... for each id: f.key(id); if f.dock_panel(id) { …widgets… f.dock_panel_end() }
+    // Scope is saved/restored so dock_begin is a clean top-level call.
+    fn dock_begin(mut self, mut tree: DockTree, x: int, y: int, w: int, h: int) -> int {
         let saved = self.scope
         self.scope = ""
         self.ui.set_scope("")
         tree.solve(x, y, w, h)
+        self.ds = map.Map<string, Rect>{ buckets: [], count: 0 }
+        let dragging = self._dock_dividers(tree)         // resize handles first → tells the panels whether to snap
+        var closed = -1
         var i = 0
         loop {
             if i == tree.dk_kind.len() { break }
             if tree.dk_kind[i] == 1 {
-                self._draw_panel(tree.dk_panel[i], tree.dk_x[i], tree.dk_y[i], tree.dk_w[i], tree.dk_h[i])
+                let pinned = self._dock_pinned(tree.dk_panel[i])
+                if self._dock_chrome(tree, i, dragging, pinned) {
+                    closed = i
+                }
             }
             i = i + 1
         }
+        self._dock_drag(tree, x, y, w, h, dragging)      // drag a title bar to re-dock (reads pins → before clear)
+        self.dpin = []                                   // pins are per-frame; the app re-asserts them each frame
         self.scope = saved
         self.ui.set_scope(saved)
+        return closed
     }
 
 
-    fn _draw_panel(mut self, id: string, tx: int, ty: int, tw: int, th: int) {
+    // dock_pin marks panel `id` as PINNED for the coming dock_begin — it draws no close ✕ and can't be closed
+    // by the user (a permanent anchor, e.g. the app's main view). Call it each frame before dock_begin; the
+    // pin set is consumed and cleared there, so a panel is only pinned on frames the app actually asks.
+    fn dock_pin(mut self, id: string) {
+        self.dpin.append(id)
+    }
+
+
+    fn _dock_pinned(self, id: string) -> bool {
+        var i = 0
+        loop {
+            if i == self.dpin.len() { break }
+            if self.dpin[i] == id { return true }
+            i = i + 1
+        }
+        return false
+    }
+
+
+    // _dock_dividers walks every split node and renders its draggable boundary, returning whether ANY of
+    // them is being actively dragged this frame (so dock_begin can snap the panes for a crisp resize).
+    fn _dock_dividers(mut self, mut tree: DockTree) -> bool {
+        var dragging = false
+        var i = 0
+        loop {
+            if i == tree.dk_kind.len() { break }
+            if tree.dk_kind[i] == 2 {
+                if self._dock_divider(tree, i) {
+                    dragging = true
+                }
+            }
+            i = i + 1
+        }
+        return dragging
+    }
+
+
+    // _dock_divider draws split `i`'s resize handle in the 8px gap between its children and applies a drag to
+    // its ratio (effective next frame, the standard 1-frame flexbox lag). The hit band straddles the gap; the
+    // hairline brightens to the accent while hovered or dragging. Returns true while actively dragged. Inert
+    // under a modal (and drops any held latch so the divider can't be carried while the dialog is up).
+    fn _dock_divider(mut self, mut tree: DockTree, i: int) -> bool {
+        let gap = 8
+        let vert = tree.dk_vert[i]
+        let sx = tree.dk_x[i]
+        let sy = tree.dk_y[i]
+        let sw = tree.dk_w[i]
+        let sh = tree.dk_h[i]
+        let ratio = tree.dk_ratio[i]
+        let id = self.ui.wid("dock/div/{i}")
+        var cl = 0                                        // divider centre line (x for vertical, y for horizontal)
+        var bx = 0
+        var by = 0
+        var bw = 0
+        var bh = 0
+        var origin = 0
+        var extent = 0
+        if vert {
+            let aw = to_int(to_float(sw - gap) * ratio)
+            cl = sx + aw + gap / 2
+            bx = cl - 5  by = sy  bw = 10  bh = sh
+            origin = sx  extent = sw - gap
+        } else {
+            let ah = to_int(to_float(sh - gap) * ratio)
+            cl = sy + ah + gap / 2
+            bx = sx  by = cl - 5  bw = sw  bh = 10
+            origin = sy  extent = sh - gap
+        }
+        if self._modal && !self._in_modal {
+            self.ui.split_release(id)                     // a modal covers the dock → drop the latch, no snap on resume
+        } else {
+            let nr = self.ui.split_ratio_drag(id, bx, by, bw, bh, vert, origin, extent, ratio)
+            tree.dk_ratio[i] = nr
+        }
+        let active = self.ui.sp_drag == id && self.ui.down
         let st = self.ui.style
-        let px = to_int(self.spring(id + "/@dx", to_float(tx)))
-        let py = to_int(self.spring(id + "/@dy", to_float(ty)))
-        let pw = to_int(self.spring(id + "/@dw", to_float(tw)))
-        let ph = to_int(self.spring(id + "/@dh", to_float(th)))
+        var col = st.border
+        var a = 150
+        if self.ui.hot == id || active {
+            col = st.accent
+            a = 235
+        }
+        if vert {
+            fill_round(cl - 1, sy + 8, 2, sh - 16, 1, col, a)
+        } else {
+            fill_round(sx + 8, cl - 1, sw - 16, 2, 1, col, a)
+        }
+        return active
+    }
+
+
+    // _dock_chrome paints ONE panel's frame + title bar + close button at its solved target (tx,ty,tw,th),
+    // springing the drawn rect toward that target for smooth motion — unless `snap`, where it jumps (a live
+    // resize must not lag the divider). It stores the panel's content BODY rect (below the bar) in self.ds
+    // for dock_panel(). Returns true if the close ✕ was clicked this frame. The springs are keyed "id/@d*"
+    // under the panel's id, so f.forget(id) disposes a closed panel's animation state with the rest.
+    fn _dock_chrome(mut self, mut tree: DockTree, i: int, snap: bool, pinned: bool) -> bool {
+        let st = self.ui.style
+        let id = tree.dk_panel[i]                                     // the leaf's ACTIVE tab
+        let tx = tree.dk_x[i]
+        let ty = tree.dk_y[i]
+        let tw = tree.dk_w[i]
+        let th = tree.dk_h[i]
+        var px = tx
+        var py = ty
+        var pw = tw
+        var ph = th
+        if snap {
+            self._spring_set(id + "/@dx", to_float(tx))
+            self._spring_set(id + "/@dy", to_float(ty))
+            self._spring_set(id + "/@dw", to_float(tw))
+            self._spring_set(id + "/@dh", to_float(th))
+        } else {
+            px = to_int(self.spring(id + "/@dx", to_float(tx)))
+            py = to_int(self.spring(id + "/@dy", to_float(ty)))
+            pw = to_int(self.spring(id + "/@dw", to_float(tw)))
+            ph = to_int(self.spring(id + "/@dh", to_float(th)))
+        }
         shadow(px, py + 3, pw, ph, st.radius, st.shadow)
         fill_round(px, py, pw, ph, st.radius, st.panel, 255)
         stroke_round(px, py, pw, ph, st.radius, 1, st.border, 160)
         let bar = st.row_h
-        fill_round(px, py, pw, bar, st.radius, ui.shade(st.panel, 6), 255)
-        draw_text(id, px + st.pad, py + (bar - st.text_size) / 2, st.text_size, st.ink)
-        draw_text("(" + id + ")", px + st.pad, py + bar + st.pad, st.text_size, st.muted_ink)
+        fill_round(px, py, pw, bar, st.radius, st.bar, 255)
+        fill_round(px, py + bar - 1, pw, 1, 0, st.border, 150)        // hairline under the bar
+        let gate = !(self._modal && !self._in_modal)
+        // close ✕ — a square hit area at the bar's right edge; accent-tinted hover, inert under a modal. A
+        // PINNED panel draws no ✕. In a tab group the ✕ closes the ACTIVE tab (the leaf survives if more remain).
+        var clicked = false
+        if !pinned {
+            let cw = bar
+            let cx = px + pw - cw
+            let cid = self.ui.wid("dock/close/{id}")
+            if gate {
+                clicked = self.ui.press(cid, cx, py, cw, bar)
+            }
+            var gcol = st.muted_ink
+            if self.ui.hot == cid {
+                fill_round(cx + 4, py + 4, cw - 8, bar - 8, st.radius, st.hover, 255)
+                gcol = st.ink
+            }
+            let gsz = st.text_size
+            draw_text("✕", cx + (cw - measure_text("✕", gsz)) / 2, py + (bar - gsz) / 2, gsz, gcol)
+        }
+        // title — a single panel draws its name; a tab group draws a chip per tab (active raised, click to switch).
+        if tree.dk_tabs[i].len() <= 1 {
+            draw_text(id, px + st.pad, self._ty(py, bar, st.text_size), st.text_size, st.ink)
+        } else {
+            self._dock_tabs(tree, i, px, py, bar, gate)
+        }
+        let cur = tree.dk_panel[i]                                    // a tab click may have changed the active one
+        self.ds.set(cur, Rect { x: px, y: py + bar, w: pw, h: ph - bar })
+        return clicked
+    }
+
+
+    // _dock_tabs paints a leaf's tab strip — one chip per tab, the active one raised to the panel colour with an
+    // accent underline, the rest muted (hover-lit). A press on a chip switches the active tab on the DOWN-EDGE
+    // (not release) so the very same press can begin a drag of THAT tab in _dock_drag (which latches the now-active
+    // dk_panel afterwards) — drag-a-tab-out falls straight out of it. Inert when `gate` is false (under a modal).
+    fn _dock_tabs(mut self, mut tree: DockTree, i: int, px: int, py: int, bar: int, gate: bool) {
+        let st = self.ui.style
+        let mx = self.ui.mx
+        let my = self.ui.my
+        var cx = px + st.pad / 2
+        var k = 0
+        loop {
+            if k == tree.dk_tabs[i].len() { break }
+            let name = tree.dk_tabs[i][k]
+            let cw = measure_text(name, st.text_size) + st.pad * 2
+            let active = k == tree.dk_active[i]
+            if gate {
+                if self.ui.pressed_down(self.ui.wid("dock/tab/{i}/{k}"), cx, py, cw, bar) {
+                    tree.set_active(i, k)
+                }
+            }
+            var fillc = st.bar
+            var inkc = st.muted_ink
+            if active {
+                fillc = st.panel
+                inkc = st.ink
+            } else {
+                if mx >= cx && mx < cx + cw && my >= py && my < py + bar {
+                    fillc = st.hover
+                }
+            }
+            fill_round(cx + 1, py + 4, cw - 2, bar - 4, st.radius, fillc, 255)
+            if active {
+                fill_round(cx + 1, py + bar - 2, cw - 2, 2, 0, st.accent, 255)
+            }
+            draw_text(name, cx + st.pad, self._ty(py, bar, st.text_size), st.text_size, inkc)
+            cx = cx + cw + 2
+            k = k + 1
+        }
+    }
+
+
+    // _spring_set forces a named spring's (position, velocity) to (target, 0) without easing — used to SNAP a
+    // value to its target while keeping the spring's state consistent, so motion resumes smoothly afterward.
+    fn _spring_set(mut self, key: string, target: float) {
+        self.set_float(key + ".sp", target)
+        self.set_float(key + ".sv", 0.0)
+    }
+
+
+    // dock_panel opens a content region anchored at panel `id`'s solved body rect (recorded by dock_begin),
+    // clipped to it, so the widgets built until dock_panel_end() fill exactly that panel — a floating, full
+    // flexbox subtree, so column/row/grow/scroll all work inside. Returns false (build nothing) if `id` is
+    // not a live panel this frame. Pair every true return with dock_panel_end(); set the panel's state scope
+    // with f.key(id) first so its widget state is panel-local and f.forget(id) disposes it on close.
+    fn dock_panel(mut self, id: string) -> bool {
+        match self.ds.get(id) {
+            case Some(r) {
+                let pad = self.ui.style.pad
+                let n = self.lo.open_float_at(COL, START, STRETCH, pad, pad, r.x, r.y, r.w, r.h)
+                self._queue(n, _CLIP_BEGIN, "", "")
+                return true
+            }
+            case None { return false }
+        }
+    }
+
+
+    fn dock_panel_end(mut self) {
+        self._queue(0, _CLIP_END, "", "")
+        self.lo.close()
+    }
+
+
+    // _dock_drop computes where a drag-to-redock release would land, from the cursor over the SOLVED tree —
+    // pure geometry, so the preview the user sees and the mutation that runs come from one source of truth.
+    // OUTER edge bands (within `band` px of the workspace boundary) dock against the WHOLE workspace (kind 2)
+    // and take precedence over a panel's own edge there; otherwise the leaf under the cursor is classified by
+    // dock_zone into a left/right/top/bottom drop (kind 1). A centre-zone hover, a drop onto the dragged panel
+    // itself, or the gap between panels yields kind 0 (nothing). (rx,ry,rw,rh) is the preview rectangle.
+    fn _dock_drop(self, tree: DockTree, wx: int, wy: int, ww: int, wh: int, mx: int, my: int, dragged: string) -> DropHit {
+        let none = DropHit { kind: 0, panel: "", side: 0, rx: 0, ry: 0, rw: 0, rh: 0 }
+        if mx < wx { return none }
+        if mx >= wx + ww { return none }
+        if my < wy { return none }
+        if my >= wy + wh { return none }
+        let band = 28
+        if mx < wx + band {
+            return DropHit { kind: 2, panel: "", side: 0, rx: wx, ry: wy, rw: ww * 3 / 10, rh: wh }
+        }
+        if mx >= wx + ww - band {
+            let s = ww * 3 / 10
+            return DropHit { kind: 2, panel: "", side: 1, rx: wx + ww - s, ry: wy, rw: s, rh: wh }
+        }
+        if my < wy + band {
+            return DropHit { kind: 2, panel: "", side: 2, rx: wx, ry: wy, rw: ww, rh: wh * 3 / 10 }
+        }
+        if my >= wy + wh - band {
+            let s = wh * 3 / 10
+            return DropHit { kind: 2, panel: "", side: 3, rx: wx, ry: wy + wh - s, rw: ww, rh: s }
+        }
+        var i = 0
+        loop {
+            if i == tree.dk_kind.len() { break }
+            if tree.dk_kind[i] == 1 {
+                let px = tree.dk_x[i]
+                let py = tree.dk_y[i]
+                let pw = tree.dk_w[i]
+                let ph = tree.dk_h[i]
+                if mx >= px && mx < px + pw && my >= py && my < py + ph {
+                    let id = tree.dk_panel[i]
+                    if id == dragged { return none }       // never preview a drop onto the panel you're dragging
+                    let z = dock_zone(px, py, pw, ph, mx, my)
+                    if z == 0 {
+                        return DropHit { kind: 1, panel: id, side: 0, rx: px, ry: py, rw: pw * 4 / 10, rh: ph }
+                    }
+                    if z == 1 {
+                        let s = pw * 4 / 10
+                        return DropHit { kind: 1, panel: id, side: 1, rx: px + pw - s, ry: py, rw: s, rh: ph }
+                    }
+                    if z == 2 {
+                        return DropHit { kind: 1, panel: id, side: 2, rx: px, ry: py, rw: pw, rh: ph * 4 / 10 }
+                    }
+                    if z == 3 {
+                        let s = ph * 4 / 10
+                        return DropHit { kind: 1, panel: id, side: 3, rx: px, ry: py + ph - s, rw: pw, rh: s }
+                    }
+                    return DropHit { kind: 1, panel: id, side: 4, rx: px, ry: py, rw: pw, rh: ph }  // centre → tabify
+                }
+            }
+            i = i + 1
+        }
+        return none
+    }
+
+
+    // _dock_drag runs the drag-a-title-bar-to-redock interaction for one frame. It latches a press on a panel's
+    // title bar (minus its close ✕), and once the cursor moves past a small threshold it shows a grab cursor, a
+    // ghost chip at the pointer, and the live drop preview; on release it re-docks via redock()/dock_root_edge().
+    // INERT under a modal and skipped while a divider is being dragged (the two latches can't coexist). The press
+    // down-edge is consumed here, so no panel-content widget can claim a click mid-drag (immediate mode: a widget
+    // grabs `active` on the down-edge, which has already passed — so the drag is naturally modal, no extra gate).
+    fn _dock_drag(mut self, mut tree: DockTree, wx: int, wy: int, ww: int, wh: int, divider_dragging: bool) {
+        if self._modal && !self._in_modal {
+            self.pdrag = ""                                // a modal covers the dock → abandon any drag
+            return
+        }
+        if divider_dragging {
+            self.pdrag = ""
+            return
+        }
+        let mx = self.ui.mx
+        let my = self.ui.my
+        let down = self.ui.down
+        let st = self.ui.style
+        let bar = st.row_h
+
+        if self.pdrag == "" {
+            var i = 0
+            loop {
+                if i == tree.dk_kind.len() { break }
+                if tree.dk_kind[i] == 1 {
+                    let px = tree.dk_x[i]
+                    let py = tree.dk_y[i]
+                    var bw = tree.dk_w[i]
+                    if !self._dock_pinned(tree.dk_panel[i]) {
+                        bw = bw - bar                       // leave the ✕ hit area to the close button
+                    }
+                    if bw < 0 { bw = 0 }
+                    let hid = self.ui.wid("dock/bar/{tree.dk_panel[i]}")
+                    if self.ui.pressed_down(hid, px, py, bw, bar) {
+                        self.pdrag = tree.dk_panel[i]
+                        self.pox = mx
+                        self.poy = my
+                    }
+                }
+                i = i + 1
+            }
+            return                                          // the press frame just latches; the drag begins on move
+        }
+
+        var ddx = mx - self.pox
+        if ddx < 0 { ddx = -ddx }
+        var ddy = my - self.poy
+        if ddy < 0 { ddy = -ddy }
+        let moved = ddx > 6 || ddy > 6
+        let dragged = self.pdrag
+
+        if !down {
+            if moved {
+                let hit = self._dock_drop(tree, wx, wy, ww, wh, mx, my, dragged)
+                if hit.kind == 1 {
+                    tree.redock(dragged, hit.panel, hit.side)
+                } else {
+                    if hit.kind == 2 {
+                        tree.dock_root_edge(dragged, hit.side)
+                    }
+                }
+            }
+            self.pdrag = ""
+            return
+        }
+
+        if !moved {
+            return                                          // still within the click threshold — no ghost yet
+        }
+
+        set_cursor(3)                                       // CURSOR_HAND (std/ui) — the grab affordance
+        let hit = self._dock_drop(tree, wx, wy, ww, wh, mx, my, dragged)
+        set_layer(MODAL_LAYER - 1)
+        if hit.kind != 0 {
+            fill_round(hit.rx, hit.ry, hit.rw, hit.rh, st.radius, st.accent, 60)
+            stroke_round(hit.rx, hit.ry, hit.rw, hit.rh, st.radius, 2, st.accent, 220)
+        }
+        let gw = measure_text(dragged, st.text_size) + st.pad * 2
+        let gx = mx + 12
+        let gy = my + 8
+        shadow(gx, gy + 2, gw, bar, st.radius, st.shadow)
+        fill_round(gx, gy, gw, bar, st.radius, st.accent, 235)
+        draw_text(dragged, gx + st.pad, self._ty(gy, bar, st.text_size), st.text_size, st.accent_ink)
+        set_layer(0)
     }
 
 
@@ -911,9 +1530,16 @@ struct Flare {
         let vk = key + ".sv"
         var pos = self.state_float(pk, target)              // unseen key → snap to target (no jump-from-zero)
         var vel = self.state_float(vk, 0.0)
-        let force = (0.0 - k * (pos - target)) - c * vel     // F = -k·x - c·v
-        vel = vel + force * SPRING_DT                        // semi-implicit Euler (update v, then x with new v)
-        pos = pos + vel * SPRING_DT
+        var n = self._steps                                  // real-time catch-up: one tick per 1/60s elapsed,
+        loop {                                               // so a heavy frame advances the spring further
+            if n == 0 {
+                break
+            }
+            let force = (0.0 - k * (pos - target)) - c * vel // F = -k·x - c·v
+            vel = vel + force * SPRING_DT                    // semi-implicit Euler (update v, then x with new v)
+            pos = pos + vel * SPRING_DT
+            n = n - 1
+        }
         var adp = pos - target                               // settle when close AND slow → stop churning state
         if adp < 0.0 {
             adp = 0.0 - adp
@@ -925,6 +1551,8 @@ struct Flare {
         if adp < 0.4 && av < 0.4 {
             pos = target
             vel = 0.0
+        } else {
+            self._anim = true                                // still moving → keep the loop free-running
         }
         self.set_float(pk, pos)
         self.set_float(vk, vel)
@@ -992,9 +1620,16 @@ struct Flare {
             case None {}
         }
         o = o - (s - last)                              // counteract the layout jump (keep the visual continuous)
-        let force = (0.0 - 170.0 * o) - 26.0 * vel
-        vel = vel + force * SPRING_DT
-        o = o + vel * SPRING_DT
+        var n = self._steps                             // real-time catch-up (matches _spring) so the FLIP
+        loop {                                          // a redock kicks off runs in wall-clock time, not frames
+            if n == 0 {
+                break
+            }
+            let force = (0.0 - 170.0 * o) - 26.0 * vel
+            vel = vel + force * SPRING_DT
+            o = o + vel * SPRING_DT
+            n = n - 1
+        }
         var ao = o
         if ao < 0.0 {
             ao = 0.0 - ao
@@ -1006,6 +1641,8 @@ struct Flare {
         if ao < 0.4 && av < 0.4 {
             o = 0.0
             vel = 0.0
+        } else {
+            self._anim = true                                // FLIP still in flight → keep the loop free-running
         }
         self.sf.set(lk, s)
         self.sf.set(ok, o)
@@ -1051,6 +1688,13 @@ struct Flare {
     }
 
 
+    // danger is the DESTRUCTIVE action — filled with the theme's red (Delete, Remove, Discard). Same
+    // shape as primary; the colour is the only signal, so reach for it only when the action is hard to undo.
+    fn danger(mut self, txt: string) -> bool {
+        return self._btn(txt, _DANGER)
+    }
+
+
     // ghost_button is a subtle, borderless action: no fill at rest, a soft hover/press fill, muted ink —
     // for toolbars, message actions (Copy/Retry), and the "···" more-actions affordance.
     fn ghost_button(mut self, txt: string) -> bool {
@@ -1070,14 +1714,14 @@ struct Flare {
         let h = self.ui.style.row_h
         var clicked = false
         var w_last = 0                              // last frame's painted WIDTH — drives ellipsis-to-fit
-        if !(self._modal && !self._in_modal) {
-            match self.rects.get(id) {
-                case Some(r) {
+        match self.rects.get(id) {                  // read the width ALWAYS, even when the background is inert
+            case Some(r) {
+                w_last = r.w                         // so the title keeps ellipsizing while a popover/modal is open
+                if !(self._modal && !self._in_modal) {   // ...but suppress the CLICK there (no fall-through)
                     clicked = self.ui.press(wid, r.x, r.y, r.w, r.h)
-                    w_last = r.w
                 }
-                case None {}
             }
+            case None {}
         }
         var shown = txt                             // ellipsize the LABEL to the grown width (1-frame lag, like
         if w_last > 0 {                             // text_area's auto-grow) so long titles fill the pill, not 24 chars
@@ -1097,7 +1741,13 @@ struct Flare {
     // fits WITH a trailing ellipsis — binary-searched over real substring measurements (kerning-correct, ~log n
     // measures). The widget-level "text-overflow: ellipsis": a label too long for its box trims to fit.
     fn _fit_text(self, s: string, max_px: int) -> string {
-        let sz = self.ui.style.text_size
+        return self._fit_text_sz(s, max_px, self.ui.style.text_size)
+    }
+
+
+    // _fit_text_sz is _fit_text at an explicit text size — headings measure larger than body text, so
+    // the ellipsis fit has to use the size the text is actually drawn at.
+    fn _fit_text_sz(self, s: string, max_px: int, sz: int) -> string {
         if max_px <= 0 || measure_text(s, sz) <= max_px {
             return s
         }
@@ -1889,22 +2539,30 @@ struct Flare {
             // Primary: the clay accent has no theme hover/pressed, so derive them by shading.
             self._paint_button(text, id, x, y, w, h, st.accent, ui.shade(st.accent, 14),
                                ui.shade(st.accent, -16), st.accent_ink)
+        } else if kind == _DANGER {
+            // Destructive: the danger red, hover/pressed derived by shading (like primary).
+            self._paint_button(text, id, x, y, w, h, st.danger, ui.shade(st.danger, 14),
+                               ui.shade(st.danger, -16), st.danger_ink)
         } else if kind == _NAVITEM {
             self._paint_nav(text, id, x, y, w, h, false)
         } else if kind == _NAVITEM_ON {
             self._paint_nav(text, id, x, y, w, h, true)
         } else if kind == _LABEL {
-            draw_text(text, x, y + (h - st.text_size) / 2, st.text_size, st.ink)
+            // text-overflow: ellipsis — a single-line label too wide for its solved box trims to fit
+            // (the box is its full width in a row, or the column width when stretched) rather than
+            // spilling off-screen.
+            draw_text(self._fit_text(text, w), x, y + (h - st.text_size) / 2, st.text_size, st.ink)
         } else if kind == _MUTED {
-            draw_text(text, x, y + (h - st.text_size) / 2, st.text_size, st.muted_ink)
+            draw_text(self._fit_text(text, w), x, y + (h - st.text_size) / 2, st.text_size, st.muted_ink)
         } else if kind == _HEADING {
             let sz = st.text_size + 5
-            let tw = measure_text(text, sz)
+            let shown = self._fit_text_sz(text, w, sz)
+            let tw = measure_text(shown, sz)
             var tx = x + (w - tw) / 2
             if tx < x {
                 tx = x
             }
-            draw_text(text, tx, y + (h - sz) / 2, sz, st.ink)
+            draw_text(shown, tx, y + (h - sz) / 2, sz, st.ink)
         } else if kind == _FIELD {
             self.ui._tf_draw(hash(id), x, y, w, h, text)
         } else if kind == _TAREA {
@@ -1987,7 +2645,7 @@ struct Flare {
                 fill_round(x, y, w, h, st.radius, st.hover, 255)
             }
             let tw = measure_text(text, st.text_size)
-            draw_text(text, x + (w - tw) / 2, y + (h - st.text_size) / 2, st.text_size, st.muted_ink)
+            draw_text(text, x + (w - tw) / 2, self._ty(y, h, st.text_size), st.text_size, st.muted_ink)
         } else if kind == _MENUITEM {
             let mw = hash(id)
             var col = st.ink
@@ -1995,8 +2653,19 @@ struct Flare {
                 fill_round(x, y, w, h, 6, st.accent, 255)
                 col = st.accent_ink
             }
-            draw_text(text, x + st.pad, y + (h - st.text_size) / 2, st.text_size, col)
+            draw_text(text, x + st.pad, self._ty(y, h, st.text_size), st.text_size, col)
         }
+    }
+
+
+    // _ty returns the y to draw `size`-px text VERTICALLY CENTRED in a box [boxy, boxy+h]. draw_text lays
+    // glyphs on the font's LINE BOX (ascender + descender) with that box's TOP at the given y, and text_size
+    // is shorter than the line box AND top-aligned — so centring a text_size-tall box leaves a gap above the
+    // caps and the text reads slightly LOW. Centring the TRUE line height fixes it (matches std/ui's field
+    // centring). Every padded control (button / ghost / menu item / nav row / dock title / tab chip) routes
+    // its vertical text placement through here, so they all centre identically and can't drift apart again.
+    fn _ty(self, boxy: int, h: int, size: int) -> int {
+        return boxy + (h - text_line_height(size)) / 2
     }
 
 
@@ -2017,7 +2686,7 @@ struct Flare {
         }
         ui.card(x, y + oy, w, h, fill, st, true)
         let tw = measure_text(text, st.text_size)
-        draw_text(text, x + (w - tw) / 2, y + oy + (h - st.text_size) / 2, st.text_size, ink)
+        draw_text(text, x + (w - tw) / 2, self._ty(y + oy, h, st.text_size), st.text_size, ink)
     }
 
 
@@ -2026,26 +2695,28 @@ struct Flare {
     fn _paint_nav(mut self, text: string, id: string, x: int, y: int, w: int, h: int, active: bool) {
         let st = self.ui.style
         let wid = hash(id)
-        var base = st.panel
-        var hov = st.hover
-        var prs = st.pressed
         var ink = st.ink
-        if active {
-            base = st.accent
-            hov = ui.shade(st.accent, 14)
-            prs = ui.shade(st.accent, -16)
-            ink = st.accent_ink
-        }
-        var fill = base
         var oy = 0
-        if self.ui.active == wid {
-            fill = prs
+        // A nav row is FLAT at rest — no card, no border, no shadow, just text (the modern sidebar look:
+        // VS Code / Linear / Notion). A fill appears only on hover/press, and the ACTIVE row carries the
+        // accent. So a list of idle rows reads as clean text, not a stack of outlined pills.
+        if active {
+            var fill = st.accent
+            if self.ui.active == wid {
+                fill = ui.shade(st.accent, -16)
+                oy = 1
+            } else if self.ui.hot == wid {
+                fill = ui.shade(st.accent, 14)
+            }
+            fill_round(x, y + oy, w, h, st.radius, fill, 255)
+            ink = st.accent_ink
+        } else if self.ui.active == wid {
             oy = 1
+            fill_round(x, y + oy, w, h, st.radius, st.pressed, 255)
         } else if self.ui.hot == wid {
-            fill = hov
+            fill_round(x, y, w, h, st.radius, st.hover, 255)
         }
-        ui.card(x, y + oy, w, h, fill, st, true)
-        draw_text(text, x + st.pad, y + oy + (h - st.text_size) / 2, st.text_size, ink)
+        draw_text(text, x + st.pad, self._ty(y + oy, h, st.text_size), st.text_size, ink)
     }
 }
 
@@ -2062,6 +2733,11 @@ fn new() -> Flare {
         lo: lay.new(),
         rnode: [], rkind: [], rtext: [], rid: [],
         rects: map.Map<string, Rect>{ buckets: [], count: 0 },
+        ds: map.Map<string, Rect>{ buckets: [], count: 0 },
+        dpin: [],
+        pdrag: "",
+        pox: 0,
+        poy: 0,
         _submit: false,
         mono: -1,
         italic: -1,
@@ -2069,7 +2745,15 @@ fn new() -> Flare {
         _mdseq: 0,
         _modal: false,
         _in_modal: false,
-        _modal_was: false
+        _modal_was: false,
+        _anim: false,
+        _steps: 1,
+        _realtime: false,
+        vrows: [],
+        vcount: 0,
+        vstart: 0,
+        vend: 0,
+        _vk: 0
     }
 }
 
@@ -2090,7 +2774,13 @@ struct DockTree {
     dk_b: [int]          // split: second child (right / bottom); leaf: -1
     dk_vert: [bool]      // split: true = vertical divider (children side by side), false = stacked
     dk_ratio: [float]    // split: fraction of the main axis given to child A (0..1)
-    dk_panel: [string]   // leaf: the panel id; otherwise ""
+    // A leaf is a TAB GROUP: dk_tabs[i] is its panel ids (≥1), dk_active[i] the index of the visible one.
+    // dk_panel[i] mirrors the ACTIVE tab (dk_tabs[i][dk_active[i]]) — a cached convenience the renderer,
+    // leaves(), and apps read as "the panel this leaf is showing", kept in sync by _sync_panel after any
+    // tab/active change. A single-panel leaf is just a one-tab group, so non-tabbed docking is unchanged.
+    dk_tabs: [[string]]
+    dk_active: [int]
+    dk_panel: [string]   // leaf: the ACTIVE tab's panel id (mirror of dk_tabs[i][dk_active[i]]); split: ""
     dk_x: [int]          // solved rect x (filled by solve(); a node keeps its slot, so rects are stable)
     dk_y: [int]          // solved rect y
     dk_w: [int]          // solved rect width
@@ -2116,6 +2806,8 @@ struct DockTree {
             self.dk_b.append(-1)
             self.dk_vert.append(false)
             self.dk_ratio.append(0.5)
+            self.dk_tabs.append([])
+            self.dk_active.append(0)
             self.dk_panel.append("")
             self.dk_x.append(0)
             self.dk_y.append(0)
@@ -2128,18 +2820,33 @@ struct DockTree {
         self.dk_b[idx]      = -1
         self.dk_vert[idx]   = false
         self.dk_ratio[idx]  = 0.5
+        self.dk_tabs[idx]   = []
+        self.dk_active[idx] = 0
         self.dk_panel[idx]  = ""
         return idx
     }
 
 
-    // _release marks a slot free and drops its panel string, so it can be recycled by _alloc.
+    // _release marks a slot free and drops its panel/tab data, so it can be recycled by _alloc.
     fn _release(mut self, i: int) {
         self.dk_kind[i]   = 0
         self.dk_panel[i]  = ""
+        self.dk_tabs[i]   = []
+        self.dk_active[i] = 0
         self.dk_a[i]      = -1
         self.dk_b[i]      = -1
         self.dk_parent[i] = -1
+    }
+
+
+    // _sync_panel refreshes a leaf's dk_panel mirror from its active tab — call after any change to a
+    // leaf's tab list or active index. A leaf always has ≥1 tab while live, so the index is in range.
+    fn _sync_panel(mut self, i: int) {
+        var a = self.dk_active[i]
+        if a < 0 { a = 0 }
+        if a >= self.dk_tabs[i].len() { a = self.dk_tabs[i].len() - 1 }
+        self.dk_active[i] = a
+        self.dk_panel[i] = self.dk_tabs[i][a]
     }
 
 
@@ -2147,6 +2854,8 @@ struct DockTree {
     // empty tree (root == -1); the first panel docked into an app's workspace.
     fn add_root(mut self, panel: string) -> int {
         let i = self._alloc(1, -1)
+        self.dk_tabs[i] = [panel]
+        self.dk_active[i] = 0
         self.dk_panel[i] = panel
         self.root = i
         return i
@@ -2161,6 +2870,8 @@ struct DockTree {
         let p = self.dk_parent[leaf]
         let s = self._alloc(2, p)
         let nl = self._alloc(1, s)
+        self.dk_tabs[nl] = [panel]
+        self.dk_active[nl] = 0
         self.dk_panel[nl] = panel
         self.dk_a[s]     = leaf
         self.dk_b[s]     = nl
@@ -2177,6 +2888,119 @@ struct DockTree {
             }
         }
         return nl
+    }
+
+
+    // split_before is split()'s mirror: it docks `panel` on the LEADING side of `leaf` — the new panel is
+    // child A (left / top) and the existing leaf child B (right / bottom). `ratio` is still child A's (the
+    // new panel's) fraction. Use it to re-dock a closed sidebar back on the left, vs split() for the right.
+    fn split_before(mut self, leaf: int, panel: string, vertical: bool, ratio: float) -> int {
+        let p = self.dk_parent[leaf]
+        let s = self._alloc(2, p)
+        let nl = self._alloc(1, s)
+        self.dk_tabs[nl] = [panel]
+        self.dk_active[nl] = 0
+        self.dk_panel[nl] = panel
+        self.dk_a[s]     = nl
+        self.dk_b[s]     = leaf
+        self.dk_vert[s]  = vertical
+        self.dk_ratio[s] = ratio
+        self.dk_parent[leaf] = s
+        if p == -1 {
+            self.root = s
+        } else {
+            if self.dk_a[p] == leaf {
+                self.dk_a[p] = s
+            } else {
+                self.dk_b[p] = s
+            }
+        }
+        return nl
+    }
+
+
+    // leaf_of returns the node index of the leaf holding `panel` (in ANY of its tabs, not only the active
+    // one), or -1 if no panel by that id is docked. The id→index lookup an app uses to re-dock beside a
+    // known panel, or to test whether one is open.
+    fn leaf_of(self, panel: string) -> int {
+        var i = 0
+        loop {
+            if i == self.dk_kind.len() { break }
+            if self.dk_kind[i] == 1 {
+                var j = 0
+                loop {
+                    if j == self.dk_tabs[i].len() { break }
+                    if self.dk_tabs[i][j] == panel { return i }
+                    j = j + 1
+                }
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+
+    // tabs_of returns a COPY of `leaf`'s tab panel ids (empty for a non-leaf) — the app uses it to forget
+    // every tab's state when a whole leaf closes, or to render its own tab affordances.
+    fn tabs_of(self, leaf: int) -> [string] {
+        if self.dk_kind[leaf] != 1 { return [] }
+        return self.dk_tabs[leaf].clone()
+    }
+
+
+    // tab_count returns how many panels are grouped as tabs in `leaf` (0 for a non-leaf).
+    fn tab_count(self, leaf: int) -> int {
+        if self.dk_kind[leaf] != 1 { return 0 }
+        return self.dk_tabs[leaf].len()
+    }
+
+
+    // active_tab returns `leaf`'s active tab index (the visible panel), or -1 for a non-leaf.
+    fn active_tab(self, leaf: int) -> int {
+        if self.dk_kind[leaf] != 1 { return -1 }
+        return self.dk_active[leaf]
+    }
+
+
+    // set_active makes tab `idx` the visible one in `leaf` (clamped), refreshing the dk_panel mirror.
+    fn set_active(mut self, leaf: int, idx: int) {
+        if self.dk_kind[leaf] != 1 { return }
+        self.dk_active[leaf] = idx
+        self._sync_panel(leaf)
+    }
+
+
+    // add_tab groups `panel` into `leaf` as a new tab and makes it active — the data op behind a centre-drop
+    // (tabify). The panel must already be detached from its previous spot (redock/tabify call _detach first).
+    fn add_tab(mut self, leaf: int, panel: string) {
+        if self.dk_kind[leaf] != 1 { return }
+        self.dk_tabs[leaf].append(panel)
+        self.dk_active[leaf] = self.dk_tabs[leaf].len() - 1
+        self._sync_panel(leaf)
+    }
+
+
+    // _detach removes `panel` from wherever it is docked WITHOUT destroying its sibling tabs: if its leaf has
+    // more than one tab, just that tab is dropped (the leaf survives, active index clamped); if it is the leaf's
+    // only tab, the leaf is closed and its parent split collapses (like close()). Returns false on unknown panel.
+    // The shared first step of redock/tabify/dock_root_edge — so dragging ONE tab out of a group leaves the rest.
+    fn _detach(mut self, panel: string) -> bool {
+        let l = self.leaf_of(panel)
+        if l == -1 { return false }
+        if self.dk_tabs[l].len() <= 1 {
+            let _ = self.close(l)
+            return true
+        }
+        var fresh: [string] = []
+        var j = 0
+        loop {
+            if j == self.dk_tabs[l].len() { break }
+            if self.dk_tabs[l][j] != panel { fresh.append(self.dk_tabs[l][j]) }
+            j = j + 1
+        }
+        self.dk_tabs[l] = fresh                       // _sync_panel re-clamps the active index to the new length
+        self._sync_panel(l)
+        return true
     }
 
 
@@ -2209,6 +3033,29 @@ struct DockTree {
         self._release(leaf)
         self._release(p)
         return panel
+    }
+
+
+    // close_tab closes the ACTIVE tab of `leaf`: if the leaf has other tabs the group survives (the next tab
+    // becomes active) and only that panel id is returned; if it was the leaf's LAST tab the leaf is closed and
+    // its parent split collapses, exactly like close(). Returns the removed panel id so the caller can
+    // f.forget() its state. This is what a panel's close ✕ triggers — per-tab, not per-leaf.
+    fn close_tab(mut self, leaf: int) -> string {
+        if self.dk_kind[leaf] != 1 { return "" }
+        if self.dk_tabs[leaf].len() <= 1 {
+            return self.close(leaf)
+        }
+        let gone = self.dk_panel[leaf]
+        var fresh: [string] = []
+        var j = 0
+        loop {
+            if j == self.dk_tabs[leaf].len() { break }
+            if self.dk_tabs[leaf][j] != gone { fresh.append(self.dk_tabs[leaf][j]) }
+            j = j + 1
+        }
+        self.dk_tabs[leaf] = fresh                    // _sync_panel re-clamps the active index to the new length
+        self._sync_panel(leaf)
+        return gone
     }
 
 
@@ -2282,14 +3129,196 @@ struct DockTree {
             }
         }
     }
+
+
+    // redock moves an already-docked `panel` to a new position relative to `target` — the tree op behind
+    // drag-to-redock. `side`: 0 = left, 1 = right, 2 = top, 3 = bottom (a new split beside `target`), or 4 =
+    // CENTRE (group `panel` into `target`'s leaf as a TAB). It DETACHES `panel` from its current spot first
+    // (dropping just that tab if it shared a group, else collapsing its leaf) and re-resolves `target` by id
+    // AFTER, so a slot reshuffle can't stale an index. The panel keeps its id ⇒ its Flare state survives the
+    // move. No-ops (false) on a self-drop or an unknown panel/target. Left/top make the panel child A.
+    fn redock(mut self, panel: string, target: string, side: int) -> bool {
+        if panel == target { return false }
+        if self.leaf_of(panel) == -1 { return false }
+        if self.leaf_of(target) == -1 { return false }
+        let _ = self._detach(panel)                   // pull panel out; a grouped tab leaves its siblings intact
+        let tl = self.leaf_of(target)                 // target survives detach; re-resolve its (maybe-new) index
+        if tl == -1 {
+            self.add_root(panel)                      // defensive: target vanished → don't lose the panel
+            return false
+        }
+        if side == 4 {
+            self.add_tab(tl, panel)                   // centre drop → group as a tab of target's leaf
+            return true
+        }
+        let vert = side == 0 || side == 1             // left/right → side-by-side; top/bottom → stacked
+        if side == 0 || side == 2 {
+            self.split_before(tl, panel, vert, 0.4)   // panel leads (left / top), the smaller share
+        } else {
+            self.split(tl, panel, vert, 0.6)          // panel trails (right / bottom); target keeps 0.6
+        }
+        return true
+    }
+
+
+    // dock_root_edge docks `panel` against an OUTER edge of the whole workspace — it wraps the entire root
+    // (leaf OR split) in a fresh split with `panel` on the given `side` (0=left,1=right,2=top,3=bottom). Like
+    // redock it detaches the panel first, then re-inserts it; if the panel WAS the whole tree it is simply
+    // re-seeded as the lone root. Returns false on an unknown panel. The new outer strip takes ~30%.
+    fn dock_root_edge(mut self, panel: string, side: int) -> bool {
+        if self.leaf_of(panel) == -1 { return false }
+        let _ = self._detach(panel)
+        if self.root == -1 {
+            self.add_root(panel)                      // panel was the only leaf — nothing to wrap
+            return true
+        }
+        let old = self.root
+        let s = self._alloc(2, -1)
+        let nl = self._alloc(1, s)
+        self.dk_tabs[nl] = [panel]
+        self.dk_active[nl] = 0
+        self.dk_panel[nl] = panel
+        self.dk_vert[s] = side == 0 || side == 1
+        if side == 0 || side == 2 {                   // left / top → new panel is child A (leading)
+            self.dk_a[s] = nl
+            self.dk_b[s] = old
+            self.dk_ratio[s] = 0.3
+        } else {
+            self.dk_a[s] = old
+            self.dk_b[s] = nl
+            self.dk_ratio[s] = 0.7
+        }
+        self.dk_parent[old] = s
+        self.root = s
+        return true
+    }
+
+
+    // to_json serialises the tree to a std/json value an app can persist (the workspace survives relaunch —
+    // OFI-112). It stores every slot as-is (free slots included) so node INDICES round-trip exactly, with no
+    // re-indexing: per node kind/parent/a/b, the split's vert (0|1) + ratio (as int·1000, since std/json
+    // numbers are ints), and the leaf's tab list + active index. dk_panel is DERIVED (re-synced on load) and
+    // the solved rects are transient, so neither is stored. dock_from_json is the inverse.
+    fn to_json(self) -> json.Json {
+        var nodes: [json.Json] = []
+        var i = 0
+        loop {
+            if i == self.dk_kind.len() { break }
+            var tabs: [json.Json] = []
+            var j = 0
+            loop {
+                if j == self.dk_tabs[i].len() { break }
+                tabs.append(json.str(self.dk_tabs[i][j]))
+                j = j + 1
+            }
+            var vert = 0
+            if self.dk_vert[i] { vert = 1 }
+            nodes.append(json.obj([
+                json.member("k", json.num(self.dk_kind[i])),
+                json.member("p", json.num(self.dk_parent[i])),
+                json.member("a", json.num(self.dk_a[i])),
+                json.member("b", json.num(self.dk_b[i])),
+                json.member("v", json.num(vert)),
+                json.member("r", json.num(to_int(self.dk_ratio[i] * 1000.0))),
+                json.member("act", json.num(self.dk_active[i])),
+                json.member("tabs", json.arr(tabs))
+            ]))
+            i = i + 1
+        }
+        return json.obj([
+            json.member("root", json.num(self.root)),
+            json.member("nodes", json.arr(nodes))
+        ])
+    }
 }
 
 
 // dock_new builds an empty DockTree (no panels). Add the first panel with add_root.
 fn dock_new() -> DockTree {
     return DockTree {
-        dk_kind: [], dk_parent: [], dk_a: [], dk_b: [], dk_vert: [], dk_ratio: [], dk_panel: [],
+        dk_kind: [], dk_parent: [], dk_a: [], dk_b: [], dk_vert: [], dk_ratio: [],
+        dk_tabs: [], dk_active: [], dk_panel: [],
         dk_x: [], dk_y: [], dk_w: [], dk_h: [],
         root: -1
     }
+}
+
+
+// dock_from_json rebuilds a DockTree saved by to_json (OFI-112): it restores the slotmap arrays slot-for-slot
+// (indices preserved), decodes vert from 0|1 and ratio from int·1000, and re-syncs each leaf's dk_panel mirror
+// from its active tab. Pair with leaf_of() to validate the result before adopting it (e.g. that the app's
+// pinned panel is present) and fall back to a freshly built default if the stored layout is absent/corrupt.
+fn dock_from_json(j: json.Json) -> DockTree {
+    var t = dock_new()
+    let nodes = json.get(j, "nodes")
+    let n = json.length(nodes)
+    var i = 0
+    loop {
+        if i == n { break }
+        let nd = json.at(nodes, i)
+        t.dk_kind.append(json.as_int(json.get(nd, "k")))
+        t.dk_parent.append(json.as_int(json.get(nd, "p")))
+        t.dk_a.append(json.as_int(json.get(nd, "a")))
+        t.dk_b.append(json.as_int(json.get(nd, "b")))
+        t.dk_vert.append(json.as_int(json.get(nd, "v")) == 1)
+        t.dk_ratio.append(to_float(json.as_int(json.get(nd, "r"))) / 1000.0)
+        t.dk_active.append(json.as_int(json.get(nd, "act")))
+        var tabs: [string] = []
+        let tj = json.get(nd, "tabs")
+        let m = json.length(tj)
+        var k = 0
+        loop {
+            if k == m { break }
+            tabs.append(json.as_str(json.at(tj, k)))
+            k = k + 1
+        }
+        t.dk_tabs.append(tabs)
+        t.dk_panel.append("")
+        t.dk_x.append(0)
+        t.dk_y.append(0)
+        t.dk_w.append(0)
+        t.dk_h.append(0)
+        i = i + 1
+    }
+    t.root = json.as_int(json.get(j, "root"))
+    i = 0
+    loop {
+        if i == t.dk_kind.len() { break }
+        if t.dk_kind[i] == 1 && t.dk_tabs[i].len() > 0 {
+            t._sync_panel(i)            // restore dk_panel from the active tab
+        }
+        i = i + 1
+    }
+    return t
+}
+
+
+// dock_zone classifies where the cursor (mx,my) falls inside a panel rect for drag-to-redock — pure geometry
+// so the drop logic is headless-testable. Returns -1 outside the rect, 4 for the centre box (tabify, inert in
+// v1), else the nearest EDGE: 0 left, 1 right, 2 top, 3 bottom. The middle third on BOTH axes is the centre;
+// otherwise the closest edge wins, distances NORMALISED by the rect's own width/height (via cross-multiply, so
+// a wide panel doesn't bias toward the horizontal edges). The 0..3 result matches redock()/dock_root_edge()'s
+// `side`, so a hovered zone maps straight to a tree mutation.
+fn dock_zone(x: int, y: int, w: int, h: int, mx: int, my: int) -> int {
+    if mx < x { return -1 }
+    if mx >= x + w { return -1 }
+    if my < y { return -1 }
+    if my >= y + h { return -1 }
+    let lx = mx - x                  // distance from each edge (px)
+    let rx = x + w - mx
+    let ty = my - y
+    let by = y + h - my
+    if lx * 3 > w && rx * 3 > w && ty * 3 > h && by * 3 > h {
+        return 4                     // middle third of both axes → centre (tabify)
+    }
+    let dl = lx * h                  // normalise: dist/dimension, scaled by w*h so all four compare on one ruler
+    let dr = rx * h
+    let dt = ty * w
+    let db = by * w
+    var best = 0
+    var bv = dl
+    if dr < bv { best = 1  bv = dr }
+    if dt < bv { best = 2  bv = dt }
+    if db < bv { best = 3  bv = db }
+    return best
 }

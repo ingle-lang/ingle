@@ -14,6 +14,27 @@ good part, and it maps straight onto Ember's `loop { …describe the frame… }`
 graph-shaped mutable state, so the ownership model stays clean — and the result is *more* legible
 for an LLM than React.
 
+## Mental model
+
+Three rules, and the rest follows:
+
+1. **Your component function runs every frame** — ~60×/second — not once per "render". There is no reconciler
+   deciding when to re-run it; the `loop` re-runs *everything*, unconditionally. So building the UI, handling
+   an event, and reading state all happen in one straight-line pass you can read top to bottom.
+2. **Events are return values, handled inline.** `if f.button("Save") { … }` *is* the click handler — it runs
+   the instant the button reports a click, right where it sits. No callbacks, no effect queue, no re-render
+   batching.
+3. **State lives outside the function, in plain `var`s the loop owns.** You read them at the top of the frame
+   and write them back as things change. This is why you almost never need a `useState` equivalent: a
+   re-running function in React has nowhere stable to keep state, so React invented hooks; in Ember the loop
+   *is* that stable place. `state_*` is only for state you want **encapsulated inside a reusable component**,
+   so a caller needn't thread it.
+
+Props are ordinary **typed function arguments**, so passing the wrong thing to a component is a *compile*
+error, not a runtime surprise — the type system comes for free, with no `PropTypes` ceremony. There is no
+virtual tree, no async re-render, no dependency arrays: **the frame is the unit**. If you can read the loop
+body top to bottom, you understand the whole program.
+
 ## The mapping
 
 | React | Flare |
@@ -77,6 +98,56 @@ fn main() -> int {
 A full app built on Flare — a switchable conversation list, a scrollable transcript, a composer, and a
 settings **modal** of **segmented** controls — is [`public/claude-desktop/flare_chat.em`](../public/claude-desktop/flare_chat.em).
 
+## A bigger example — a settings dialog
+
+The honest answer to "how does an immediate-mode UI hold a *tree* of mutable state?" is that it doesn't need
+hooks or reducers — the tree is just plain `var`s the loop owns, mutated directly. Here a `modal` (a centred
+panel over a dimmed scrim) of `segmented` controls drives appearance, model, and token settings; a `dirty`
+flag is the app's own "unsaved" signal. Full runnable file:
+[`examples/graphics/20_settings.em`](../examples/graphics/20_settings.em); the core:
+
+```rust
+var dark = false        // the whole "state tree" is just plain vars the loop owns
+var open = true
+var dirty = false
+
+loop {
+    // …draw the frame…
+    if open {
+        if !f.modal_begin("settings", 460, 0) {    // a scrim press closes it
+            open = false
+        }
+        f.heading("Settings")
+
+        f.text_muted("Appearance")
+        var appear = 1
+        if dark {
+            appear = 0
+        }
+        let na = f.segmented("appearance", ["Dark", "Light"], appear)
+        if na != appear {                          // a choice changed → mutate the var directly
+            dark = (na == 0)
+            if dark {
+                f.use_dark()
+            } else {
+                f.use_light()
+            }
+            dirty = true
+        }
+        // …Model and Max-tokens follow the same shape: a segmented + an `if changed { … }`…
+
+        if f.primary("Done") {
+            open = false
+        }
+        f.modal_end()
+    }
+}
+```
+
+No `useState`, no reducer, no context provider — the dialog reads and writes ordinary variables, and it
+scales to nested structs and arrays the same way. That is the composability story: there is no separate state
+graph to keep consistent, because the state *is* your data.
+
 ## API (v1)
 
 Lifecycle: `new()`, `begin()`, `finish()`, `bg()`, `use_dark()/use_light()`, `set_zoom(pct)` (the app-wide
@@ -106,15 +177,21 @@ scrim — a context menu / dropdown (the cursor position is the usual anchor). I
 press-outside-to-close (returns `false`) and background-inert behaviour as the modal, and is filled with
 `menu_item(txt) -> bool` rows (full-width, accent-highlit on hover). Both overlays rest on `std/layout`'s
 floating node — centred (`open_float`) or anchored (`open_float_at`), clamped on-screen.
-Widgets: `button(txt) -> bool`, `primary(txt) -> bool`, `ghost_button(txt) -> bool` (a subtle, borderless
+Widgets: `button(txt) -> bool` (secondary), `primary(txt) -> bool` (the headline action, clay accent),
+`danger(txt) -> bool` (a **destructive** action — the theme's red fill, for Delete/Remove/Discard; same shape
+as `primary`, so the colour is the only signal — reach for it only when the action is hard to undo),
+`ghost_button(txt) -> bool` (a subtle, borderless
 action — no fill at rest, a soft hover fill, muted ink; for toolbars + message Copy/Retry), `nav_item(txt, active) -> bool` (a
 full-width **sidebar nav row** — GROWS to fill the panel width so it tracks a resizable sidebar, LEFT-aligned text that
-**ellipsizes to its pixel width** (`text-overflow: ellipsis`, 1-frame lag like `text_area`), the accent fill when `active`;
+**ellipsizes to its pixel width** (`text-overflow: ellipsis`), **FLAT at rest** (no card — just text, like a VS Code /
+Linear sidebar) with a fill only on hover and the accent fill when `active`;
 ALWAYS place it in a `row` (its `grow` fills WIDTH there; bare in a column it would grow DOWN), optionally with a trailing
 `ghost_button("···")` for per-item actions), `segmented(key, options, selected) -> int` (a
 single-choice control — the selected option filled with the accent, the rest plain; returns the chosen
 index, so it reads `idx = f.segmented(...)`), `avatar(glyph)` (a small rounded accent badge with a centred
-glyph — a chat / identity mark), `label(s)`, `text_muted(s)`, `heading(s)`, `divider()` (a
+glyph — a chat / identity mark), `label(s)`, `text_muted(s)`, `heading(s)` (single-line text — each
+**ellipsizes** to its solved box width when too long (`text-overflow: ellipsis`), never spilling off-screen),
+`divider()` (a
 full-width hairline section rule), `paragraph(text, width)` (word-WRAPPED *plain* prose),
 `rich_text(text, width)` (word-wrapped prose with **inline** Markdown emphasis — `**bold**` as faux-bold,
 `*italic*` in the italic face, `` `code` `` on a monospace chip, `[links](url)` in the accent with an
@@ -139,6 +216,32 @@ Helper: `spinner(tick) -> string` returns the current frame of a `- \ | /` throb
 a tiny loading indicator, e.g. `f.text_muted("Thinking " + flare.spinner(tick))`.
 
 Everything delegates to `std/ui`, so the theme, the UI tape, and contracts carry over unchanged.
+
+## Theming — one token set, two polarities
+
+A theme is a plain `ui.Style` value: a palette plus a few metrics. Flare ships two house themes —
+`use_light()` (warm "parchment + clay", the default) and `use_dark()` — built from the **same token set**,
+so the only difference between them is the values, never the structure. Every widget reads from `f.ui.style`,
+so theming is just data: swap the whole `Style` or tweak a field.
+
+The tokens, grouped:
+
+- **Surfaces** — `bg` (window), `panel` (card/widget fill), `bar` (a subtle elevated surface, e.g. a dock
+  panel's title bar), `hover` / `pressed` (interaction fills), `track` (slider/scrollbar groove).
+  `bar` is set **per theme** rather than derived by shading `panel`, because a fixed shade direction can't
+  read on both grounds (a lighter step vanishes on a white panel) — the light/dark parity fix.
+- **Ink** — `ink` (primary text), `muted_ink` (secondary/hints).
+- **Accent & semantic** — `accent` / `accent_ink` (the headline action, selection, focus); `danger` /
+  `danger_ink` (the destructive action — `f.danger()`).
+- **Border & elevation** — `border` (hairline), `shadow` (drop-shadow alpha; 0 disables elevation).
+- **Metrics** — `radius` (corner radius), `pad` (inter-widget gap + inner padding), `gutter` (the page-edge
+  inset for top-level content — the outer margin, larger than `pad`, so a bare layout never kisses the window
+  edge), `text_size`, `row_h`. The type metrics scale together under `set_zoom(pct)`.
+
+Because a theme is just a `Style` value — a struct of packed colours and a few ints — an app owns it **as
+data**: build one field by field, copy a house theme and tweak a field, or read one from a file and assign it
+to `f.ui.style`. There is no theme *engine* to register with; swapping the struct re-skins every widget on the
+next frame.
 
 ## Animation — springs + FLIP
 
@@ -213,28 +316,114 @@ let terminal = t.split(editor, "terminal", false, 0.72) // editor / terminal (st
 ```
 
 - `add_root(panel)` seeds an empty tree with its first panel; returns the leaf index.
-- `split(leaf, panel, vertical, ratio)` docks `panel` next to an existing `leaf`. A new split node
-  takes the leaf's place, with the old leaf as child A and the new panel as child B; `vertical`
-  picks a side-by-side vs stacked divider and `ratio` is child A's fraction. Returns the new leaf.
-- `close(leaf)` removes a panel and **collapses its parent split** (the sibling takes the split's
+- `split(leaf, panel, vertical, ratio)` docks `panel` after an existing `leaf` — a new split node
+  takes the leaf's place, the old leaf as child A and the new panel as child B (right / bottom);
+  `vertical` picks a side-by-side vs stacked divider, `ratio` is child A's fraction. Returns the new
+  leaf. **`split_before`** is its mirror — the new panel becomes child A (left / top), e.g. to
+  re-dock a sidebar back on the left.
+- `close(leaf)` removes a whole leaf and **collapses its parent split** (the sibling takes the split's
   place), returning the removed panel id — pass it to **`f.forget(id)`** to dispose that panel's
   keyed state, so a closed panel leaks nothing (structure and state both reclaimed).
+- `leaf_of(panel)` resolves a panel id to its leaf index (or `-1`), finding the panel in **any of a
+  leaf's tabs** — the lookup an app uses to re-dock beside a known panel, or to test whether one is open.
+- `redock(panel, target, side)` moves an already-docked `panel` relative to `target`: `side` 0 left /
+  1 right / 2 top / 3 bottom splits beside it, **`side` 4 (centre) groups `panel` into `target`'s leaf
+  as a tab**. It *detaches* the panel first (dropping just that tab if it shared a group, else collapsing
+  its leaf) and resolves `target` by id *after*, so a slot reshuffle can't stale it. The panel keeps its
+  id (and state). The tree op behind drag-to-redock; a no-op (`false`) on a self-drop or unknown
+  panel/target.
+- `dock_root_edge(panel, side)` docks `panel` against an **outer edge of the whole workspace** —
+  it detaches the panel, then wraps the entire root (leaf or split) in a fresh split with `panel` on
+  `side`. The drag op for the workspace-edge bands.
 - `solve(x, y, w, h)` assigns every node an absolute rect (a split divides its rect by `ratio` with
   an 8px gap; a leaf takes its rect whole). Pure geometry — deterministic and headless-testable.
 
-Render the whole tree with one call:
+**Tabs.** A leaf is a *tab group* of one or more panels (a single panel is just a one-tab leaf, so
+non-tabbed docking is unchanged). `tabs_of(leaf)` returns the tab ids, `tab_count(leaf)` how many,
+`active_tab(leaf)` the visible one's index; `set_active(leaf, idx)` switches it, `add_tab(leaf, panel)`
+groups a panel in (the panel must already be detached — `redock(_, _, 4)` does both). `close_tab(leaf)`
+closes the **active** tab (the leaf survives with the rest, or collapses if it was the last) and returns
+the removed id — this is what a panel's ✕ triggers, so wire `dock_begin`'s returned leaf to
+`t.close_tab(hit)` and `f.forget()` the result. `leaves()` returns the **active** panel of each leaf, so
+an app's render loop is unchanged — it draws the active tab of every leaf.
+
+A module-level **`dock_zone(x, y, w, h, mx, my) -> int`** classifies where a cursor falls in a rect
+for drop targeting (`-1` outside, `0`–`3` the nearest edge, `4` the centre box → tabify) — pure
+geometry, so the drop preview and the mutation it triggers share one source of truth.
+
+**Persistence.** `t.to_json()` serialises the whole tree to a `std/json` value (every node's
+kind/parent/children/divider/ratio + each leaf's tabs/active + the root), and **`dock_from_json(j)`**
+rebuilds it — so a rearranged workspace **survives relaunch**. Stash it next to your other settings
+(`json.member("dock", t.to_json())`), and on load rebuild with `dock_from_json`, validating it first —
+e.g. `if t2.leaf_of("Main") >= 0 { … } else { build_default() }` — so a stale or corrupt layout falls
+back to the default instead of opening empty. Solved rects and the `dk_panel` mirror aren't stored
+(transient / derived); ratios round-trip as integers (`int(r·1000)`), so the layout is exact.
+
+### Rendering & interaction
+
+Render the workspace in three parts: open it, fill each panel, done.
 
 ```ember
-f.dock(t, 20, 20, screen_width() - 40, screen_height() - 40)
+f.dock_pin("Chat")                                            // (optional) a permanent anchor — no close ✕
+let hit = f.dock_begin(t, 12, 12, screen_width() - 24, screen_height() - 24)
+if hit >= 0 { let id = t.close_tab(hit); f.forget(id) }       // a ✕ was clicked → close active tab + dispose
+
+let ids = t.leaves()
+var i = 0
+loop {
+    if i == ids.len() { break }
+    if f.dock_panel(ids[i]) {                                 // open a clipped, flexbox content region
+        // …ordinary Flare widgets: heading / paragraph / scroll / text_area / nav_item…
+        f.dock_panel_end()
+    }
+    i = i + 1
+}
 ```
 
-`f.dock` solves the tree and paints each panel as a themed frame (soft shadow, rounded fill,
-hairline border, a title bar). It is **FLIP-animated**: each panel's drawn rect *springs* toward its
-solved target (the same deterministic, fixed-timestep springs as the rest of Flare), so docking,
-closing, or resizing a panel makes the others slide to fill the space instead of snapping. The
-animation state is keyed under each panel's scope, so `f.forget(id)` disposes it along with the
-panel's state. See `examples/graphics/19_dock.em` (press C to close a panel and watch the FLIP).
+- **`dock_begin(t, x, y, w, h) -> int`** solves the tree and paints every panel as a themed frame
+  (soft shadow, rounded fill, hairline border, a title bar with a close ✕). It draws a **draggable
+  divider** at each split — grab it and the panes re-proportion live (the `ratio` tracks the cursor,
+  clamped to 8–92%). It also handles **drag-a-title-bar-to-redock** and renders a **tab strip** for any
+  grouped leaf (click a tab to switch; below). It returns the **leaf index whose active-tab ✕ was
+  clicked** this frame (or `-1`) — wire it to `t.close_tab(hit)`.
+- **`dock_panel(id) -> bool`** opens a content region anchored at that panel's solved body rect
+  (below the title bar) and **clipped to it** — a full floating flexbox subtree, so `column` / `row`
+  / `grow` / `scroll_begin` / `text_area` all compose inside exactly as at the top level. Returns
+  `false` (build nothing) if `id` isn't a live panel this frame. Pair every `true` with
+  `dock_panel_end()`.
+- **`dock_pin(id)`** (call before `dock_begin`, each frame) marks a panel as non-closable — it draws
+  no ✕. For an app's main view that should always stay docked.
 
-**Limits (current).** Panel *body* content is a placeholder — drawing real per-panel widgets,
-divider drag-to-resize, drag-to-dock with drop zones, tab groups, and floating windows are the next
-rung (the docking UX). The tree models tiled docking today.
+**Drag a title bar to re-dock.** Grab any panel's title bar (or one of its tabs) and drag it — past a
+small threshold a **ghost chip** follows the cursor and a translucent **drop preview** lights up where it
+will land. Hover the **left / right / top / bottom third** of another panel to dock beside it, the
+**centre** to group it as a **tab**, or the **outer edge band** of the whole workspace to dock against the
+full side. Release to re-dock; the tree mutates and the other panels FLIP-slide to make room. A panel
+keeps its id across the move, so its state (scroll position, drafts) survives. A bare click — no drag past
+the threshold — does nothing, so title bars and tabs stay clickable. Pinned panels (no ✕) are still
+draggable; pinning only removes *closing*, not *moving*. The interaction is entirely inside `dock_begin` —
+an app that already renders a dock gets it for free. (The redock itself is the pure tree op
+`t.redock(panel, target, side)` / `t.dock_root_edge(panel, side)`, and `dock_zone(...)` is the headless
+drop-zone geometry, if an app wants to drive docking programmatically.)
+
+**Tabs.** Drop a panel on another's centre and the two share a leaf as **tabs** — a chip strip in the
+title bar, the active one raised with an accent underline. Click a chip to switch (it activates on the
+press, so the same gesture can drag that tab straight back out to its own pane); the ✕ closes the active
+tab, collapsing the leaf only when its last tab goes. `dock_panel` renders only the active tab of each
+leaf, so a tab group costs nothing extra to drive.
+
+It is **FLIP-animated**: each panel's drawn rect *springs* toward its solved target (the same
+deterministic, fixed-timestep springs as the rest of Flare), so docking and closing a panel makes
+the others *slide* to fill the space. During an active divider drag the panes **snap** instead, so a
+resize feels direct rather than rubber-banding behind the cursor. The animation state is keyed under
+each panel's id, so `f.forget(id)` disposes it along with the panel's state.
+
+See **`examples/graphics/19_dock.em`** for a live interactive workspace (drag a title bar to re-dock or
+group as tabs, drag the dividers, click ✕, `R` resets), and **`public/claude-desktop/flare_chat.em`** — the
+Claude app's whole body is a dock: Conversations | Chat | Inspector, with Chat pinned and the side panels
+closeable, re-dockable, **tabbable**, and freely **rearrangeable by dragging their title bars**.
+
+**Limits (current).** **Floating windows** (pop a panel out into its own free-floating, draggable window)
+are the next rung; tiled docking with live resize, drag-to-redock, and tab groups is the model today. The
+layout now **persists** across relaunch (`to_json` / `dock_from_json`, see *Persistence* above — OFI-112
+closed); `flare_chat` saves it in its store, so a resized/closed/re-docked/tabbed workspace comes back.

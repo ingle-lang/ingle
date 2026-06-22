@@ -1,4 +1,5 @@
 #include "diag.h"
+#include "jsonw.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -137,55 +138,25 @@ void diag_note(const char *file, int line, int col, const char *msg) {
 
 
 
-// put_json_string writes `s` as a quoted, escaped JSON string (or `null`).
-static void put_json_string(FILE *out, const char *s) {
-    if (s == NULL) {
-        fputs("null", out);
-        return;
-    }
-    fputc('"', out);
-    for (const char *p = s; *p != '\0'; p++) {
-        unsigned char c = (unsigned char)*p;
-        switch (c) {
-            case '"':  fputs("\\\"", out); break;
-            case '\\': fputs("\\\\", out); break;
-            case '\n': fputs("\\n", out);  break;
-            case '\r': fputs("\\r", out);  break;
-            case '\t': fputs("\\t", out);  break;
-            default:
-                if (c < 0x20) {
-                    fprintf(out, "\\u%04x", c);
-                } else {
-                    fputc((int)c, out);
-                }
-        }
-    }
-    fputc('"', out);
-}
-
-
-
-
-
 
 void diag_flush_json(FILE *out) {
     for (int i = 0; i < g_count; i++) {
         const Diag *d = &g_diags[i];
         fputs("{\"severity\":\"error\",\"file\":", out);
-        put_json_string(out, d->file);
+        json_write_string(out, d->file);
         fprintf(out, ",\"line\":%d,\"col\":%d,\"message\":", d->line, d->col);
-        put_json_string(out, d->msg);
+        json_write_string(out, d->msg);
         fputs(",\"near\":", out);
-        put_json_string(out, d->near);
+        json_write_string(out, d->near);
         fputs(",\"help\":", out);
-        put_json_string(out, d->help);
+        json_write_string(out, d->help);
         fputs(",\"note\":", out);
         if (d->note_msg == NULL) {
             fputs("null", out);
         } else {
             fprintf(out, "{\"line\":%d,\"col\":%d,\"message\":",
                     d->note_line, d->note_col);
-            put_json_string(out, d->note_msg);
+            json_write_string(out, d->note_msg);
             fputc('}', out);
         }
         fputs("}\n", out);

@@ -1476,10 +1476,10 @@ generic struct's individual *methods* and on generic *enums*, and inference stay
 
 > **Fireside trivia.** The angle brackets `<T>` for generics are a C++ inheritance, and
 > they've caused parser writers grief ever since, because `<` is also "less than." Is `a < b >
-> c` a comparison or a generic? Ember resolves the ambiguity with a lookahead rule (it's a
-> generic only when a balanced `<...>` is immediately followed by `{`), which works
-> beautifully for normal code and is logged, with admirable honesty, as a known sharp edge to
-> be made fully rigorous later. Every language in this family has a scar in exactly this spot.
+> c` a comparison or a generic? Ember resolves it with a lookahead rule: it reads a generic only
+> when a balanced `<...>`, every token inside it type-legal, is immediately followed by `{`.
+> That rule is total rather than a guess — no expression begins with `{`, so a `> {` can never
+> continue a comparison, and a non-type token inside the brackets proves the `<` was less-than. Every language in this family has a scar in exactly this spot.
 
 ---
 
@@ -3026,9 +3026,8 @@ not so you'll use them.
 
 **Tooling and language**
 
-- **Separate compilation / incremental rebuilds**, **metaprogramming** (`comptime` vs. macros —
-  deliberately undecided), and making the generic-literal `<` disambiguation fully rigorous
-  (it's a solid heuristic today) are all on the roadmap.
+- **Separate compilation / incremental rebuilds** and **metaprogramming** (`comptime` vs. macros —
+  deliberately undecided) are on the roadmap.
 
 If you stick to the sixteen chapters before this one, you will never write a line that doesn't
 compile for a reason on this list. That's the deal.

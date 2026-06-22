@@ -15,10 +15,11 @@ reference compiler is written in C with no third-party dependencies.
 
 ## Read
 
-- [Language reference](language) — what runs today.
-- [The Ember Book](THE_EMBER_BOOK) — the long-form guided tour.
-- [Flare](flare) — the declarative UI layer.
-- [Architecture](architecture) — compiler & toolchain decisions.
+- [Home](/) — the landing page.
+- [Language reference](/language) — what runs today.
+- [The Ember Book](/THE_EMBER_BOOK) — the long-form guided tour.
+- [Flare](/flare) — the declarative UI layer.
+- [Architecture](/architecture) — compiler & toolchain decisions.
 - [Manifesto](https://github.com/kmcnally5/ember-lang/blob/main/MANIFESTO.md) — the design philosophy and the decisions behind the language.
 
 ## Get it

@@ -608,6 +608,15 @@ static void gen_expr_raw(Codegen *cg, const Expr *e) {
                 emit(cg, OP_POP);                                // take right
                 gen_expr(cg, e->as.binary.right);
                 patch_jump(cg, end);
+            } else if (e->as.binary.str_concat) {
+                // String concatenation (checker-flagged): emit the CONSUMING OP_CONCAT,
+                // not OP_ADD, so a chain `a + b + c` releases its intermediate result instead of leaking
+                // it (OFI-059's sibling for explicit `+`). The checker consumed both operands, so a
+                // borrowed one was incref'd here (gen_expr emits OP_INCREF for moves_local==2) and an
+                // owned temporary was not — OP_CONCAT then releases both, balanced.
+                gen_expr(cg, e->as.binary.left);
+                gen_expr(cg, e->as.binary.right);
+                emit(cg, OP_CONCAT);
             } else {
                 gen_expr(cg, e->as.binary.left);
                 gen_expr(cg, e->as.binary.right);
@@ -990,6 +999,43 @@ static void gen_expr_raw(Codegen *cg, const Expr *e) {
             if (callee->kind == EXPR_IDENT) {
                 int nid = native_id_for_name(callee->as.ident);
                 if (nid >= 0) {
+                    int n_argc = (int)e->as.call.arg_count;
+                    int dmask  = e->as.call.drop_mask;
+                    if (dmask != 0) {
+                        // An owning-temp object arg (a fresh string `draw_text(a + b, …)`) must be
+                        // dropped by the caller: OP_CALL_NATIVE pops its args without releasing them
+                        // (a native adopts nothing), so a temp leaks one per call — per widget, per
+                        // frame in a UI. Keep each kept temp BELOW the arg region, pass a borrow alias
+                        // (OP_PICK), call, then OP_DROP_UNDER each from under the single result. The
+                        // builtin analogue of the regular-call drop discipline (OFI-027). Masked args
+                        // are object temps, never the u64-to_string case (the checker excludes it).
+                        int keep = 0;
+                        for (int i = 0; i < n_argc; i++) {
+                            if (dmask & (1 << i)) {
+                                gen_expr(cg, e->as.call.args[i]);
+                                keep++;
+                            }
+                        }
+                        int built = 0, t_seen = 0;
+                        for (int i = 0; i < n_argc; i++) {
+                            if (dmask & (1 << i)) {
+                                emit(cg, OP_PICK);
+                                emit_idx(cg, (keep + built - 1) - t_seen);
+                                t_seen++;
+                                built++;
+                            } else {
+                                gen_expr(cg, e->as.call.args[i]);
+                                built++;
+                            }
+                        }
+                        emit(cg, OP_CALL_NATIVE);
+                        emit_idx(cg, nid);
+                        emit_idx(cg, n_argc);
+                        for (int k = 0; k < keep; k++) {
+                            emit(cg, OP_DROP_UNDER);
+                        }
+                        break;
+                    }
                     for (size_t i = 0; i < e->as.call.arg_count; i++) {
                         gen_expr(cg, e->as.call.args[i]);
                     }
@@ -1390,6 +1436,13 @@ static void gen_expr_raw(Codegen *cg, const Expr *e) {
             int done = emit_jump(cg, OP_JUMP);
             patch_jump(cg, fail);                // failure: [v, matched]
             emit(cg, OP_POP);                    // drop the test result [v]
+            // OFI-108: record this `?`-propagation hop (the Err is being returned early from here).
+            // Debug-only — release-elided exactly like the ensures checks below, so shipped binaries
+            // pay nothing. OP_ROUTE_HOP touches no stack, so emitting it before the ensures park and
+            // the early-return drops is order-safe and cannot disturb the value being propagated.
+            if (!codegen_release_profile) {
+                emit(cg, OP_ROUTE_HOP);
+            }
             // Postconditions are checked on the propagation exit too (OFI-046), so a `?`-return is
             // held to the same `ensures` contract as an explicit `return`. The wrinkle: `result`
             // binds at a fixed slot just above the locals (emit_ensures_checks), which is `v`'s
@@ -1893,10 +1946,15 @@ static void gen_stmt(Codegen *cg, const Stmt *s) {
 
         case STMT_MATCH: {
             // Evaluate the scrutinee once into an anonymous "subject" slot the
-            // case tests and field bindings read from.
+            // case tests and field bindings read from. When it is a fresh OWNING temporary
+            // (subject_drop — e.g. `match self.m.get(k)`), the slot OWNS it, so it carries a drop:
+            // the fall-through releases it explicitly below, and an EARLY exit from a case body
+            // (return / break / continue / `?`) releases it via emit_return_drops / emit_drops_and_pops
+            // — without this the scrutinee leaked on every early-return-from-a-case (OFI-118: e.g.
+            // `match m.get(k) { case Some(v) { return v } … }`, the Flare per-frame state-read leak).
             gen_expr(cg, s->as.match.value);
             int subj_lc = cg->local_count;            // logical index, for unwind
-            int subject = cg_declare(cg, "", 0, 1);   // physical slot of the subject
+            int subject = cg_declare(cg, "", s->as.match.subject_drop ? 1 : 0, 1);   // physical slot
 
             int end_jumps[MAX_MATCH_CASES];
             int end_count = 0;
@@ -2527,11 +2585,24 @@ int codegen_program(const Program *ast, const ModuleSet *modules,
         if (d->kind != DECL_ENUM) {
             continue;
         }
+        // Record the prelude Result/Option failure-variant identity (the FIRST such enum, i.e.
+        // the prelude's) so the driver can detect an Err/None that reaches main unhandled and
+        // report it as a Fault (docs/faults.md, FCAT_UNHANDLED_ERR). ei is the runtime type_id.
+        int is_result = strcmp(d->as.enum_.name, "Result") == 0;
+        int is_option = strcmp(d->as.enum_.name, "Option") == 0;
         for (size_t v = 0; v < d->as.enum_.variant_count; v++) {
             cg_variants[vix].name          = d->as.enum_.variants[v].name;
             cg_variants[vix].enum_id       = ei;
             cg_variants[vix].variant_index = (int)v;
             cg_variants[vix].field_count   = (int)d->as.enum_.variants[v].field_count;
+            const char *vn = d->as.enum_.variants[v].name;
+            if (is_result && out->result_enum_id < 0 && strcmp(vn, "Err") == 0) {
+                out->result_enum_id = ei;
+                out->err_tag        = (int)v;
+            } else if (is_option && out->option_enum_id < 0 && strcmp(vn, "None") == 0) {
+                out->option_enum_id = ei;
+                out->none_tag       = (int)v;
+            }
             vix++;
         }
         ei++;

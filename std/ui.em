@@ -229,10 +229,16 @@ struct Style {
     muted_ink: int   // secondary text (labels, hints)
     accent: int      // slider fill / toggle-on / focus ring / selection
     accent_ink: int  // text or knob drawn ON the accent colour
+    danger: int      // destructive-action fill (a delete / remove button)
+    danger_ink: int  // text drawn ON the danger colour
     border: int      // hairline widget border
     track: int       // slider / toggle / scrollbar track
+    bar: int         // title-bar / subtle elevated-surface tint — set per theme so it reads in
+                     // BOTH polarities (a step lighter than panel on dark, a step darker on light;
+                     // never derive it by shading panel, which clamps to nothing on white)
     radius: int      // corner radius (px)
     pad: int         // padding inside and between widgets
+    gutter: int      // page-edge inset for top-level content (the outer margin; larger than pad)
     text_size: int
     row_h: int       // widget row height
     shadow: int      // drop-shadow alpha (0..255; 0 disables elevation)
@@ -244,8 +250,9 @@ fn dark() -> Style {
     return Style {
         bg: rgb(27, 29, 35), panel: rgb(42, 45, 54), hover: rgb(53, 57, 69),
         pressed: rgb(35, 38, 48), ink: rgb(236, 238, 242), muted_ink: rgb(150, 156, 170),
-        accent: rgb(76, 141, 246), accent_ink: rgb(255, 255, 255), border: rgb(58, 62, 74),
-        track: rgb(58, 62, 74), radius: 8, pad: 8, text_size: 20, row_h: 34, shadow: 70
+        accent: rgb(76, 141, 246), accent_ink: rgb(255, 255, 255),
+        danger: rgb(224, 96, 92), danger_ink: rgb(255, 255, 255), border: rgb(58, 62, 74),
+        track: rgb(58, 62, 74), bar: rgb(50, 53, 64), radius: 8, pad: 8, gutter: 16, text_size: 20, row_h: 34, shadow: 70
     }
 }
 
@@ -255,8 +262,9 @@ fn light() -> Style {
     return Style {
         bg: rgb(244, 245, 248), panel: rgb(255, 255, 255), hover: rgb(238, 240, 245),
         pressed: rgb(228, 231, 238), ink: rgb(28, 31, 38), muted_ink: rgb(110, 116, 128),
-        accent: rgb(42, 125, 246), accent_ink: rgb(255, 255, 255), border: rgb(214, 218, 226),
-        track: rgb(220, 224, 232), radius: 8, pad: 8, text_size: 20, row_h: 34, shadow: 35
+        accent: rgb(42, 125, 246), accent_ink: rgb(255, 255, 255),
+        danger: rgb(208, 64, 62), danger_ink: rgb(255, 255, 255), border: rgb(206, 211, 221),
+        track: rgb(220, 224, 232), bar: rgb(238, 240, 245), radius: 8, pad: 8, gutter: 16, text_size: 20, row_h: 34, shadow: 34
     }
 }
 
@@ -594,6 +602,54 @@ struct Ui {
         if self.sp_drag == id {
             self.sp_drag = NONE
         }
+    }
+
+
+    // split_ratio_drag is the divider-resize latch for a DOCK split: a hit band at (x,y,w,h) that, when
+    // dragged, returns child-A's new FRACTION (0..1) of the split's main axis — the ratio model a DockTree
+    // stores, vs _split_drag's absolute pixel size. Unlike _split_drag it is position-ABSOLUTE: the divider
+    // tracks the cursor directly (ratio = (cursor - origin) / extent), which is what feels right for a tiled
+    // panel boundary. `origin` is the split rect's main-axis start (sx for a vertical divider, sy for a
+    // horizontal one) and `extent` its main-axis length minus the divider gap. Clamped to [0.08, 0.92] so a
+    // pane can never collapse to nothing. Sets the matching ↔ / ↕ resize cursor while hot or dragging.
+    fn split_ratio_drag(mut self, id: int, x: int, y: int, w: int, h: int,
+                        vertical: bool, origin: int, extent: int, ratio: float) -> float {
+        let over = self.mx >= x && self.mx < x + w && self.my >= y && self.my < y + h
+        let allowed = self.open_popup == NONE && self.cur_win == self.hover_win
+        if allowed && over {
+            self.hot = id
+        }
+        if allowed && over && self.down && !self.was {   // press DOWN on the band → latch the resize
+            self.sp_drag = id
+        }
+        var r = ratio
+        if self.sp_drag == id {
+            if self.down {
+                var axis = self.mx
+                if !vertical {
+                    axis = self.my
+                }
+                if extent > 0 {
+                    r = to_float(axis - origin) / to_float(extent)
+                }
+                if r < 0.08 {
+                    r = 0.08
+                }
+                if r > 0.92 {
+                    r = 0.92
+                }
+            } else {
+                self.sp_drag = NONE                       // released
+            }
+        }
+        if self.hot == id || self.sp_drag == id {         // show the resize pointer while hovered/dragging
+            if vertical {
+                set_cursor(CURSOR_RESIZE_EW)
+            } else {
+                set_cursor(CURSOR_RESIZE_NS)
+            }
+        }
+        return r
     }
 
 

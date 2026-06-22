@@ -47,6 +47,7 @@ golden_ext() {
         replay)  echo "replay" ;;
         prove)   echo "prove" ;;
         docs)    echo "md" ;;
+        fault)   echo "fault" ;;
         *)       echo "out" ;;
     esac
 }
@@ -63,7 +64,18 @@ emit_flag() {
         replay)  echo "replay" ;;
         prove)   echo "prove" ;;
         docs)    echo "docs" ;;
+        fault)   echo "run" ;;
         *)       echo "tokens" ;;
+    esac
+}
+
+# extra_flags adds per-stage compiler flags beyond --emit. The `fault` stage runs ordinary
+# programs (--emit=run) but selects the AGENT Fault render (--faults=agent) so the LLM-facing
+# JSON-Lines failure artifact is golden-locked (docs/faults.md).
+extra_flags() {
+    case "$1" in
+        fault) echo "--faults=agent" ;;
+        *)     echo "" ;;
     esac
 }
 
@@ -87,6 +99,7 @@ for dir in "$ROOT"/tests/*/; do
     [ "$stage" = "native" ] && continue
     ext=$(golden_ext "$stage")
     emit=$(emit_flag "$stage")
+    extra=$(extra_flags "$stage")
 
     for em in "$dir"*.em; do
         [ -e "$em" ] || continue
@@ -95,7 +108,7 @@ for dir in "$ROOT"/tests/*/; do
         # Run from ROOT with a repo-relative path and capture stderr too, so any
         # diagnostics in the golden are stable across machines (no absolute paths)
         # and error cases can be regression-tested by their messages.
-        actual=$(cd "$ROOT" && "$BIN" --emit="$emit" "$rel" 2>&1)
+        actual=$(cd "$ROOT" && "$BIN" --emit="$emit" $extra "$rel" 2>&1)
 
         if [ "$UPDATE" -eq 1 ]; then
             printf '%s\n' "$actual" > "$golden"

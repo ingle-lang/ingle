@@ -1,0 +1,6 @@
+A order=Explorer|Editor|Output nodes=5
+B press   pdrag=Output order=Explorer|Editor|Output
+B drag    pdrag=Output order=Explorer|Editor|Output
+B release pdrag= order=Explorer|Output|Editor nodes=5
+C order=Explorer|Editor|Output pdrag=
+D order=Editor|Explorer|Output nodes=5

@@ -1,4 +1,6 @@
-emberc: runtime error: postcondition failed in 'half' (ensures, line 5)
+error[postcondition_failed]: postcondition failed in 'half' (ensures, line 5)
+  --> tests/trace/contract_violation.em:5 (in half)
+  route:  half (line 5) <- main (line 11)
 {"fn":"main","ip":0,"op":"CONST","line":11,"stack":[]}
 {"fn":"main","ip":2,"op":"CALL","line":11,"stack":[7]}
 {"fn":"half","ip":0,"op":"GET_LOCAL","line":7,"stack":[7]}

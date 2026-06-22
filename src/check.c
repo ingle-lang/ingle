@@ -2697,10 +2697,16 @@ static SemType check_fn_call(Checker *c, Expr *e, FnSig *sig, SemType expected) 
             // an FFI handle is closed/transferred (fclose(move f: Ptr), OFI-049): the binding is
             // moved out, so any later use of it is a use-after-move error (no double-close).
             consume(c, e->as.call.args[i], at[i], e->line, e->col);
-        } else if (!is_extern && is_refcounted(c, at[i])) {
-            // A non-extern refcounted arg is consumed (the callee owns a reference, released on
-            // return). An extern call only BORROWS its non-`move` heap args (§5h pointers) — the
-            // foreign callee adopts nothing — so they are not consumed here.
+        } else if (!is_extern && is_refcounted(c, sig->params[i])) {
+            // A non-extern refcounted arg is consumed IFF the PARAMETER owns it — a concrete
+            // refcounted param (string/enum/channel/closure/rc) the callee releases on return
+            // (release_at_exit). A generic BORROW param (`x: T`) does NOT release its arg — under
+            // erasure is_refcounted(T) is false — and a body that stores it takes its OWN reference
+            // (the store's moves_local == 2 ⇒ own_into_slot). So consuming a refcounted arg here for
+            // such a param would OVER-RETAIN: one leaked reference per call — fatal for a long-running
+            // UI whose render loop hammers Map<string,_> get/set every frame (the param-leak bug). The
+            // borrow's owner stays the CALLER. Gate on the param, not the arg's concrete type. (An
+            // extern call only borrows its non-`move` heap args, §5h, so they are not consumed here.)
             consume(c, e->as.call.args[i], at[i], e->line, e->col);
         }
     }
@@ -2708,7 +2714,9 @@ static SemType check_fn_call(Checker *c, Expr *e, FnSig *sig, SemType expected) 
     // caller or it leaks (OFI-027). Mark them in a bitmask; codegen keeps copies below the arg
     // region and OP_DROP_UNDERs them after the call. Any position, any number — generalises the
     // arg0/receiver `drop_first` fast path. For an extern call this also covers refcounted/move
-    // temps (string/array), since the foreign callee adopts nothing.
+    // temps (string/array), since the foreign callee adopts nothing. A refcounted TEMP passed to a
+    // generic BORROW param is now caller-dropped too (it was not consumed above — gated on the
+    // param), so the temp's reference is reclaimed without the callee owning it.
     e->as.call.drop_mask = 0;
     for (int i = 0; i < np && i < 31; i++) {
         // A multi-slot struct arg is passed as its field slots (copied or unboxed in
@@ -2720,7 +2728,7 @@ static SemType check_fn_call(Checker *c, Expr *e, FnSig *sig, SemType expected) 
         int owning_temp = is_owning_temp(c, e->as.call.args[i], at[i]);
         int marked = is_extern
                        ? owning_temp
-                       : (sig->quals[i] != OWN_MOVE && !is_refcounted(c, at[i]) && owning_temp);
+                       : (sig->quals[i] != OWN_MOVE && !is_refcounted(c, sig->params[i]) && owning_temp);
         if (marked) {
             e->as.call.drop_mask |= (1 << i);
         }
@@ -2964,6 +2972,7 @@ static SemType check_expr_inner(Checker *c, Expr *e) {
             SemType l = check_expr(c, e->as.binary.left);
             SemType r = check_expr(c, e->as.binary.right);
             TokenType op = e->as.binary.op;
+            e->as.binary.str_concat = 0;   // default (arena nodes aren't zeroed); set only for a string `+`
 
             // A bare integer literal adopts the other operand's width, so `x + 1`
             // and `1 + x` work when `x` is a sized int. Only a direct, unsuffixed
@@ -3001,6 +3010,16 @@ static SemType check_expr_inner(Checker *c, Expr *e) {
                 return TY_ERROR;
             }
             if (op == TOK_PLUS && l == TY_STRING && r == TY_STRING) {
+                // String concatenation. Emit the CONSUMING OP_CONCAT (num_kind 8 marks it for codegen),
+                // mirroring the interpolation fix (OFI-059): a plain OP_ADD does not release its operands,
+                // so a multi-operand chain `a + b + c` ((a+b)+c) leaks the intermediate `a+b` — one heap
+                // string per chain, per word in a wrap loop, per frame (the long-running-UI leak). Consume
+                // both operands: a BORROWED operand is incref'd (moves_local==2) so OP_CONCAT's release
+                // nets to zero (its owner keeps its reference); an OWNED temporary (a nested concat / call
+                // result) gets no incref, so OP_CONCAT frees it. Sound either way.
+                consume(c, e->as.binary.left, TY_STRING, e->line, e->col);
+                consume(c, e->as.binary.right, TY_STRING, e->line, e->col);
+                e->as.binary.str_concat = 1;
                 return TY_STRING;   // string concatenation
             }
             if (is_arith_op(op)) {   // + - * /
@@ -3780,9 +3799,18 @@ static SemType check_expr_inner(Checker *c, Expr *e) {
                     int ms_i = (method_multislot && i < mi->param_count)
                                    ? param_multislot_sid(c, mi->params[i], mi->quals[i], 0)
                                    : -1;
-                    // A refcounted argument is consumed: the method owns a reference
-                    // it releases on return, so an aliased argument is incref'd here.
-                    if (is_refcounted(c, at)) {
+                    // A refcounted argument is consumed IFF the PARAMETER owns it — a concrete
+                    // refcounted method param the callee releases on return. A generic BORROW param
+                    // (`key: K`) does NOT: the method is compiled once over the erased K (is_refcounted
+                    // (K) is false ⇒ no release_at_exit), and a store inside takes its OWN reference
+                    // (moves_local == 2). So gate on the UNSUBSTITUTED param type, not the substituted
+                    // arg — else a method like Map<string,_>.set/get leaks one key reference per call
+                    // (the long-running-UI leak; a render loop hammering it bleeds GB over a session).
+                    // A refcounted temp then falls through to the caller-drop branch below.
+                    int param_owns = (mi != NULL && i < mi->param_count)
+                                         ? is_refcounted(c, mi->params[i])
+                                         : is_refcounted(c, at);
+                    if (param_owns) {
                         consume(c, e->as.call.args[i], at, e->line, e->col);
                     } else if (ms_i >= 0) {
                         // A multi-slot arg is pushed as field slots (copied/unboxed in
@@ -3840,12 +3868,15 @@ static SemType check_expr_inner(Checker *c, Expr *e) {
             if (callee->kind == EXPR_IDENT &&
                 native_id_for_name(callee->as.ident) >= 0) {
                 int nid = native_id_for_name(callee->as.ident);
+                e->as.call.drop_mask = 0;   // default (arena nodes aren't zeroed); set per-native below
+                                            // for the string-taking builtins so codegen drops temp args
                 if (nid == NATIVE_PRINT || nid == NATIVE_PRINTLN) {
                     // print(x) / println(x): one printable argument, returns unit.
                     if (argc != 1) {
                         type_error(c, e->line, e->col,
                                    "print/println take exactly one argument");
                     }
+                    e->as.call.drop_mask = 0;
                     for (int i = 0; i < argc; i++) {
                         SemType at = check_expr(c, e->as.call.args[i]);
                         if (i == 0 && at != TY_ERROR && !is_numeric_type(at) &&
@@ -3855,6 +3886,11 @@ static SemType check_expr_inner(Checker *c, Expr *e) {
                         }
                         if (i == 0) {
                             e->num_kind = int_kind(at);   // codegen routes u64 unsigned
+                        }
+                        // a fresh owning-temp string arg (`print(a + b)`) is caller-dropped after the
+                        // native pops it (it adopts nothing), else it leaks one per call.
+                        if (i < 31 && e->num_kind != 7 && is_owning_temp(c, e->as.call.args[i], at)) {
+                            e->as.call.drop_mask |= (1 << i);
                         }
                     }
                     return TY_UNIT;
@@ -3877,6 +3913,8 @@ static SemType check_expr_inner(Checker *c, Expr *e) {
                         type_error(c, e->line, e->col,
                                    "read_file's path must be a string");
                     }
+                    e->as.call.drop_mask =
+                        (argc >= 1 && is_owning_temp(c, e->as.call.args[0], at)) ? 1 : 0;
                     return TY_STRING;
                 }
                 if (nid == NATIVE_WRITE_FILE) {
@@ -3884,11 +3922,15 @@ static SemType check_expr_inner(Checker *c, Expr *e) {
                         type_error(c, e->line, e->col,
                                    "write_file takes two arguments (path, text)");
                     }
+                    e->as.call.drop_mask = 0;
                     for (int i = 0; i < argc; i++) {
                         SemType at = check_expr(c, e->as.call.args[i]);
                         if (at != TY_ERROR && at != TY_STRING) {
                             type_error(c, e->line, e->col,
                                        "write_file's arguments must be strings");
+                        }
+                        if (i < 31 && is_owning_temp(c, e->as.call.args[i], at)) {
+                            e->as.call.drop_mask |= (1 << i);
                         }
                     }
                     return TY_UNIT;
@@ -4021,6 +4063,7 @@ static SemType check_expr_inner(Checker *c, Expr *e) {
                     static const SemType sig_text[] = { TY_STRING, TY_INT, TY_INT, TY_INT, TY_INT };
                     static const SemType sig_measure[] = { TY_STRING, TY_INT };
                     static const SemType sig_int1[] = { TY_INT };
+                    static const SemType sig_bool1[] = { TY_BOOL };
                     static const SemType sig_str1[] = { TY_STRING };
                     static const SemType sig_str2[] = { TY_STRING, TY_STRING };
                     static const SemType sig_int6[] = { TY_INT, TY_INT, TY_INT, TY_INT, TY_INT, TY_INT };
@@ -4064,16 +4107,30 @@ static SemType check_expr_inner(Checker *c, Expr *e) {
                     else if (nid == NATIVE_GFX_SHADOW)       { g_argc = 6; want = sig_int6; }
                     else if (nid == NATIVE_GFX_FILL_CIRCLE)  { g_argc = 5; want = sig_rect; }
                     else if (nid == NATIVE_GFX_MOUSE_WHEEL)  { g_argc = 0; ret = TY_INT; }
+                    else if (nid == NATIVE_GFX_FRAME_CAPTURE){ g_argc = 1; want = sig_str1; ret = TY_INT; }
+                    else if (nid == NATIVE_GFX_SET_EVENT_WAIT){ g_argc = 1; want = sig_bool1; }
+                    else if (nid == NATIVE_GFX_HAD_INPUT)    { g_argc = 0; ret = TY_BOOL; }
+                    else if (nid == NATIVE_GFX_MEASURE_MISSES){ g_argc = 0; ret = TY_INT; }
+                    else if (nid == NATIVE_GFX_FRAME_STEPS)  { g_argc = 0; ret = TY_INT; }
                     if (g_argc >= 0) {
                         if (argc != g_argc) {
                             type_error(c, e->line, e->col,
                                        "wrong number of arguments to a graphics primitive");
                         }
+                        // A fresh owning-temp object arg (a string `draw_text(a + b, …)` /
+                        // `measure_text(arr[i], …)`) must be dropped by the caller — the native pops
+                        // its args without releasing them — or it leaks one per call (per widget, per
+                        // frame: the long-running-UI residual). Mark them; codegen drops them after the
+                        // call. Scalar args (most gfx primitives) are never owning temps, so mask == 0.
+                        e->as.call.drop_mask = 0;
                         for (int i = 0; i < argc; i++) {
                             SemType at = check_expr(c, e->as.call.args[i]);
                             if (want != NULL && i < g_argc && at != TY_ERROR && at != want[i]) {
                                 type_error(c, e->line, e->col,
                                            "wrong argument type to a graphics primitive");
+                            }
+                            if (i < 31 && is_owning_temp(c, e->as.call.args[i], at)) {
+                                e->as.call.drop_mask |= (1 << i);
                             }
                         }
                         return ret;

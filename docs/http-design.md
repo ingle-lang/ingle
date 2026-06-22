@@ -137,8 +137,9 @@ N parallel requests = N `spawn`s in a nursery; the nursery joins (and cancels la
 - **D5 — libcurl through Phase 1.** TLS/h2/redirects/gzip for free; it is the one blessed opt-in dep
   (raylib precedent, §3.5). Pure-Ember sockets+TLS is a separate future project; the API makes the swap
   non-breaking.
-- **D6 — OFI: fibers are documented as "M:N green threads" but implemented 1:1 OS-thread-per-`spawn`.**
-  This design relies on the 1:1 reality; doc and code must be reconciled (logged as an OFI).
+- **D6 — fibers: the "M:N green threads" gap is resolved.** The M:N scheduler is built (OFI-071,
+  gated behind `EMBER_MN`); the default build keeps the 1:1 OS-thread-per-`spawn` model that this
+  design's Phase 0 assumes (one OS thread per in-flight request).
 
 ## Implementation phases
 

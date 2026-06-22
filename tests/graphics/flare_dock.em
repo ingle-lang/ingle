@@ -44,5 +44,16 @@ fn main() -> int {
     let c2 = t.close(sidebar)  f.forget(c2)
     let c3 = t.close(editor)   f.forget(c3)
     println("empty: [{join(t.leaves())}] nodes={t.node_count()} root={t.root}")
+
+    // split_before docks on the LEADING side (new panel is child A), and leaf_of resolves id -> index.
+    var u = flare.dock_new()
+    let chat = u.add_root("chat")
+    let _ = u.split(chat, "inspector", true, 0.8)            // chat | inspector  (inspector docks right)
+    let _ = u.split_before(chat, "convos", true, 0.2)        // convos | chat | inspector (convos docks left)
+    println("dock order: [{join(u.leaves())}]")
+    let lc = u.leaf_of("convos")
+    let lh = u.leaf_of("chat")
+    let lm = u.leaf_of("nope")
+    println("leaf_of: convos={lc} chat={lh} missing={lm}")
     return 0
 }

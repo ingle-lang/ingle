@@ -1723,7 +1723,7 @@ land.
 - **`let` is immutable.** Reach for `var` only when you actually reassign.
 - **Struct literals are suppressed in `if`/`for`/`match` headers** to keep `{` unambiguous.
 - **`Name<T> { … }`** (generic struct literal) is disambiguated from `<` comparison by a
-  lookahead heuristic (OFI-002) — solid for normal code, to be made rigorous with the type
-  checker.
+  sound lookahead rule (OFI-002): a generic only when a balanced `<…>` of type-legal tokens is
+  immediately followed by `{` — no expression begins with `{`, so `> {` can't continue a comparison.
 - **`Self`** (capitalised) is the implementing type inside an interface/struct; `self`
   (lowercase) is the receiver value.

@@ -3,6 +3,7 @@
 
 #include "program.h"
 #include "trace.h"
+#include "fault.h"
 
 typedef enum {
     VM_OK,
@@ -22,6 +23,14 @@ VM *vm_create(const CompiledProgram *prog);
 // Sets the program's command-line arguments (everything after the source file), surfaced
 // to Ember through the `args()` builtin. Called once by the `run` driver before execution.
 void vm_set_program_args(int argc, char **argv);
+
+// Sets the entry source path, used as the `file` of a runtime Fault. Called once by the
+// `run`/`trace` driver before execution (NULL leaves Faults file-less but still line-precise).
+void vm_set_source_path(const char *path);
+
+// Copies the recorded `?`-propagation route (OFI-108) into `route` (capacity FAULT_MAX_HOPS),
+// setting *count — the chain of `?` hops an Err travelled, for an unhandled-Err-at-main Fault.
+void vm_route(const VM *vm, FaultHop *route, int *count);
 
 // After vm_run returns VM_OK, reports whether the program called `exit(code)`. If so,
 // returns 1 and writes the code to *code; the driver should terminate with that code

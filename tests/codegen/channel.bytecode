@@ -24,35 +24,37 @@
 0008    |  GET_TAG 
 0009    |  CONST    0  (= 0)
 0011    |  EQ      
-0012    |  JUMP_IF_FALSE 14 (-> 0029)
+0012    |  JUMP_IF_FALSE 16 (-> 0031)
 0015    |  POP     
 0016    |  GET_LOCAL 1
 0018    |  GET_FIELD 0
 0020   18  GET_LOCAL 2
 0022    |  DROP     0
-0024    |  RETURN  
-0025    |  POP     
-0026    |  JUMP     20 (-> 0049)
-0029    |  POP     
-0030    |  GET_LOCAL 1
-0032    |  GET_TAG 
-0033    |  CONST    1  (= 1)
-0035    |  EQ      
-0036    |  JUMP_IF_FALSE 9 (-> 0048)
-0039    |  POP     
-0040   19  CONST    2  (= 0)
-0042    |  DROP     0
-0044    |  RETURN  
-0045    |  JUMP     1 (-> 0049)
-0048    |  POP     
-0049    |  DROP     1
-0051    |  POP     
-0052   21  CONST    3  (= 0)
-0054    |  DROP     0
-0056    |  RETURN  
-0057    |  CONST    4  (= 0)
-0059    |  DROP     0
-0061    |  RETURN  
+0024    |  DROP     1
+0026    |  RETURN  
+0027    |  POP     
+0028    |  JUMP     22 (-> 0053)
+0031    |  POP     
+0032    |  GET_LOCAL 1
+0034    |  GET_TAG 
+0035    |  CONST    1  (= 1)
+0037    |  EQ      
+0038    |  JUMP_IF_FALSE 11 (-> 0052)
+0041    |  POP     
+0042   19  CONST    2  (= 0)
+0044    |  DROP     0
+0046    |  DROP     1
+0048    |  RETURN  
+0049    |  JUMP     1 (-> 0053)
+0052    |  POP     
+0053    |  DROP     1
+0055    |  POP     
+0056   21  CONST    3  (= 0)
+0058    |  DROP     0
+0060    |  RETURN  
+0061    |  CONST    4  (= 0)
+0063    |  DROP     0
+0065    |  RETURN  
 == fn consumer (arity 1) ==
 0000   25  GET_LOCAL 0
 0002    |  INCREF  

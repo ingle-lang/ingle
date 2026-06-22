@@ -24,6 +24,14 @@ a genuine networked, interactive program.
   (`std/markdown` + `std/highlight`), a `text_area` composer (Shift+Enter newline, Enter send),
   a settings modal with `segmented` controls for model / max-tokens / theme / zoom, and full
   session persistence. Build with `make net-graphics` and run via `./run-flare.sh`.
+- **Phase 4 — dockable workspace (done).** The whole body is now a **dock** built on `std/flare`'s
+  `DockTree`: three panels — **Conversations** | **Chat** | **Inspector** — that you **resize by
+  dragging the dividers** and **close with each panel's ✕**. *Chat* is the pinned anchor (no ✕); the
+  side panels are closeable and re-dock from the Chat toolbar (`☰ Chats` / `ⓘ Inspector`), and the
+  Inspector's *Reset layout* restores the default. The **Inspector** shows the live context at a
+  glance — model, max tokens, message/tool-call counts, the system prompt, and the available tools.
+  Panels FLIP-animate on dock/close and snap during a resize. This is the dogfood that drove
+  `dock_begin` / `dock_panel` / `dock_pin` into the language (see `docs/flare.md` → *Docking*).
 
 ## Features
 

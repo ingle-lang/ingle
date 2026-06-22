@@ -189,6 +189,7 @@ struct Expr {
             TokenType op;
             Expr     *left;
             Expr     *right;
+            int       str_concat;  // checker-set: a string `+` (emit the consuming OP_CONCAT, not OP_ADD)
         } binary;
         struct {
             Expr  *callee;

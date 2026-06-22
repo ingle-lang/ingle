@@ -1,0 +1,4 @@
+tabify  B tabs=[A,B]act=B count=2
+render  A=no B=yes
+switch  active=[A,B]act=A  A=yes B=no
+close   gone=A B tabs=[B]act=B nodes=1

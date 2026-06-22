@@ -7,12 +7,14 @@ typedef int ember_gfx_unit_placeholder;   // keeps the TU non-empty when graphic
 
 #if EMBER_GRAPHICS
 #include "raylib.h"
+#include "rlgl.h"         // rlDrawRenderBatchActive — flush the batch before a screenshot
 #include "font_inter.h"   // embedded Inter Regular (TrueType) — see header
 #include <ft2build.h>     // FreeType: hinted, high-quality glyph rasterisation (opt-in graphics dep)
 #include FT_FREETYPE_H
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <math.h>
 
 // ---- Text rendering: FreeType, rasterised at the real device pixel size ------------
@@ -93,6 +95,80 @@ static float gfx_backing_scale(void) {
 // mismatch would make widget auto-sizing wrong). Scales with the text size.
 static float gfx_text_spacing(int size) {
     return (float)size / 16.0f;
+}
+
+
+
+
+// ---- measure_text cache ---------------------------------------------------------------------------
+// Text metrics are a pure function of (string, font slot, logical size, backing scale): MeasureTextEx
+// walks every glyph, yet an immediate-mode UI measures the SAME strings every frame — label widths, the
+// word-wrapper's growing trial line, ellipsis fitting — usually twice (layout then paint). This direct-
+// mapped cache memoises the width so a warm frame does almost no FreeType measuring. Eviction-on-collision
+// bounds memory to the table; a backing-scale change (the window moved to a different-DPI display) flushes
+// it, since the glyph metrics shift with the physical pixel size.
+#define MEASURE_CACHE_BITS 14
+#define MEASURE_CACHE_SIZE (1 << MEASURE_CACHE_BITS)   // 16384 slots, direct-mapped
+typedef struct {
+    uint64_t hash;     // 0 = empty slot
+    char    *text;     // owned copy of the measured string (NULL when empty)
+    int      font;
+    int      size;
+    int      width;
+} MeasureEntry;
+static MeasureEntry g_measure_cache[MEASURE_CACHE_SIZE];
+static float        g_measure_cache_scale = 0.0f;      // backing scale the cached widths were measured at
+static long         g_measure_calls = 0;               // measure_text() calls this frame (perf instrument)
+static long         g_measure_ft    = 0;               // of those, actual MeasureTextEx invocations (misses)
+static int          g_measure_stats = 0;               // EMBER_MEASURE_STATS → log per-frame work + measures
+static double       g_work_t0       = 0.0;             // GetTime() when this frame's CPU work began (frame_begin)
+static double       g_work_ms       = 0.0;             // last frame's CPU work (build+layout+paint), excl. the wait
+
+static uint64_t gfx_measure_hash(const char *text, int font, int size) {
+    uint64_t h = 1469598103934665603ULL;               // FNV-1a over the bytes, then fold in font + size
+    for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
+        h ^= *p;
+        h *= 1099511628211ULL;
+    }
+    h ^= (uint64_t)font;
+    h *= 1099511628211ULL;
+    h ^= (uint64_t)size;
+    h *= 1099511628211ULL;
+    return h;
+}
+
+static void gfx_measure_cache_flush(void) {
+    for (int i = 0; i < MEASURE_CACHE_SIZE; i++) {
+        free(g_measure_cache[i].text);
+        g_measure_cache[i].text = NULL;
+        g_measure_cache[i].hash = 0;
+    }
+}
+
+// measure_misses exposes this frame's cache-miss count (real FreeType measures) so a program — or a
+// regression test — can verify the cache is actually warming: a second identical frame should miss zero.
+int ember_gfx_measure_misses(void) {
+    return (int)g_measure_ft;
+}
+
+
+
+
+// frame_steps returns how many FIXED 1/60s physics steps the LAST frame's wall-time spanned — the
+// number of times a spring/FLIP integrator should advance this frame so the animation runs in real time
+// regardless of frame rate. At a steady 60fps (including the SetTargetFPS-paced golden runs) it is 1, so
+// the fixed-timestep physics stays byte-for-byte deterministic; when frames are heavy (a busy redock drops
+// to, say, 20fps) it returns 3, so the spring catches up instead of playing in slow motion. Capped so a
+// long stall (window backgrounded) can't teleport the spring across the screen in one jump.
+int ember_gfx_frame_steps(void) {
+    long n = lroundf(GetFrameTime() * 60.0f);   // GetFrameTime() = seconds since last EndDrawing (0 first frame)
+    if (n < 1) {
+        n = 1;                                  // always advance at least one step (first/paced frame → 1)
+    }
+    if (n > 10) {
+        n = 10;                                 // cap catch-up (≈6fps floor) so a stall can't jump the spring
+    }
+    return (int)n;
 }
 
 // Unpack a 0xRRGGBB color int into a raylib Color (always opaque).
@@ -190,6 +266,20 @@ static int g_clip_depth = 0;
 static FILE *g_tape       = NULL;
 static int   g_frame      = 0;     // frame counter since tape_open
 static int   g_fmx, g_fmy, g_fdown;  // input snapshot captured at frame_begin
+
+// A pending screenshot path, set by frame_capture() and honoured once at the next
+// frame_end (after the draw loop, before the buffer swap). Empty = no capture queued.
+// Capturing must be deferred this way because draws are batched into g_cmds and only
+// reach the framebuffer during frame_end — a capture taken mid-frame would be blank.
+static char  g_capture_path[1024] = "";
+
+// EMBER_CAPTURE=path[@frame] auto-screenshots `frame` (default 20) to `path`, then closes the
+// window — so any graphics program can be captured unmodified for baselines, docs, and visual
+// goldens (the env-driven sibling of EMBER_TAPE). -1 = disabled.
+static char  g_autocap_path[1024] = "";
+static int   g_autocap_at   = -1;   // target frame to capture (-1 = disabled)
+static int   g_autocap_seen = 0;    // frames presented so far this run
+static int   g_force_close  = 0;    // 1 once the auto-capture frame has been taken
 
 
 // Write a JSON string literal (minimal escaping) to the tape.
@@ -448,6 +538,7 @@ void ember_gfx_window_open(int width, int height, const char *title) {
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_WINDOW_HIGHDPI);
     InitWindow(width, height, title);
     g_scale = gfx_backing_scale();   // real framebuffer ratio, not the monitor DPI (see helper)
+    g_measure_stats = (getenv("EMBER_MEASURE_STATS") != NULL) ? 1 : 0;   // per-frame text-measure profiling
     SetTargetFPS(60);
     // FreeType rasteriser for all text. Slot 0 is the embedded Inter, loaded from its static
     // memory — the bytes outlive the face, so FreeType references them directly with no copy.
@@ -464,6 +555,31 @@ void ember_gfx_window_open(int width, int height, const char *title) {
         g_font_count = 1;
     }
     g_cur_font = 0;
+
+    // EMBER_CAPTURE=path[@frame] — auto-screenshot for baselines/docs/goldens (see statics).
+    g_autocap_path[0] = '\0';
+    g_autocap_at = -1;
+    g_autocap_seen = 0;
+    g_force_close = 0;
+    const char *cap = getenv("EMBER_CAPTURE");
+    if (cap != NULL && cap[0] != '\0') {
+        const char *at = strrchr(cap, '@');
+        int frame = 20;
+        size_t plen = strlen(cap);
+        if (at != NULL && at[1] != '\0') {   // a trailing @N selects the frame
+            int f = 0, ok = 1;
+            for (const char *p = at + 1; *p != '\0'; p++) {
+                if (*p < '0' || *p > '9') { ok = 0; break; }
+                f = f * 10 + (*p - '0');
+            }
+            if (ok) { frame = f; plen = (size_t)(at - cap); }
+        }
+        if (plen > 0 && plen < sizeof(g_autocap_path)) {
+            memcpy(g_autocap_path, cap, plen);
+            g_autocap_path[plen] = '\0';
+            g_autocap_at = frame;
+        }
+    }
 }
 
 
@@ -476,6 +592,7 @@ void ember_gfx_window_close(void) {
         fclose(g_tape);
         g_tape = NULL;
     }
+    gfx_measure_cache_flush();  // free the measure cache's owned string copies (clean teardown / ASan)
     for (int i = 0; i < g_font_count; i++) {
         for (int s = 0; s < g_fonts[i].size_count; s++) {
             if (g_fonts[i].sizes[s].valid) {
@@ -500,7 +617,69 @@ void ember_gfx_window_close(void) {
 
 
 int ember_gfx_should_close(void) {
+    if (g_force_close) {   // EMBER_CAPTURE has taken its shot; exit after this frame
+        return 1;
+    }
     return WindowShouldClose() ? 1 : 0;
+}
+
+
+
+
+// set_event_waiting toggles raylib's event-driven idle: when on, EndDrawing() blocks on the OS event
+// queue (glfwWaitEvents) until input arrives, so a static UI burns ~0% CPU instead of re-rendering 60
+// frames/second. The caller (an immediate-mode loop) turns it OFF whenever it must keep ticking — an
+// animation in flight, a network reply streaming — and back ON once everything is at rest. Safe here
+// because no work is pending while idle: a new request only starts from user input, which is an event.
+void ember_gfx_set_event_waiting(int on) {
+    if (on) {
+        EnableEventWaiting();
+    } else {
+        DisableEventWaiting();
+    }
+}
+
+
+
+
+// had_input reports whether the user did anything this frame — the activity signal that keeps the loop
+// awake (and re-arms its coast) before it settles back to event-waiting. Mouse motion, any held or
+// just-released button (covers drags end to end), wheel, a window resize, and any keyboard activity all
+// count. Keyboard is read TWO ways: draining raylib's key-press queue (GetKeyPressed) catches each fresh
+// keystroke (Enter-to-send, ⌘N, typing) — the app reads keys via IsKeyPressed/GetCharPressed so the queue
+// is otherwise unused — AND a held-key sweep (IsKeyDown over the desktop keycode range) keeps the loop
+// free-running while a key is held DOWN. The latter matters for OS auto-repeat: a repeat is NOT re-queued
+// as a press, so without this a held backspace/arrow would coast back into event-waiting between repeats
+// and delete in stuttering bursts; staying awake lets IsKeyPressedRepeat fire smoothly each frame.
+int ember_gfx_had_input(void) {
+    int active = 0;
+    while (GetKeyPressed() != 0) {   // drain the unused key queue → a fresh keystroke this frame
+        active = 1;
+    }
+    if (!active) {                   // a HELD key (auto-repeat) is not in the press queue — sweep down-state
+        for (int k = 32; k <= 348; k++) {   // KEY_SPACE(32) .. KEY_KB_MENU(348): the desktop keycode range
+            if (IsKeyDown(k)) {
+                active = 1;
+                break;
+            }
+        }
+    }
+    Vector2 d = GetMouseDelta();
+    if (active || d.x != 0.0f || d.y != 0.0f) {
+        return 1;
+    }
+    if (GetMouseWheelMove() != 0.0f) {
+        return 1;
+    }
+    if (IsWindowResized()) {
+        return 1;
+    }
+    for (int b = 0; b <= 2; b++) {
+        if (IsMouseButtonDown(b) || IsMouseButtonReleased(b)) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 
@@ -509,8 +688,17 @@ int ember_gfx_should_close(void) {
 
 
 void ember_gfx_frame_begin(int bg_color) {
+    if (g_measure_stats) {   // report the frame just finished: CPU work (the optimisation target, excluding the
+        long hits = g_measure_calls - g_measure_ft;   // event-wait idle) and how much text measuring hit FreeType
+        fprintf(stderr, "[perf] %5.1f ms work | measure %ld calls, %ld freetype (%.0f%% cached)\n",
+                g_work_ms, g_measure_calls, g_measure_ft,
+                g_measure_calls > 0 ? 100.0 * (double)hits / (double)g_measure_calls : 0.0);
+    }
+    g_measure_calls = 0;
+    g_measure_ft = 0;
     BeginDrawing();
     ClearBackground(gfx_color(bg_color));
+    g_work_t0 = GetTime();   // start the per-frame work clock (stopped at frame_end, before the present/wait)
     g_scale = gfx_backing_scale();   // re-read each frame: tracks the window moving between displays
     g_cmd_count = 0;        // start a fresh command list for this frame
     g_cur_layer = 0;
@@ -531,6 +719,9 @@ void ember_gfx_frame_begin(int bg_color) {
 
 
 void ember_gfx_frame_end(void) {
+    if (g_measure_stats) {   // stop the work clock before the present + FPS/event wait (which we don't count)
+        g_work_ms = (GetTime() - g_work_t0) * 1000.0;
+    }
     // Flush the frame's commands in z-order (stable within each layer), then present.
     qsort(g_cmds, (size_t)g_cmd_count, sizeof(GfxCmd), gfx_cmd_cmp);
 
@@ -701,7 +892,51 @@ void ember_gfx_frame_end(void) {
         g_clip_depth = 0;
     }
     g_cmd_count = 0;
+
+    // Auto-capture (EMBER_CAPTURE): on the target frame, queue the screenshot and flag the
+    // window to close, so the program exits right after presenting this fully-drawn frame.
+    if (g_autocap_at >= 0 && g_capture_path[0] == '\0') {
+        if (g_autocap_seen == g_autocap_at) {
+            size_t n = strlen(g_autocap_path);
+            memcpy(g_capture_path, g_autocap_path, n + 1);
+            g_force_close = 1;
+        }
+        g_autocap_seen++;
+    }
+
+    // Honour a queued screenshot now: the whole frame is drawn but not yet presented.
+    // raylib batches geometry, so flush it to the framebuffer first (rlDrawRenderBatchActive)
+    // or the pixels read back would be this frame's draws still pending — a blank/stale image.
+    // We read with LoadImageFromScreen + ExportImage rather than TakeScreenshot because the
+    // latter prepends raylib's base path and mangles an absolute path; ExportImage writes to
+    // the exact path we were given (format chosen by the .png/.jpg/... extension).
+    if (g_capture_path[0] != '\0') {
+        rlDrawRenderBatchActive();
+        Image shot = LoadImageFromScreen();
+        ExportImage(shot, g_capture_path);
+        UnloadImage(shot);
+        g_capture_path[0] = '\0';
+    }
+
     EndDrawing();
+}
+
+
+// ember_gfx_frame_capture queues a PNG screenshot of the CURRENT frame, written when the
+// frame is presented (see frame_end). Call it between frame_begin and frame_end. Returns 1
+// if queued, 0 if the path is empty or too long. The image is the physical framebuffer, so
+// on a Retina display it is captured at the full device resolution (2× logical) — crisp for
+// docs and visual-regression goldens. The instrument behind Flare's visual work.
+int ember_gfx_frame_capture(const char *path) {
+    if (path == NULL || path[0] == '\0') {
+        return 0;
+    }
+    size_t n = strlen(path);
+    if (n >= sizeof(g_capture_path)) {
+        return 0;
+    }
+    memcpy(g_capture_path, path, n + 1);
+    return 1;
 }
 
 
@@ -926,15 +1161,40 @@ int ember_gfx_mouse_down(void) {
 
 
 int ember_gfx_measure_text(const char *text, int size) {
+    g_measure_calls++;
+    if (g_scale != g_measure_cache_scale) {            // DPI/display change → cached widths are stale
+        gfx_measure_cache_flush();
+        g_measure_cache_scale = g_scale;
+    }
+    uint64_t h = gfx_measure_hash(text, g_cur_font, size);
+    if (h == 0) {                                      // reserve 0 to mean "empty slot"
+        h = 1;
+    }
+    MeasureEntry *e = &g_measure_cache[h & (MEASURE_CACHE_SIZE - 1)];
+    if (e->hash == h && e->font == g_cur_font && e->size == size
+        && e->text != NULL && strcmp(e->text, text) == 0) {
+        return e->width;                               // HIT — no FreeType this frame
+    }
+    // MISS: measure on the baked Font at logical `size` (matches the 1/g_scale draw scale exactly, so
+    // widget auto-sizing and the rendered glyph runs stay in lockstep), then store, evicting any slot peer.
+    g_measure_ft++;
     int phys_px = (int)lroundf((float)size * g_scale);
     Font *f = gfx_font_for(g_cur_font, phys_px, text);
     if (f == NULL) {
         return 0;
     }
-    // Measure on the baked Font at logical `size` (matches the 1/g_scale draw scale exactly, so
-    // widget auto-sizing and the rendered glyph runs stay in lockstep).
     Vector2 m = MeasureTextEx(*f, text, (float)size, gfx_text_spacing(size));
-    return (int)m.x;
+    int width = (int)m.x;
+    char *copy = strdup(text);
+    if (copy != NULL) {                                // on OOM, just don't cache this one
+        free(e->text);
+        e->text  = copy;
+        e->hash  = h;
+        e->font  = g_cur_font;
+        e->size  = size;
+        e->width = width;
+    }
+    return width;
 }
 
 

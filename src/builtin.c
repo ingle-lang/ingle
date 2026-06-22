@@ -70,5 +70,10 @@ int native_id_for_name(const char *name) {
     if (strcmp(name, "clipboard_get") == 0)       return NATIVE_GFX_CLIPBOARD_GET;
     if (strcmp(name, "screen_width") == 0)        return NATIVE_GFX_SCREEN_W;
     if (strcmp(name, "screen_height") == 0)       return NATIVE_GFX_SCREEN_H;
+    if (strcmp(name, "frame_capture") == 0)       return NATIVE_GFX_FRAME_CAPTURE;
+    if (strcmp(name, "set_event_waiting") == 0)   return NATIVE_GFX_SET_EVENT_WAIT;
+    if (strcmp(name, "had_input") == 0)           return NATIVE_GFX_HAD_INPUT;
+    if (strcmp(name, "measure_misses") == 0)      return NATIVE_GFX_MEASURE_MISSES;
+    if (strcmp(name, "frame_steps") == 0)         return NATIVE_GFX_FRAME_STEPS;
     return -1;
 }

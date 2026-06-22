@@ -42,7 +42,7 @@ fn main() -> int {
 
         // Body: a centred title (heading in the STRETCH column) and copy.
         f.heading("Real flexbox, Claude style")
-        f.label("Layout solved by std/layout; painted in the warm house theme.")
+        f.paragraph("Layout solved by std/layout; painted in the warm house theme.", screen_width() - 36)
         f.text_muted("Composed {count} times.")
 
         // A centred row of secondary actions.

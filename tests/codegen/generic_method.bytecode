@@ -26,19 +26,21 @@
 0023    |  NEW_STRUCT 2 1
 0026   14  GET_LOCAL 2
 0028    |  CALL     5 1
-0031    |  CALL_NATIVE 1 1
-0034    |  POP     
-0035   15  GET_LOCAL 0
-0037    |  CALL     4 1
-0040    |  DROP     0
-0042    |  DROP     1
-0044    |  DROP     2
-0046    |  RETURN  
-0047    |  CONST    2  (= 0)
-0049    |  DROP     0
-0051    |  DROP     1
-0053    |  DROP     2
-0055    |  RETURN  
+0031    |  PICK     0
+0033    |  CALL_NATIVE 1 1
+0036    |  DROP_UNDER
+0037    |  POP     
+0038   15  GET_LOCAL 0
+0040    |  CALL     4 1
+0043    |  DROP     0
+0045    |  DROP     1
+0047    |  DROP     2
+0049    |  RETURN  
+0050    |  CONST    2  (= 0)
+0052    |  DROP     0
+0054    |  DROP     1
+0056    |  DROP     2
+0058    |  RETURN  
 == fn Box.replaced (arity 2) ==
 0000    7  GET_LOCAL 1
 0002    |  INCREF  

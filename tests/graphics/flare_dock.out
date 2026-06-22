@@ -3,3 +3,5 @@ split: [editor,terminal,sidebar] nodes=5
 close terminal: [editor,sidebar] nodes=3
 state: terminal.scroll=-1 sidebar.width=240
 empty: [] nodes=0 root=-1
+dock order: [convos,chat,inspector]
+leaf_of: convos=4 chat=0 missing=-1

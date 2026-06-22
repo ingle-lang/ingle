@@ -15,6 +15,7 @@
 #include "lsp.h"
 #include "diag.h"
 #include "trace.h"
+#include "fault.h"
 #include "version.h"
 
 #include <stdio.h>
@@ -457,6 +458,74 @@ static int emit_bytecode(const TokenList *tokens, const char *name) {
 
 
 
+// render_scalar_into stringifies a scalar/string Value into `buf` for a Fault value field.
+static void render_scalar_into(char *buf, size_t n, Value v) {
+    if (IS_INT(v)) {
+        snprintf(buf, n, "%lld", (long long)AS_INT(v));
+    } else if (IS_FLOAT(v)) {
+        snprintf(buf, n, "%g", AS_FLOAT(v));
+    } else if (IS_STRING(v)) {
+        snprintf(buf, n, "%s", AS_CSTRING(v));
+    } else {
+        snprintf(buf, n, "<obj>");
+    }
+}
+
+
+
+
+// report_unhandled_error detects an Err/None that `main` returned without handling and reports
+// it as a Fault (FCAT_UNHANDLED_ERR) — closing the wart where an unhandled Err exited 0 with a
+// bare `=> <obj>`. Identity is the prelude Result/Option failure variant recorded at codegen
+// (docs/faults.md). Returns 1 (and renders) if it was an unhandled Err/None, else 0. Must run
+// before vm_destroy frees the value. (The `?`-propagation route is layered on by OFI-108.)
+static int report_unhandled_error(const char *path, const CompiledProgram *prog,
+                                  const VM *vm, Value result) {
+    if (!IS_STRUCT(result) || !AS_STRUCT(result)->is_enum) {
+        return 0;
+    }
+    ObjStruct *e = AS_STRUCT(result);
+    int is_err  = prog->result_enum_id >= 0 &&
+                  e->type_id == prog->result_enum_id && e->tag == prog->err_tag;
+    int is_none = prog->option_enum_id >= 0 &&
+                  e->type_id == prog->option_enum_id && e->tag == prog->none_tag;
+    if (!is_err && !is_none) {
+        return 0;
+    }
+    Fault f;
+    memset(&f, 0, sizeof f);
+    f.severity = FSEV_ERROR;
+    f.category = FCAT_UNHANDLED_ERR;
+    f.file     = path;
+    f.fn       = "main";
+    if (is_err) {
+        f.code    = "unhandled_error";
+        f.message = "an Err returned by main was never handled";
+        f.why     = "a Result that reaches main must be handled (match its Err), not left to propagate out";
+        f.hint    = "match the Result and handle the Err arm (or have main do something with the error)";
+        if (e->field_count >= 1) {
+            Value payload;
+            memcpy(&payload, e->data, sizeof(Value));   // an enum field is a 16-byte boxed Value
+            f.values[0].name = "error";
+            render_scalar_into(f.values[0].rendered, sizeof f.values[0].rendered, payload);
+            f.value_count = 1;
+        }
+    } else {
+        f.code    = "unhandled_none";
+        f.message = "a None returned by main was never handled";
+        f.why     = "an Option that reaches main must be handled (match its None), not left to propagate out";
+        f.hint    = "match the Option and handle the None arm";
+    }
+    // The `?`-propagation route (OFI-108): how the Err/None travelled here. The synchronous call
+    // stack is empty by now (the propagating frames returned), so this recorded chain is the route.
+    vm_route(vm, f.route, &f.route_count);
+    fault_render(&f, stderr);
+    return 1;
+}
+
+
+
+
 // emit_run compiles and executes the program, printing the value main returns as
 // `=> N`. Returns 1 on a compile or runtime error.
 static int emit_run(const TokenList *tokens, const char *name) {
@@ -475,7 +544,9 @@ static int emit_run(const TokenList *tokens, const char *name) {
                 fflush(stdout);
                 exit(code);
             }
-            if (IS_INT(result)) {
+            if (report_unhandled_error(name, &prog, vm, result)) {
+                error = 1;   // an unhandled Err/None reached main → Fault on stderr, non-zero exit
+            } else if (IS_INT(result)) {
                 printf("=> %lld\n", (long long)AS_INT(result));
             } else if (IS_FLOAT(result)) {
                 printf("=> %g\n", AS_FLOAT(result));
@@ -891,6 +962,16 @@ int main(int argc, char **argv) {
             release = 1;                  // elide debug-only contract checks (§5e)
         } else if (strcmp(argv[i], "--diagnostics=json") == 0) {
             diag_set_json(1);             // structured errors for an LLM author
+        } else if (strncmp(argv[i], "--faults=", 9) == 0) {
+            const char *m = argv[i] + 9;  // how a RUNTIME fault renders (docs/faults.md)
+            if (strcmp(m, "agent") == 0 || strcmp(m, "json") == 0) {
+                fault_set_mode(FAULT_RENDER_AGENT);   // terse JSON Lines for an LLM/tool
+            } else if (strcmp(m, "human") == 0) {
+                fault_set_mode(FAULT_RENDER_HUMAN);   // the default teacher-voice render
+            } else {
+                fprintf(stderr, "emberc: --faults= must be 'human' or 'agent'\n");
+                return 64;
+            }
         } else if (strncmp(argv[i], "--emit=", 7) == 0) {
             emit = argv[i] + 7;
         } else if (strcmp(argv[i], "--tape") == 0) {
@@ -909,6 +990,7 @@ int main(int argc, char **argv) {
         }
     }
     vm_set_program_args(prog_argc, prog_argv);
+    vm_set_source_path(path);   // a runtime Fault's `where.file` (NULL → file-less, still line-precise)
     if (path == NULL) {
         fprintf(stderr,
                 "usage: %s [--emit=tokens|ast|bytecode|run|trace|check|replay|prove|docs|c] [--release] <file.em>\n"

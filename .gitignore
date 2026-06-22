@@ -31,6 +31,7 @@ editors/zed/grammars/*.wasm
 # --- Local / per-user -------------------------------------------------------
 # Per-user Claude Code settings (not shared).
 .claude/settings.local.json
+.claude/
 
 # Private/scratch app code (the dir name was historically used for unpublished
 # work; defensive so nothing under it is ever committed by accident).

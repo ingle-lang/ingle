@@ -1,0 +1,11 @@
+A hit=-1 ratio=200
+  body Explorer: x=0 y=36 w=198 h=564
+  body Editor: x=206 y=36 w=794 h=354
+  body Output: x=206 y=434 w=794 h=166
+B press  ratio=203
+B drag   ratio=423
+B clamp  ratio=920
+B release ratio=920
+C press  hit=-1
+C release hit=4 closed=Output leaves=2 nodes=3
+D pinned press=-1 release=-1 leaves=3

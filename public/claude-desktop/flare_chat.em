@@ -443,7 +443,7 @@ fn turn_json(role: int, text: string, kind: int, tid: string, tname: string, tin
 // The ACTIVE conversation's live transcript lives in the working `turns` array (not yet written back into
 // convos[active]), so it is serialized from that; the rest from their Conv. Paired with the startup load,
 // the convos are the nested-aggregate round-trip test: `[Conv]` (structs of `[api.Turn]`) → JSON → fresh structs.
-fn save_store(convos: [Conv], active: int, turns: [api.Turn], model_idx: int, tok_idx: int, dark: bool, zoom: int, system: string) {
+fn save_store(convos: [Conv], active: int, turns: [api.Turn], model_idx: int, tok_idx: int, dark: bool, zoom: int, system: string, dock: flare.DockTree) {
     var cjs: [json.Json] = []
     var i = 0
     loop {
@@ -481,13 +481,14 @@ fn save_store(convos: [Conv], active: int, turns: [api.Turn], model_idx: int, to
         i = i + 1
     }
     let root = json.obj([
-        json.member("v", json.num(3)),
+        json.member("v", json.num(4)),         // v4: + system prompt + dock workspace layout (loaded by field presence)
         json.member("active", json.num(active)),
         json.member("model", json.num(model_idx)),
         json.member("toks", json.num(tok_idx)),
         json.member("dark", json.boolean(dark)),
         json.member("zoom", json.num(zoom)),
         json.member("system", json.str(system)),
+        json.member("dock", dock.to_json()),            // OFI-112: persist the docked workspace layout
         json.member("convos", json.arr(cjs))
     ])
     write_file(store_path(), json.stringify(root))
@@ -498,9 +499,44 @@ fn save_store(convos: [Conv], active: int, turns: [api.Turn], model_idx: int, to
 
 
 
+// build_workspace lays out the default docked workspace: Conversations | Chat | Inspector. Chat is the
+// pinned anchor in the centre; Conversations docks on the left, the Inspector on the right. The user
+// resizes the panels by dragging the dividers and closes Conversations/Inspector with their ✕; the Chat
+// toolbar re-docks whichever is closed, and the Inspector's "Reset layout" rebuilds this default.
+fn build_workspace() -> flare.DockTree {
+    var d = flare.dock_new()
+    let chat = d.add_root("Chat")
+    let _ = d.split(chat, "Inspector", true, 0.76)              // (Conv|Chat) 76% | Inspector 24%
+    let _ = d.split_before(chat, "Conversations", true, 0.26)   // Conversations 26% | Chat 74%
+    return d
+}
+
+
+// panel_cw returns docked panel `id`'s inner content width (body minus the float's two-sided padding),
+// clamped to [floor, cap], so a panel's prose wraps to its CURRENT width as the user resizes it.
+fn panel_cw(mut f: flare.Flare, id: string, floor: int, cap: int) -> int {
+    var w = floor
+    match f.ds.get(id) {
+        case Some(r) { w = r.w - f.ui.style.pad * 2 }
+        case None {}
+    }
+    if w > cap { w = cap }
+    if w < floor { w = floor }
+    return w
+}
+
+
 fn main() -> int {
-    draw.window(900, 620, "Claude — Flare")
+    draw.window(1200, 760, "Claude — Flare")
     var f = flare.new()
+    f.set_realtime(true)   // wall-clock animation timing: a heavy redock catches up instead of slow-motion
+
+    // Opt-in UI tape: set EMBER_TAPE=/path to record one JSON line per frame (input + every draw
+    // command + interaction events) for diagnosing live bugs with `tail -f`. Off (zero cost) otherwise.
+    let tape_path = env("EMBER_TAPE")
+    if tape_path.len() > 0 {
+        draw.tape_on(tape_path)
+    }
 
     // Persisted settings — defaults here, overridden by the saved store below, then applied to `f`.
     var model_idx = 0                        // 0 Opus · 1 Sonnet · 2 Haiku
@@ -527,6 +563,7 @@ fn main() -> int {
     // Load the saved store (user-scoped JSON) and rebuild [Conv]; start fresh if it's absent/empty/corrupt.
     var convos: [Conv] = []
     var active = 0
+    var dock = build_workspace()     // the docked workspace; replaced below by the saved layout if present (OFI-112)
     let saved = read_file(store_path())
     if saved.len() > 0 {
         match json.parse(saved) {
@@ -602,6 +639,13 @@ fn main() -> int {
                 if !json.is_null(json.get(root, "system")) {   // system prompt (absent in pre-v4 files → stays "")
                     sys_prompt = json.as_str(json.get(root, "system"))
                 }
+                let dockj = json.get(root, "dock")             // OFI-112: restore the saved workspace layout…
+                if !json.is_null(dockj) {
+                    let saved_dock = flare.dock_from_json(dockj)
+                    if saved_dock.leaf_of("Chat") >= 0 {       // …only if it's intact (the pinned anchor survived)
+                        dock = saved_dock
+                    }
+                }
             }
             case Err(e) {}
         }
@@ -648,6 +692,9 @@ fn main() -> int {
     var tp_name = ""
     var tp_input = ""
 
+    // (The dockable workspace `dock` was created above — restored from the saved layout if present, else the
+    // Conversations | Chat | Inspector default. The user drags dividers, closes ✕, re-docks and tabifies it.)
+
     // Async STREAMING transport: the worker fiber pumps the HTTPS stream; the render loop drains resp_ch
     // (token deltas, then a done_mark) with non-blocking try_recv, so drawing never stalls and the reply
     // grows live on screen.
@@ -656,6 +703,9 @@ fn main() -> int {
     let stop_ch: Channel<bool> = channel(2)
     nursery {
     spawn api.stream_worker(api_key, req_ch, resp_ch, stop_ch)
+    var prev_down = false                              // mouse-down state last frame, to detect a release
+    var dock_snap = json.stringify(dock.to_json())     // last-persisted workspace layout, to detect a change
+    var coast = 12                                     // frames to keep free-running after the last activity
     loop {
         if draw.closing() {
             break
@@ -743,205 +793,263 @@ fn main() -> int {
         draw.begin(f.bg())
         f.begin()
 
-        // ---- body: sidebar (resizable) | drag handle | main (fills the rest) ----
-        var sbw = f.state_int("sbw", 236)   // sidebar width, persisted; dragged by the splitter below
-        f.row_grow(flare.START, flare.STRETCH)
-
-        // sidebar (painted surface) — its width is the stored sbw, set by dragging the splitter on its right edge
-        f.panel_begin(flare.START, flare.STRETCH)   // STRETCH so the conversation rows fill the (resizable) sidebar width
-        f.strut(sbw, 0)
-        f.row(flare.START, flare.CENTER)             // keep "Claude" left-aligned (a bare heading STRETCHes to centre)
-        f.heading("Claude")
-        f.end()
-        if f.primary("+ New chat") && !pending {
-            new_chat = true
-        }
-        // Recents: every conversation, switchable. The active one is kept titled live from the
-        // working arrays (scalar field assignment through an index DOES persist, unlike .append —
-        // OFI-072) and shown as a primary; the rest are plain buttons.
-        convos[active].title = title_for(turns)
-        f.text_muted("Recents")
-        var ci = 0
-        loop {
-            if ci == convos.len() {
-                break
-            }
-            // Skip empty conversations — a blank chat isn't "recent" yet (it's the "+ New chat" button),
-            // so we don't show a redundant "New chat" row under it. The active chat's messages live in the
-            // working array; the rest in their Conv.
-            var ce = false
-            if ci == active {
-                if turns.len() == 0 {
-                    ce = true
-                }
-            } else {
-                if convos[ci].turns.len() == 0 {
-                    ce = true
-                }
-            }
-            if ce {
-                ci = ci + 1
-                continue
-            }
-            f.key("_cv{ci}")
-            f.row(flare.START, flare.CENTER)
-            let clicked = f.nav_item(convos[ci].title, ci == active)   // grows to fill the row; ellipsizes to its width
-            if f.ghost_button("...") {                  // per-conversation context menu (Delete)
-                menu_for = ci
-                menu_x = mouse_x()
-                menu_y = mouse_y()
-            }
-            f.end()
-            f.key_clear()
-            if clicked && !pending && ci != active {
-                switch_to = ci
-            }
-            ci = ci + 1
-        }
-        f.spacer()                       // push the settings entry to the foot of the sidebar
-        f.row(flare.START, flare.CENTER) // wrap it: nav_item's grow=1 fills WIDTH in a row (a bare one in the column grows DOWN)
-        if f.nav_item("Settings", false) {   // a full-width, left-aligned footer row (matches the Recents rows)
-            settings_open = true
-        }
-        f.end()                          // close the row
-        f.end()                          // close the sidebar panel
-
-        // drag handle on the sidebar's right edge — drag it to resize the sidebar. The max is 480 but also
-        // window-aware: always leave ~350px for the main pane (handle + margins + the readable-page floor) so a
-        // wide sidebar can never squeeze the transcript off-screen on a narrow window. Persist the new width.
-        var sbmax = screen_width() - 350
-        if sbmax > 480 {
-            sbmax = 480
-        }
-        if sbmax < 200 {
-            sbmax = 200
-        }
-        sbw = f.splitter("sb_split", sbw, 200, sbmax, true)
-        if sbw > sbmax {                          // a previously-saved wider width snaps in when the window shrinks
-            sbw = sbmax
-        }
-        f.set_int("sbw", sbw)
-
-        // main pane
-        f.column_grow(flare.START, flare.STRETCH)
-
+        // ---- body: a DOCKABLE WORKSPACE — Conversations | Chat | Inspector (std/flare DockTree). Drag a
+        // divider to re-proportion, click a panel's ✕ to close it (Chat is PINNED — the anchor, no ✕), and
+        // re-dock a closed side panel from the Chat toolbar. Each panel is a live Flare subtree.
+        convos[active].title = title_for(turns)            // keep the active chat titled live (OFI-072)
         var hdr = "New conversation"
         if turns.len() > 0 {
             hdr = title_for(turns)
         }
-        f.row(flare.BETWEEN, flare.CENTER)
-        f.text_muted(ellipsize(hdr, 44))
-        f.spacer()
         var active_model = model_label(model_idx)
         if use_env {
             active_model = "(env)"
         }
-        f.text_muted("Model · {active_model}")
-        f.end()
 
-        // The readable page width — the transcript + composer sit in a column this wide, CENTRED in the main
-        // pane (margins both sides) rather than hugging the left.
-        var cw = screen_width() - sbw - flare.HANDLE_W - 64
-        if cw > 820 {                          // readable column cap (~20% wider than the old 680)
-            cw = 820
-        }
-        if cw < 280 {
-            cw = 280
+        f.dock_pin("Chat")                                 // Chat is the permanent anchor — draws no close ✕
+        let dm = 12
+        let dhit = f.dock_begin(dock, dm, dm, screen_width() - 2 * dm, screen_height() - 2 * dm)
+        if dhit >= 0 {
+            let pid = dock.close_tab(dhit)                 // a ✕ → close the active tab (leaf survives if grouped)
+            f.forget(pid)
         }
 
-        // transcript: a SCROLLABLE viewport that grows to fill the height
-        f.scroll_begin_sticky("transcript")   // follows new replies while you're at the bottom; lets you scroll up
-        f.page_begin(cw)                       // centre the conversation in a readable page
-        if turns.len() == 0 {
-            f.heading("How can I help you today?")
-            f.text_muted("Type below and press Enter, or pick a starting point.")
-            var i = 0
-            loop {
-                if i == suggestions.len() {
-                    break
-                }
-                if f.button(suggestions[i]) && !pending {
-                    turns.append(api.mk_turn(0, suggestions[i]))
-                    want_send = true
-                    f.scroll_to_bottom("transcript")
-                }
-                i = i + 1
+        // --- Conversations: the chat list, new-chat, and settings (the old sidebar) ---
+        if f.dock_panel("Conversations") {
+            f.row(flare.START, flare.CENTER)               // keep "Claude" left-aligned (a bare heading centres)
+            f.heading("Claude")
+            f.end()
+            if f.primary("+ New chat") && !pending {
+                new_chat = true
             }
-        } else {
-            var i = 0
+            // Recents: every conversation, switchable. The active one is kept titled live (set above).
+            f.text_muted("Recents")
+            var ci = 0
             loop {
-                if i == turns.len() {
+                if ci == convos.len() {
                     break
                 }
-                var step = 1
-                if turns[i].kind == 1 {
-                    // assistant tool_use: render any spoken preamble, then the tool card. If the next turn is
-                    // the matching tool_result, fold it into the card and consume it (so it isn't drawn as you).
-                    if turns[i].text.len() > 0 {
-                        let _ = claude_turn(f, turns[i].text, cw, "pre{i}", false)
+                // Skip empty conversations — a blank chat isn't "recent" yet (it's the "+ New chat" button).
+                var ce = false
+                if ci == active {
+                    if turns.len() == 0 {
+                        ce = true
                     }
-                    var have_result = false
-                    if i + 1 < turns.len() {
-                        if turns[i + 1].kind == 2 {
-                            have_result = true
-                        }
-                    }
-                    if have_result {
-                        tool_card(f, "tc{i}", turns[i].tool_name, turns[i].tool_input, turns[i + 1].text, true, cw)
-                        step = 2
-                    } else {
-                        tool_card(f, "tc{i}", turns[i].tool_name, turns[i].tool_input, "", false, cw)
-                    }
-                } else if turns[i].kind == 2 {
-                    tool_card(f, "tc{i}", "result", "", turns[i].text, true, cw)   // orphan result (defensive)
-                } else if turns[i].role == 0 {
-                    user_turn(f, turns[i].text, cw)        // your turn → a rounded chat bubble
                 } else {
-                    if claude_turn(f, turns[i].text, cw, "msg{i}", true) {
-                        retry_idx = i                // Retry → regenerate this turn after layout
+                    if convos[ci].turns.len() == 0 {
+                        ce = true
                     }
                 }
-                i = i + step
-            }
-            if streaming {
-                var caret = ""                       // a blinking caret marks the live, growing reply
-                if (tick / 20) % 2 == 0 {
-                    caret = " ▌"
+                if ce {
+                    ci = ci + 1
+                    continue
                 }
-                let _ = claude_turn(f, cur_reply + caret, cw, "stream", false)
-            } else if pending {
-                thinking_turn(f, tick)               // waiting for the first delta (animated spinner)
+                f.key("_cv{ci}")
+                f.row(flare.START, flare.CENTER)
+                let clicked = f.nav_item(convos[ci].title, ci == active)   // grows to fill the row; ellipsizes
+                if f.ghost_button("...") {                  // per-conversation context menu (Delete)
+                    menu_for = ci
+                    menu_x = mouse_x()
+                    menu_y = mouse_y()
+                }
+                f.end()
+                f.key_clear()
+                if clicked && !pending && ci != active {
+                    switch_to = ci
+                }
+                ci = ci + 1
             }
-        }
-        f.page_end()
-        f.scroll_end("transcript")
-        if f.scroll_fab("transcript") {           // a "jump to latest" button appears when scrolled up
-            f.scroll_to_bottom("transcript")
-        }
-
-        // composer: Enter sends. While a reply streams, a Stop button (or Esc) cancels it. Centred to match.
-        f.page_begin(cw)
-        if pending {
-            f.row(flare.START, flare.CENTER)
-            if f.primary("■  Stop") {
-                send(stop_ch, true)
+            f.spacer()                       // push the settings entry to the foot of the panel
+            f.row(flare.START, flare.CENTER) // wrap it: nav_item's grow=1 fills WIDTH in a row
+            if f.nav_item("Settings", false) {
+                settings_open = true
             }
             f.end()
-        } else {
-            input = f.text_area("composer", input)   // multi-line: Shift+Enter = newline, Enter = send
-            if f.submit() {
-                if input.len() > 0 {
-                    turns.append(api.mk_turn(0, input))
-                    want_send = true
-                    f.scroll_to_bottom("transcript")
-                }
-                input = ""
-            }
+            f.dock_panel_end()
         }
-        f.page_end()
 
-        f.end()      // main pane
-        f.end()      // body
+        // --- Chat: a toolbar (title / model / re-dock), the scrollable transcript, and the composer ---
+        if f.dock_panel("Chat") {
+            // Toolbar: title on the left; model + re-dock affordances pushed to the right.
+            f.row(flare.START, flare.CENTER)
+            f.text_muted(ellipsize(hdr, 40))
+            f.spacer()
+            f.text_muted("· {active_model}")
+            if dock.leaf_of("Conversations") < 0 {         // closed → offer to re-dock it on the left
+                if f.ghost_button("☰ Chats") {
+                    let _ = dock.split_before(dock.leaf_of("Chat"), "Conversations", true, 0.26)
+                }
+            }
+            if dock.leaf_of("Inspector") < 0 {             // closed → offer to re-dock it on the right
+                if f.ghost_button("ⓘ Inspector") {
+                    let _ = dock.split(dock.leaf_of("Chat"), "Inspector", true, 0.76)
+                }
+            }
+            f.end()
+
+            let cw = panel_cw(f, "Chat", 280, 820)         // readable page width — wraps to the Chat panel's width
+
+            // transcript: a SCROLLABLE viewport that grows to fill the height between toolbar and composer
+            f.scroll_begin_sticky("transcript")
+            f.page_begin(cw)
+            if turns.len() == 0 {
+                f.heading("How can I help you today?")
+                f.text_muted("Type below and press Enter, or pick a starting point.")
+                var i = 0
+                loop {
+                    if i == suggestions.len() {
+                        break
+                    }
+                    if f.button(suggestions[i]) && !pending {
+                        turns.append(api.mk_turn(0, suggestions[i]))
+                        want_send = true
+                        f.scroll_to_bottom("transcript")
+                    }
+                    i = i + 1
+                }
+            } else {
+                // VIRTUALIZE the transcript (Fix B). A cheap O(turns) pre-pass groups turns into visual BLOCKS
+                // (an assistant tool_use folds its following tool_result into one card), then virtual_begin builds
+                // only the blocks whose rows fall in the viewport — the rest are spacer struts. So a 500-message
+                // chat renders like a 20-message one: O(total) classify, O(visible) render. The block list keeps a
+                // tool_use+result as ONE item, so the window never aliases mid-pair.
+                var block_start: [int] = []
+                var bj = 0
+                loop {
+                    if bj >= turns.len() {
+                        break
+                    }
+                    block_start.append(bj)
+                    if turns[bj].kind == 1 && bj + 1 < turns.len() && turns[bj + 1].kind == 2 {
+                        bj = bj + 2
+                    } else {
+                        bj = bj + 1
+                    }
+                }
+                let vc = f.virtual_begin("transcript", block_start.len())
+                var bk = vc.start
+                loop {
+                    if bk >= vc.end {
+                        break
+                    }
+                    let i = block_start[bk]
+                    f.virtual_item(bk)
+                    if turns[i].kind == 1 {
+                        // assistant tool_use: render any spoken preamble, then the tool card. Fold a matching
+                        // tool_result into the card (so it isn't drawn as you).
+                        if turns[i].text.len() > 0 {
+                            let _ = claude_turn(f, turns[i].text, cw, "pre{i}", false)
+                        }
+                        var have_result = false
+                        if i + 1 < turns.len() {
+                            if turns[i + 1].kind == 2 {
+                                have_result = true
+                            }
+                        }
+                        if have_result {
+                            tool_card(f, "tc{i}", turns[i].tool_name, turns[i].tool_input, turns[i + 1].text, true, cw)
+                        } else {
+                            tool_card(f, "tc{i}", turns[i].tool_name, turns[i].tool_input, "", false, cw)
+                        }
+                    } else if turns[i].kind == 2 {
+                        tool_card(f, "tc{i}", "result", "", turns[i].text, true, cw)   // orphan result (defensive)
+                    } else if turns[i].role == 0 {
+                        user_turn(f, turns[i].text, cw)        // your turn → a rounded chat bubble
+                    } else {
+                        if claude_turn(f, turns[i].text, cw, "msg{i}", true) {
+                            retry_idx = i                // Retry → regenerate this turn after layout
+                        }
+                    }
+                    f.virtual_item_end()
+                    bk = bk + 1
+                }
+                f.virtual_end()
+                if streaming {
+                    var caret = ""                       // a blinking caret marks the live, growing reply
+                    if (tick / 20) % 2 == 0 {
+                        caret = " ▌"
+                    }
+                    let _ = claude_turn(f, cur_reply + caret, cw, "stream", false)
+                } else if pending {
+                    thinking_turn(f, tick)               // waiting for the first delta (animated spinner)
+                }
+            }
+            f.page_end()
+            f.scroll_end("transcript")
+            if f.scroll_fab("transcript") {           // a "jump to latest" button appears when scrolled up
+                f.scroll_to_bottom("transcript")
+            }
+
+            // composer: Enter sends. While a reply streams, a Stop button (or Esc) cancels it. Centred to match.
+            f.page_begin(cw)
+            if pending {
+                f.row(flare.START, flare.CENTER)
+                if f.primary("■  Stop") {
+                    send(stop_ch, true)
+                }
+                f.end()
+            } else {
+                input = f.text_area("composer", input)   // multi-line: Shift+Enter = newline, Enter = send
+                if f.submit() {
+                    if input.len() > 0 {
+                        turns.append(api.mk_turn(0, input))
+                        want_send = true
+                        f.scroll_to_bottom("transcript")
+                    }
+                    input = ""
+                }
+            }
+            f.page_end()
+            f.dock_panel_end()
+        }
+
+        // --- Inspector: the conversation's context at a glance, plus quick layout/settings actions ---
+        if f.dock_panel("Inspector") {
+            let iw = panel_cw(f, "Inspector", 120, 600)
+            f.heading("Context")
+            f.divider()
+            f.text_muted("Model")
+            f.label(active_model)
+            f.text_muted("Max tokens")
+            let mt = tokens_for(tok_idx)
+            f.label("{mt}")
+            f.text_muted("Messages")
+            // Count user/assistant messages and tool calls in the live transcript.
+            var nmsg = 0
+            var ntool = 0
+            var ii = 0
+            loop {
+                if ii == turns.len() {
+                    break
+                }
+                if turns[ii].kind == 1 {
+                    ntool = ntool + 1
+                } else if turns[ii].kind == 0 {
+                    nmsg = nmsg + 1
+                }
+                ii = ii + 1
+            }
+            f.label("{nmsg} message(s) · {ntool} tool call(s)")
+            f.text_muted("System prompt")
+            if sys_prompt.len() > 0 {
+                f.paragraph(sys_prompt, iw)
+            } else {
+                f.label("(none — set in Settings)")
+            }
+            f.text_muted("Tools")
+            f.label("read_file · write_file")
+            f.spacer()
+            f.divider()
+            f.row(flare.START, flare.CENTER)
+            if f.ghost_button("Settings") {
+                settings_open = true
+            }
+            if f.ghost_button("Reset layout") {
+                dock = build_workspace()
+            }
+            f.end()
+            f.dock_panel_end()
+        }
 
         // ---- conversation context-menu: a Flare popover anchored at the cursor (the "..." opens it).
         // A press outside dismisses it; Delete removes that conversation (applied after layout). ----
@@ -1032,6 +1140,18 @@ fn main() -> int {
         }
 
         f.finish()
+
+        // Idle frame-gating: when nothing is moving — no input, no animation in flight, no reply streaming —
+        // let EndDrawing block on OS events instead of re-rendering 60 identical frames/second (the immediate-
+        // mode CPU burn). A short coast keeps the loop free-running just after activity so a settling spring or
+        // the send queued just below (pending flips true next frame) is never cut off; any input/anim/stream
+        // re-arms it. had_input() covers mouse AND keyboard, so every shortcut-driven action stays awake too.
+        if had_input() || f.is_animating() || pending {
+            coast = 12
+        } else if coast > 0 {
+            coast = coast - 1
+        }
+        set_event_waiting(coast == 0)
         draw.finish()
 
         // Dispatch the turn AFTER the frame is built (so `turns` already holds the new user message).
@@ -1116,14 +1236,30 @@ fn main() -> int {
             streaming = false
         }
 
+        // A dock change (resize / close / re-dock / tabify / tab-switch — all done inside dock_begin) is
+        // detected on mouse RELEASE by comparing the workspace's serialised layout to the last saved one, so
+        // the rearranged workspace persists too (OFI-112) without re-serialising it every frame.
+        let now_down = f.ui.down
+        if prev_down && !now_down {
+            let cur_dock = json.stringify(dock.to_json())
+            if cur_dock != dock_snap {
+                dirty = true
+                dock_snap = cur_dock
+            }
+        }
+        prev_down = now_down
+
         // Persist the store at frame end if anything changed (a send, a committed reply, new/switch/delete/retry).
         if dirty {
-            save_store(convos, active, turns, model_idx, tok_idx, dark, f.zoom, sys_prompt)
+            save_store(convos, active, turns, model_idx, tok_idx, dark, f.zoom, sys_prompt, dock)
         }
     }
     close(req_ch)        // wake the worker out of recv → it returns None and exits
     }                    // nursery: joins the fetch worker here
 
+    if tape_path.len() > 0 {
+        draw.tape_off()
+    }
     draw.close()
     return 0
 }

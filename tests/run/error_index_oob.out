@@ -1,0 +1,6 @@
+error[index_out_of_bounds]: array index out of bounds
+  --> tests/run/error_index_oob.em:4 (in get)
+  why:    indexing requires 0 <= index < len
+  values: index = 5, len = 3
+  route:  get (line 4) <- main (line 9)
+  hint:   valid indices are 0..len-1; guard with `if i < arr.len()`, or use `arr.get(i)` which returns an Option

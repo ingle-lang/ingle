@@ -3,7 +3,7 @@
 # /language). See docs/architecture.md for the hosting decision.
 title: Ember
 description: A statically-typed, brace-delimited systems language — safe without a GC.
-theme: jekyll-theme-minima
+theme: minima
 # Keep build artifacts and dev-internal docs out of the PUBLISHED site (they stay in the repo for
 # contributors — this only controls what becomes a web page on ember-lang.org).
 exclude:

@@ -30,13 +30,16 @@ fn main() -> int {
         f.begin()
 
         f.heading("Flare animation")
-        f.text_muted("Spring physics + FLIP layout transitions — deterministic, immediate-mode.")
+        f.paragraph("Spring physics + FLIP layout transitions — deterministic, immediate-mode.", screen_width() - 36)
 
         // 1) SPRING — a panel whose width eases between two sizes. Toggle it; the width RETARGETS smoothly
         //    even mid-flight. Wrapped in a row + spacer so it stays content-width (a panel alone would stretch).
+        f.row(flare.START, flare.CENTER)
         if f.primary("Toggle width") {
             expanded = !expanded
         }
+        f.spacer()
+        f.end()
         var tw = 160.0
         if expanded {
             tw = 460.0

@@ -1,7 +1,9 @@
 // tests/graphics/flare_sticky.em — regression for scroll_begin_sticky (chat-style stick-to-bottom). Tall
-// content in a sticky viewport pins to the BOTTOM: the last item is visible and the first is scrolled above
-// (a large negative y), NOT blank. Guards the bug where the 1e6 sentinel offset, used UNCLAMPED as the shift,
-// pushed everything off-screen — finish() now clamps the shift to the real overflow. Three frames so the
+// content in a sticky viewport pins to the BOTTOM: the LAST rows are visible, NOT blank. Guards the bug where
+// the 1e6 sentinel offset, used UNCLAMPED as the shift, pushed everything off-screen — finish() now clamps the
+// shift to the real overflow. The earlier rows scroll above the viewport and are now VIEWPORT-CULLED (finish()
+// skips leaves fully outside the scroll rect), so the tape shows only the visible tail — if the sentinel bug
+// regressed, even those last rows would scroll off and vanish, so the guard still bites. Three frames so the
 // overflow settles. (Vertical scroll is row-height-based, so this is largely font-metric independent.)
 import "std/draw" as draw
 import "std/flare" as flare

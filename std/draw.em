@@ -151,3 +151,16 @@ fn tape_on(path: string) -> bool {
 fn tape_off() {
     tape_close()
 }
+
+
+// ---- frame capture (the visual instrument) ----
+
+// capture queues a PNG screenshot of THIS frame to `path`, written when the frame is
+// presented. Call it any time between `begin()` and `finish()` — the screenshot is taken
+// after the frame is fully drawn, so it captures exactly what reaches the screen. On a
+// Retina display the image is the physical framebuffer (2× logical) — crisp for docs and
+// visual-regression goldens. Returns true if the capture was queued. The basis for Flare's
+// visual iteration: render a frame, capture it, look at the pixels.
+fn capture(path: string) -> bool {
+    return frame_capture(path) == 1
+}
