@@ -20,6 +20,7 @@ void ember_gfx_set_event_waiting(int on);     // on: EndDrawing blocks on OS eve
 int  ember_gfx_had_input(void);               // 1 if any mouse move/button/wheel/resize occurred this frame
 int  ember_gfx_measure_misses(void);          // measure_text cache misses (real FreeType measures) since frame_begin
 int  ember_gfx_frame_steps(void);             // fixed physics sub-steps spanning the last frame's wall-time (>=1)
+void ember_gfx_set_alpha(int a);              // fade multiplier 0..255 for following draws (folded at flush)
 void ember_gfx_draw_rect(int x, int y, int w, int h, int color);
 void ember_gfx_draw_text(const char *text, int x, int y, int size, int color);
 int  ember_gfx_key_down(int keycode);          // 1 while the key is held

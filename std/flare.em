@@ -83,6 +83,8 @@ let _CLIP_END   = 36   // close a clip bracket (clip_pop)
 let _DANGER = 37        // a destructive-action button — a red fill (delete / remove), like _PRIMARY
 let _VITEM  = 38        // a virtualized-list item: a transparent row container whose solved height the paint
                         //  loop records into vrows[] so next frame's window math knows each item's size
+let _FADE_BEGIN = 39    // multiply the enclosed widgets' opacity by an amount (the node slot carries 0..255)
+let _FADE_END   = 40    // close a fade bracket (restore the parent opacity)
 
 // HANDLE_W is the on-screen thickness (px) of a splitter's hit band — wide enough to grab, a hairline to look
 // at. Public so a caller can account for it when computing the remaining content width beside a resized pane.
@@ -114,6 +116,15 @@ struct Rect {
 struct VClip {
     start: int
     end: int
+}
+
+
+// ToastItem is one queued toast notification: a stable id (the presence key), its text, and the frame it was
+// raised (its age drives the auto-dismiss). See f.toast() / f.toast_layer().
+struct ToastItem {
+    id: int
+    text: string
+    born: int
 }
 
 
@@ -324,6 +335,12 @@ struct Flare {
     vstart: int
     vend: int
     _vk: int
+    // Toast notifications: a frame counter (drives each toast's age), the live queue, and the next id. toast()
+    // enqueues, toast_layer() renders them as a fade+slide overlay and auto-dismisses by age — built on
+    // presence(), so a toast enters and exits with the same spring as everything else. See toast_layer().
+    _frame: int
+    _toasts: [ToastItem]
+    _tnext: int
 
 
     // begin starts a frame: snapshot input, reset the layout tree, open the root column (it fills
@@ -338,6 +355,7 @@ struct Flare {
         self._modal_was = false
         self._in_modal = false
         self._anim = false              // springs/FLIP raise this again if anything moves this frame
+        self._frame = self._frame + 1   // monotonic frame count (drives toast ages)
         self._steps = 1                 // deterministic fixed timestep by default (golden-stable); set_realtime
         if self._realtime {             // opts into wall-clock catch-up so heavy frames don't slow animations
             self._steps = frame_steps()
@@ -380,6 +398,8 @@ struct Flare {
         var oy = 0
         var oxs: [int] = []
         var oys: [int] = []
+        var alpha_cur = 255         // active fade opacity (0..255); a stack so fade brackets nest (multiply)
+        var alphas: [int] = []
         var i = 0
         loop {
             if i == self.rnode.len() {
@@ -467,6 +487,15 @@ struct Flare {
                     let dy = oys.remove_at(oys.len() - 1)
                     ox = ox - dx
                     oy = oy - dy
+                }
+            } else if kind == _FADE_BEGIN {
+                alphas.append(alpha_cur)                 // the 0..255 fade amount rides in the node slot
+                alpha_cur = alpha_cur * self.rnode[i] / 255
+                set_alpha(alpha_cur)
+            } else if kind == _FADE_END {
+                if alphas.len() > 0 {
+                    alpha_cur = alphas.remove_at(alphas.len() - 1)
+                    set_alpha(alpha_cur)
                 }
             } else if kind == _CLIP_BEGIN {
                 let n = self.rnode[i]                    // clip content to the dock panel's body (the float's rect)
@@ -1525,6 +1554,94 @@ struct Flare {
     }
 
 
+    // enter returns a 0 → 1 "appearance" progress for a KEYED element: the first frame its key is seen it
+    // starts at 0 and springs to 1, every frame after it is already ~1 (no re-trigger). This is the immediate-
+    // mode answer to React's <AnimatePresence> enter — it needs nothing but keyed-state (a key with no stored
+    // progress IS a first appearance). Ride it with at()/fade for a slide/fade-in:
+    //   let e = f.enter("msg" + id); f.at(0.0, (1.0 - e) * 24.0); ...render...; f.end_at()
+    // NOTE under virtualization, apply it only to GENUINELY-new items (the latest message), not every list row
+    // — a row's "first sight" is when it first scrolls into view, which you don't want to animate.
+    fn enter(mut self, key: string) -> float {
+        let pk = self.scope + key + ".enp"
+        let vk = self.scope + key + ".env"
+        var pos = self.state_float(pk, 0.0)                 // FIRST sight → 0 (the origin), springs toward 1
+        var vel = self.state_float(vk, 0.0)
+        var n = self._steps
+        loop {
+            if n == 0 {
+                break
+            }
+            let force = (0.0 - 200.0 * (pos - 1.0)) - 26.0 * vel
+            vel = vel + force * SPRING_DT
+            pos = pos + vel * SPRING_DT
+            n = n - 1
+        }
+        var adp = pos - 1.0                                 // fine thresholds: this is a 0..1 progress, not pixels
+        if adp < 0.0 {
+            adp = 0.0 - adp
+        }
+        var av = vel
+        if av < 0.0 {
+            av = 0.0 - av
+        }
+        if adp < 0.004 && av < 0.01 {
+            pos = 1.0
+            vel = 0.0
+        } else {
+            self._anim = true
+        }
+        self.set_float(pk, pos)
+        self.set_float(vk, vel)
+        return pos
+    }
+
+
+    // presence is enter AND exit in one — the immediate-mode <AnimatePresence>. It returns a 0..1 progress that
+    // springs to 1 while `present` is true (a first-seen key starts at 0, so it animates IN) and back to 0 once
+    // `present` goes false (it animates OUT). Keep rendering a leaving item until presence returns ~0, THEN drop
+    // it from your data — that's the whole exit lifecycle, with nothing but keyed-state:
+    //   let p = f.presence("row:" + id, !leaving)
+    //   f.at(0.0, (1.0 - p) * 16.0); ...render the row...; f.end_at()
+    //   if leaving && p < 0.02 { actually_remove(id) }   // exit finished
+    fn presence(mut self, key: string, present: bool) -> float {
+        let pk = self.scope + key + ".prp"
+        let vk = self.scope + key + ".prv"
+        var pos = self.state_float(pk, 0.0)                 // first sight → 0 → springs in
+        var vel = self.state_float(vk, 0.0)
+        var target = 0.0
+        if present {
+            target = 1.0
+        }
+        var n = self._steps
+        loop {
+            if n == 0 {
+                break
+            }
+            let force = (0.0 - 200.0 * (pos - target)) - 26.0 * vel
+            vel = vel + force * SPRING_DT
+            pos = pos + vel * SPRING_DT
+            n = n - 1
+        }
+        var adp = pos - target
+        if adp < 0.0 {
+            adp = 0.0 - adp
+        }
+        var av = vel
+        if av < 0.0 {
+            av = 0.0 - av
+        }
+        if adp < 0.004 && av < 0.01 {
+            pos = target
+            vel = 0.0
+        } else {
+            self._anim = true
+        }
+        self.set_float(pk, pos)
+        self.set_float(vk, vel)
+        return pos
+    }
+
+
     fn _spring(mut self, key: string, target: float, k: float, c: float) -> float {
         let pk = key + ".sp"
         let vk = key + ".sv"
@@ -1575,6 +1692,86 @@ struct Flare {
 
     fn end_at(mut self) {
         self._queue(0, _OFFSET_END, "", "")
+    }
+
+
+    // fade_begin multiplies the opacity of every widget built between it and fade_end() by `amount` (0..1) —
+    // a whole subtree fades as one (text, fills, shadows). Pure paint, no layout effect; brackets nest
+    // (multiply). Pair with enter()/presence() for fade-in/out, or a constant for dimming a disabled region:
+    //   let p = f.presence(key, !leaving); f.fade_begin(p); f.at(0.0, (1.0-p)*16.0); ...; f.end_at(); f.fade_end()
+    fn fade_begin(mut self, amount: float) {
+        var a = to_int(amount * 255.0)
+        if a < 0 {
+            a = 0
+        }
+        if a > 255 {
+            a = 255
+        }
+        self._queue(a, _FADE_BEGIN, "", "")     // the 0..255 amount rides in the node slot
+    }
+
+
+    fn fade_end(mut self) {
+        self._queue(0, _FADE_END, "", "")
+    }
+
+
+    // toast raises a transient notification — a pill that slides + fades in at the bottom of the window, holds
+    // a few seconds, then auto-dismisses. Call it from anywhere (a click handler, an error path); the queue is
+    // drawn once per frame by toast_layer(). Built on presence(), so a toast enters and leaves with the house
+    // spring, and the dismiss is a deterministic frame count.
+    fn toast(mut self, text: string) {
+        self._toasts.append(ToastItem { id: self._tnext, text: text, born: self._frame })
+        self._tnext = self._tnext + 1
+    }
+
+
+    // toast_layer draws + ages the toast queue: each pill enters (presence 0→1: fade + slide up), holds for
+    // ~3.3s, then exits (presence → 0) and is dropped. Call it ONCE per frame, AFTER finish() — it draws
+    // directly on the modal layer, above the UI. While any toast is alive it keeps the loop awake (so the age
+    // timer and the exit keep advancing even under idle event-waiting). Stacks newest at the bottom.
+    fn toast_layer(mut self) {
+        if self._toasts.len() == 0 {
+            return
+        }
+        let st = self.ui.style
+        set_layer(MODAL_LAYER)
+        var keep: [ToastItem] = []
+        var slot = 0
+        var i = 0
+        loop {
+            if i >= self._toasts.len() {
+                break
+            }
+            let t = self._toasts[i]
+            let present = self._frame - t.born < 200          // ~3.3s at 60fps before it begins to leave
+            let p = self.presence("_toast{t.id}", present)
+            if present || p > 0.02 {
+                self._anim = true                             // keep the loop awake so age + exit keep ticking
+                let tw = measure_text(t.text, st.text_size)
+                let pw = tw + st.pad * 3
+                let ph = st.text_size + st.pad * 2 + 4
+                let px = (screen_width() - pw) / 2
+                let py = screen_height() - 60 - slot * (ph + 10)
+                let slide = to_int((1.0 - p) * 18.0)
+                set_alpha(to_int(p * 255.0))                  // the whole pill fades with the presence value
+                fill_round(px, py + slide, pw, ph, st.radius, st.ink, 255)
+                stroke_round(px, py + slide, pw, ph, st.radius, 1, st.border, 90)
+                draw_text(t.text, px + (pw - tw) / 2, self._ty(py + slide, ph, st.text_size), st.text_size, st.panel)
+                set_alpha(255)
+                keep.append(t)
+                slot = slot + 1
+            }
+            i = i + 1
+        }
+        self._toasts = keep
+        set_layer(0)
+    }
+
+
+    // toast_count is how many toasts are still alive (entering, held, or exiting) — 0 once the queue is clear.
+    fn toast_count(self) -> int {
+        return self._toasts.len()
     }
 
 
@@ -2127,6 +2324,7 @@ struct Flare {
                     self.key("_cp{self._mdseq}")             // unique id per code block (frame-stable)
                     if self.button("Copy") {
                         clipboard_set(s)
+                        self.toast("Copied to clipboard")
                     }
                     self.key_clear()
                     self._mdseq = self._mdseq + 1
@@ -2753,7 +2951,10 @@ fn new() -> Flare {
         vcount: 0,
         vstart: 0,
         vend: 0,
-        _vk: 0
+        _vk: 0,
+        _frame: 0,
+        _toasts: [],
+        _tnext: 0
     }
 }
 

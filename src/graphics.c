@@ -62,6 +62,7 @@ static int        g_ft_ready = 0;   // 1 once FT_Init_FreeType succeeded
 static GfxFont    g_fonts[GFX_FONT_MAX];
 static int        g_font_count = 0;       // number of loaded faces (>=1 once the window is open)
 static int        g_cur_font   = 0;       // active font slot for draw_text / measure_text
+static int        g_alpha      = 255;     // active fade multiplier (0..255): every command records it, folded at flush
 
 // HiDPI/Retina backing-scale factor (OFI-060). On a 1x display this is 1.0 and the whole
 // scaling path below is a mathematical identity, so 1x output is byte-for-byte unchanged.
@@ -171,6 +172,22 @@ int ember_gfx_frame_steps(void) {
     return (int)n;
 }
 
+
+
+
+// set_alpha sets the active fade multiplier (0..255) that every following draw command captures and folds
+// into its final opacity at flush. The Flare paint loop drives it from a _FADE bracket (nesting multiplies),
+// and frame_begin resets it to 255. This is how a whole subtree fades in/out as one (presence, dimming).
+void ember_gfx_set_alpha(int a) {
+    if (a < 0) {
+        a = 0;
+    }
+    if (a > 255) {
+        a = 255;
+    }
+    g_alpha = a;
+}
+
 // Unpack a 0xRRGGBB color int into a raylib Color (always opaque).
 static Color gfx_color(int packed) {
     Color c;
@@ -236,7 +253,8 @@ typedef struct {
     int        color;       // packed 0xRRGGBB (gradient top / circle / stroke / fill)
     int        color2;      // gradient bottom
     int        radius;      // corner radius (px) for round/stroke/grad/shadow
-    int        alpha;       // 0..255 for the rich primitives (rect/text are opaque)
+    int        alpha;       // 0..255 final opacity (after the fade multiplier is folded in at flush)
+    int        fade;        // 0..255 fade multiplier captured at record time (g_alpha); folded into alpha post-sort
     int        thick;       // stroke line thickness
     int        font;        // font slot for text commands (captured from g_cur_font)
     char      *text;        // strdup'd for text commands, NULL otherwise; freed on flush
@@ -309,6 +327,8 @@ static GfxCmd *gfx_push_cmd(void) {
     c->layer = g_cur_layer;
     c->seq   = g_cmd_count;
     c->text  = NULL;
+    c->alpha = 255;          // opaque by default; the rich primitives override before flush
+    c->fade  = g_alpha;      // capture the active fade multiplier; folded into alpha after the z-sort
     g_cmd_count++;
     return c;
 }
@@ -703,6 +723,7 @@ void ember_gfx_frame_begin(int bg_color) {
     g_cmd_count = 0;        // start a fresh command list for this frame
     g_cur_layer = 0;
     g_cur_font = 0;         // text defaults to the embedded font each frame
+    g_alpha = 255;          // fade resets to fully opaque each frame
     g_clip_depth = 0;
     SetMouseCursor(MOUSE_CURSOR_DEFAULT);   // reset each frame; a widget re-asserts its cursor while hovered (tape-silent)
     if (g_tape != NULL) {   // snapshot the input that will drive this frame
@@ -725,6 +746,14 @@ void ember_gfx_frame_end(void) {
     // Flush the frame's commands in z-order (stable within each layer), then present.
     qsort(g_cmds, (size_t)g_cmd_count, sizeof(GfxCmd), gfx_cmd_cmp);
 
+    // Fold each command's captured fade multiplier into its final alpha, so the tape and the renderer agree.
+    // At the default fade (255) this is a no-op (alpha·255/255 == alpha), keeping every un-faded frame identical.
+    for (int i = 0; i < g_cmd_count; i++) {
+        if (g_cmds[i].fade != 255) {
+            g_cmds[i].alpha = g_cmds[i].alpha * g_cmds[i].fade / 255;
+        }
+    }
+
     // Record the frame to the UI tape (input + every draw command), if recording.
     if (g_tape != NULL) {
         fprintf(g_tape, "{\"frame\":%d,\"mouse\":[%d,%d],\"down\":%s,\"draws\":[",
@@ -735,12 +764,19 @@ void ember_gfx_frame_end(void) {
                 fputc(',', g_tape);
             }
             if (c->kind == GCMD_RECT) {
-                fprintf(g_tape, "{\"op\":\"rect\",\"layer\":%d,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"color\":\"%06x\"}",
+                fprintf(g_tape, "{\"op\":\"rect\",\"layer\":%d,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"color\":\"%06x\"",
                         c->layer, c->x, c->y, c->w, c->h, (unsigned)(c->color & 0xFFFFFF));
+                if (c->alpha < 255) {
+                    fprintf(g_tape, ",\"alpha\":%d", c->alpha);
+                }
+                fputc('}', g_tape);
             } else if (c->kind == GCMD_TEXT) {
                 fprintf(g_tape, "{\"op\":\"text\",\"layer\":%d,\"x\":%d,\"y\":%d,\"size\":%d,\"color\":\"%06x\",\"text\":",
                         c->layer, c->x, c->y, c->size, (unsigned)(c->color & 0xFFFFFF));
                 gfx_json_str(g_tape, c->text);
+                if (c->alpha < 255) {        // omitted when opaque so un-faded goldens are unchanged
+                    fprintf(g_tape, ",\"alpha\":%d", c->alpha);
+                }
                 fputc('}', g_tape);
             } else if (c->kind == GCMD_ROUND) {
                 fprintf(g_tape, "{\"op\":\"round\",\"layer\":%d,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"r\":%d,\"color\":\"%06x\",\"alpha\":%d}",
@@ -778,7 +814,7 @@ void ember_gfx_frame_end(void) {
         GfxCmd *c = &g_cmds[i];
         switch (c->kind) {
             case GCMD_RECT:
-                DrawRectangle(c->x, c->y, c->w, c->h, gfx_color(c->color));
+                DrawRectangle(c->x, c->y, c->w, c->h, gfx_rgba(c->color, c->alpha));
                 break;
             case GCMD_ROUND: {
                 Rectangle r = { (float)c->x, (float)c->y, (float)c->w, (float)c->h };
@@ -847,7 +883,7 @@ void ember_gfx_frame_end(void) {
                     // maps logical→physical by g_scale — net 1:1, so the hinted bitmap reaches the
                     // screen pixel-for-pixel on every display.
                     DrawTextEx(*f, c->text, pos, (float)c->size,
-                               gfx_text_spacing(c->size), gfx_color(c->color));
+                               gfx_text_spacing(c->size), gfx_rgba(c->color, c->alpha));
                 }
                 free(c->text);
                 c->text = NULL;

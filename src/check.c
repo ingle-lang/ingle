@@ -4112,6 +4112,7 @@ static SemType check_expr_inner(Checker *c, Expr *e) {
                     else if (nid == NATIVE_GFX_HAD_INPUT)    { g_argc = 0; ret = TY_BOOL; }
                     else if (nid == NATIVE_GFX_MEASURE_MISSES){ g_argc = 0; ret = TY_INT; }
                     else if (nid == NATIVE_GFX_FRAME_STEPS)  { g_argc = 0; ret = TY_INT; }
+                    else if (nid == NATIVE_GFX_SET_ALPHA)    { g_argc = 1; want = sig_int1; }
                     if (g_argc >= 0) {
                         if (argc != g_argc) {
                             type_error(c, e->line, e->col,

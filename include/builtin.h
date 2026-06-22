@@ -92,7 +92,8 @@ enum {
     NATIVE_GFX_SET_EVENT_WAIT= 136, // set_event_waiting(on) — when on, EndDrawing blocks on OS events (idle CPU ~0)
     NATIVE_GFX_HAD_INPUT     = 137, // had_input() -> bool — any mouse move/button/wheel/resize this frame
     NATIVE_GFX_MEASURE_MISSES= 138, // measure_misses() -> int — measure_text cache misses since this frame_begin
-    NATIVE_GFX_FRAME_STEPS   = 139  // frame_steps() -> int — physics sub-steps for last frame's elapsed time
+    NATIVE_GFX_FRAME_STEPS   = 139, // frame_steps() -> int — physics sub-steps for last frame's elapsed time
+    NATIVE_GFX_SET_ALPHA     = 140  // set_alpha(a) — fade multiplier 0..255 for the following draws
 };
 
 // Returns the native id for a built-in function name, or -1 if `name` is not a

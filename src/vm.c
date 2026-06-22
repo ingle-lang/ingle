@@ -1154,6 +1154,9 @@ static Value call_native(VM *vm, int native_id, Value *args, int argc) {
             return INT_VAL(ember_gfx_measure_misses());
         case NATIVE_GFX_FRAME_STEPS:
             return INT_VAL(ember_gfx_frame_steps());
+        case NATIVE_GFX_SET_ALPHA:
+            ember_gfx_set_alpha((int)AS_INT(args[0]));
+            return INT_VAL(0);
         case NATIVE_GFX_FRAME_BEGIN:
             ember_gfx_frame_begin((int)AS_INT(args[0]));
             return INT_VAL(0);

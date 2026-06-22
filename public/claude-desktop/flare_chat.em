@@ -310,6 +310,7 @@ fn claude_turn(mut f: flare.Flare, body: string, cw: int, key: string, show_acti
         f.row(flare.START, flare.CENTER)
         if f.ghost_button("Copy") {
             clipboard_set(body)
+            f.toast("Copied to clipboard")
         }
         if f.ghost_button("Retry") {
             retry = true
@@ -954,7 +955,12 @@ fn main() -> int {
                     } else if turns[i].kind == 2 {
                         tool_card(f, "tc{i}", "result", "", turns[i].text, true, cw)   // orphan result (defensive)
                     } else if turns[i].role == 0 {
+                        let ue = f.enter("uent{i}")            // your message fades + springs up into place
+                        f.fade_begin(ue)
+                        f.at(0.0, (1.0 - ue) * 18.0)
                         user_turn(f, turns[i].text, cw)        // your turn → a rounded chat bubble
+                        f.end_at()
+                        f.fade_end()
                     } else {
                         if claude_turn(f, turns[i].text, cw, "msg{i}", true) {
                             retry_idx = i                // Retry → regenerate this turn after layout
@@ -1140,6 +1146,7 @@ fn main() -> int {
         }
 
         f.finish()
+        f.toast_layer()    // draw + age any toasts (e.g. "Copied to clipboard") above the UI, after finish()
 
         // Idle frame-gating: when nothing is moving — no input, no animation in flight, no reply streaming —
         // let EndDrawing block on OS events instead of re-rendering 60 identical frames/second (the immediate-
@@ -1214,6 +1221,7 @@ fn main() -> int {
         // new active conversation (a fresh empty chat if we deleted the last one).
         if delete_conv >= 0 && !want_send {
             dirty = true
+            f.toast("Conversation deleted")
             convos[active].title = title_for(turns)
             convos[active].turns = turns
             convos.remove_at(delete_conv)                    // O(n) shift; the removed Conv (+ its turns) is dropped
