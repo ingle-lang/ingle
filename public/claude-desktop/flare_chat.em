@@ -707,6 +707,9 @@ fn main() -> int {
     var prev_down = false                              // mouse-down state last frame, to detect a release
     var dock_snap = json.stringify(dock.to_json())     // last-persisted workspace layout, to detect a change
     var coast = 12                                     // frames to keep free-running after the last activity
+    var has_undo = false                               // a just-deleted conversation can be restored via the toast
+    var undo_title = ""                                // ...its snapshotted title and turns, kept until the next delete
+    var undo_turns: [api.Turn] = []
     loop {
         if draw.closing() {
             break
@@ -1148,6 +1151,15 @@ fn main() -> int {
         f.finish()
         f.toast_layer()    // draw + age any toasts (e.g. "Copied to clipboard") above the UI, after finish()
 
+        // Undo a delete: the "Conversation deleted · Undo" toast fires "undo_del" when its button is clicked.
+        if has_undo && f.take_action() == "undo_del" {
+            convos.append(Conv { title: undo_title, turns: undo_turns.clone() })   // re-insert the snapshot...
+            switch_to = convos.len() - 1                                    // ...and jump back to it (loaded post-finish)
+            has_undo = false
+            dirty = true
+            f.toast("Conversation restored")
+        }
+
         // Idle frame-gating: when nothing is moving — no input, no animation in flight, no reply streaming —
         // let EndDrawing block on OS events instead of re-rendering 60 identical frames/second (the immediate-
         // mode CPU burn). A short coast keeps the loop free-running just after activity so a settling spring or
@@ -1221,9 +1233,12 @@ fn main() -> int {
         // new active conversation (a fresh empty chat if we deleted the last one).
         if delete_conv >= 0 && !want_send {
             dirty = true
-            f.toast("Conversation deleted")
             convos[active].title = title_for(turns)
             convos[active].turns = turns
+            undo_title = convos[delete_conv].title           // snapshot the doomed conversation so Undo can restore it
+            undo_turns = convos[delete_conv].turns.clone()   // clone — the turns can't be moved out of the conv field
+            has_undo = true
+            f.toast_action("Conversation deleted", "Undo", "undo_del")
             convos.remove_at(delete_conv)                    // O(n) shift; the removed Conv (+ its turns) is dropped
             if delete_conv < active {
                 active = active - 1

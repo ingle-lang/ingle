@@ -115,13 +115,13 @@ the opposite of Swift/JS leading-dot chaining; the trailing operator is what car
 ### Identifiers & keywords
 Identifiers match `[A-Za-z_][A-Za-z0-9_]*`. Reserved words:
 `let var fn return struct enum interface implements match case if else for in loop break continue
-nursery spawn move mut self true false import as`. The type names `int`, `float`, `string`,
+nursery spawn move mut self true false import as requires ensures extern`. The type names `int`, `float`, `string`,
 `bool`, and `Self` are ordinary identifiers resolved in type position, not keywords.
 
 ### Literals
 - **Integers** — `0`, `2026`. **[runs]**
 - **Floats** — `3.14`, `0.0` (a `.` is only a decimal point when followed by a digit, so
-  `obj.field` is never a float). **[parses]**
+  `obj.field` is never a float). **[runs]**
 - **Strings** — `"..."`, with escapes `\n \t \r \\ \"`. `+` concatenates and `==`/`!=` compare
   by content. **Interpolation** splices an expression into a literal with `{ … }` — the hole
   holds any expression — including one with its own string literals, written with plain quotes
@@ -560,6 +560,13 @@ in Ember over a minimal native base, in a file, and `import` it like any other m
   data (entity tables, retained UI nodes, object pools) that [the manifesto](../MANIFESTO.md)
   promises in place of escalating a borrow checker.
 
+**Also in `std/` (opt-in, application support).** Beyond the core collections above, the standard
+library ships modules a real 2026 program reaches for, each ordinary Ember pulled in with `import`:
+**`std/json`** (parse/emit), **`std/markdown`** and **`std/highlight`** (Markdown rendering and
+syntax highlighting), **`std/layout`** (a flexbox solver), and — built under `make net` —
+**`std/http`** and **`std/sse`** (an HTTP client and server-sent-event streaming). The graphics and
+UI stack (`std/draw`, `std/ui`, `std/flare`) has its own section, [Graphics & UI](#graphics--ui--flare).
+
 ```ember
 import "std/map" as mp
 
@@ -772,9 +779,10 @@ elements **inline** in the buffer too: a `[Pixel]` of N is N×3 bytes, with no p
 object (≈10× smaller than the boxed layout). Such elements are **value types** — `arr[i]` yields a
 **copy**, so it can be bound out (`let p = arr[i]`) and a mutation of the copy does not affect the
 array. (A boxed struct array would forbid binding the element out, since that would alias the
-array's unique owner.) A struct with a non-scalar field (a string, a nested array) still uses the
-boxed layout for now. This and packed scalars are the first steps of native layout; the value
-model is otherwise still width-erased.
+array's unique owner.) A struct with a **unique-owner** field (a nested struct or array) falls back
+to the boxed layout; a **refcounted** field (a string, enum, or closure) keeps the element inline —
+the index-copy shares it by `incref`. This and packed scalars are the first steps of native layout;
+the value model is otherwise still width-erased.
 
 **Storage — inline nested struct fields (value types).** A struct field whose type is another
 **all-scalar struct** is stored **inline**: its packed bytes embed directly in the parent's buffer,
@@ -955,9 +963,10 @@ fn id<T: Copy>(x: T) -> T {       // T: Copy ⇒ aliased and returned by copy, n
 `Copy` composes with an interface bound (`T: Ord + Copy`). It means *every type except a struct or
 array* — scalars copy bitwise; strings, enums, and closures are immutable + reference-counted, so
 copying one is a cheap `incref`. Binding a struct or array to a `Copy` parameter is a compile
-error (`type argument is not Copy`). *Current limits:* one **interface** bound per function (plus
-`Copy`); bounds on generic structs/enums and methods are not yet supported; inference is call-site
-only (no turbofish).
+error (`type argument is not Copy`). *Current limits:* one **interface** bound per generic
+**function** (plus `Copy`), and inference is call-site only (no turbofish). Bounds on generic
+**structs** do run — `struct Map<K: Hash + Eq, V>` carries its key witnesses per instance — but
+bounds on generic **enums** and on standalone **methods** are not yet supported.
 
 ## Types — [parses, except `int`/`bool` which run]
 
@@ -1017,7 +1026,7 @@ width and return that width, computing modulo 2^width (two's-complement for the 
 no overflow trap. There is no wrapping `/` or `%` (overflow there isn't a real use case).
 
 Ownership qualifiers (`mut`/`move`) are **not** part of a type — they are written before a
-parameter binding; see [Ownership](#ownership--designed).
+parameter binding; see [Ownership](#ownership--runs-mutation--moveborrow-safety-lifetime-inference-designed).
 
 ---
 
@@ -1025,8 +1034,9 @@ parameter binding; see [Ownership](#ownership--designed).
 
 A `struct` declares a named aggregate of typed fields, with optional **methods**. Construction,
 field reads, and methods all execute today; structs pass to and from functions like any value,
-and a field's type may be `int`, `bool`, or another struct. Structs are **immutable records**
-for now — field *mutation* is deferred (it belongs with the ownership/`var` story).
+and a field's type may be `int`, `bool`, or another struct. A field is **mutated** through a mutable
+place — a `var` binding or a `mut`/`move` parameter (`p.x = v`, including nested paths `p.a.b = v`);
+see [Ownership](#ownership--runs-mutation--moveborrow-safety-lifetime-inference-designed).
 
 ### Interfaces and `implements` conformance
 
@@ -1217,7 +1227,7 @@ wrap a genuine struct literal in parentheses there if ever needed.
 ## Errors & optionals — [runs]
 
 No exceptions and no `null`. Failure is a value, carried by two ordinary generic enums (see
-[Generics](#generics--runs-generic-structs-unbounded)) — they are library types, not built-ins:
+[Generics](#generics--runs-structs-enums-functions-methods-and-bounds)) — they are library types, not built-ins:
 
 - `Result<T, E>` — `Ok(v)` or `Err(e)`
 - `Option<T>` — `Some(v)` or `None`
@@ -1266,7 +1276,7 @@ which the parallel runtime makes atomic. A **channel** is the one intentional ex
 shared, mutable rendezvous point — so its buffer is lock-protected (parallel) and the handle
 itself is **refcounted** like a string: the creating scope and every task it is `spawn`ed into
 each hold a counted reference, and the channel (its buffer and OS primitives) is reclaimed when
-the last owner drops it, not deferred to program exit. Both runtimes also report a genuine
+the last owner drops it, not deferred to program exit. All runtimes also report a genuine
 **deadlock** (every task in a nursery blocked on a channel that can never progress) as the same
 runtime error rather than hanging. For allocation, each worker keeps a private, lock-free pool
 and object list, so tasks that allocate heavily scale instead of contending on one heap lock; a
@@ -1282,8 +1292,6 @@ scheduler runs the spawned tasks — so a poll loop that depends on concurrent s
 parallel-runtime idiom; blocking `send`/`recv` programs give the identical answer on both.)
 
 ```ember
-enum Option<T> { Some(value: T)  None }     // recv hands absence back as a value
-
 fn producer(ch: Channel<int>) {             // a unit function — runs for effect
     send(ch, 10)
     send(ch, 20)
@@ -1329,16 +1337,21 @@ fn main() -> int {
   channel is **closed and drained**. It blocks only on an *open* empty channel; if every task in a
   nursery is then blocked, that's a **deadlock** runtime error.
 - **`close(ch)`** marks a channel closed (idempotent, no value). Queued values still drain; after
-  that, `recv` returns `None` instead of blocking — this is how a consumer loop terminates. Because
-  Ember has **no prelude**, `recv` builds the program's *own* `Option<T>` (declared as
-  `enum Option<T> { Some(value: T)  None }`), resolved by name — a built-in `Option` would clash
-  with the one user code already defines. **`send` on a closed channel is a runtime error** ("send
+  that, `recv` returns `None` instead of blocking — this is how a consumer loop terminates. `recv`
+  returns the prelude's `Option<T>`, so a drained channel hands back `None` with no enum to declare.
+  **`send` on a closed channel is a runtime error** ("send
   on a closed channel") — a programming mistake, like an out-of-bounds index or an overflow (OFI-086),
   not a recoverable value; close a channel only once every `send` is done.
 
-**Deferred:** true M:N parallelism; cancellation-on-failure and `select`/timeouts; and main↔child
-channel communication *during* a nursery (main drives the join, so channels are for child↔child).
-The runtime was built in three steps (fiber/scheduler foundation → `nursery`/`spawn` → channels).
+**Runtimes & status.** Three schedulers run the *same* source: the default **cooperative N:1**
+scheduler (one OS thread); a **1:1 thread-per-spawn** runtime (`make parallel`, `-DEMBER_PARALLEL`),
+which is also what a native `emberc -o` binary uses; and an **M:N green-thread** scheduler (`make mn`,
+`-DEMBER_MN`) — a worker pool multiplexing many lightweight fibers that *park* on channels, with
+structured nursery join, cancellation-on-failure (a failing task tears its group down at yield
+seams), and global deadlock detection. The M:N scheduler is **built but VM-only and opt-in**, gated
+behind its flag pending a wider soak (and segmented fiber stacks for the 100k-fiber tier) before it
+becomes the default. **Still deferred:** `select`/timeouts, and main↔child channel communication
+*during* a nursery (main drives the join, so channels are for child↔child).
 
 ---
 
@@ -1376,8 +1389,8 @@ whose name starts with `_` (`fn _helper(self)`) is a *convention/hint* — "inte
 this" — but is **not** enforced, so `value._helper()` is callable from another module once you hold
 a value of that type. The reasoning: a free function is reached only by module-qualified name, which
 visibility can gate; a method belongs to its *type*, which travels wherever the value does, so there
-is no qualifier to gate. (Two standard-library modules rely on this — `std/flare` drives `std/ui`'s
-text editors through `_`-prefixed methods.) This asymmetry is deliberate but acknowledged as a
+is no qualifier to gate. (Two standard-library modules rely on this — `std/flare` builds on `std/ui`,
+reaching some of its `_`-prefixed methods across the module boundary.) This asymmetry is deliberate but acknowledged as a
 rough edge; a future module-system pass is expected to replace the `_` convention with explicit
 `pub`/visibility that is uniform for both. See [OFI.md](../OFI.md) OFI-081.
 
@@ -1576,10 +1589,12 @@ fn main() -> int {
 }
 ```
 
-**Still designed, not yet built (OFI-009 tail):** type parameters are conservatively treated as
-*non-move*, so a generic body isn't move-checked yet (a deliberate gap — full generic ownership
-needs care); and **inferred return lifetimes** (so a borrowed parameter can be returned without
-`move`, the §3.1 ergonomic goal). Deterministic **drop/free** is now landing — see below.
+**Ownership now holds inside generic bodies too** (MANIFESTO §5f): a type parameter is a **move type
+by default** and a generic body is move-checked exactly like concrete code, with the `Copy` bound as
+the opt-out (see [Generics](#generics--runs-structs-enums-functions-methods-and-bounds)). **Still
+designed, not yet built:** **inferred return lifetimes** — so a borrowed parameter can be returned
+without `move` (the §3.1 ergonomic goal). Deterministic **drop/free** is covered in the
+[Memory model](#memory-model--runs-structsarrays-freed-stringsenums-reference-counted) below.
 
 ---
 
@@ -1649,9 +1664,92 @@ a `move` struct parameter is freed when the call returns); and **discarded tempo
 shared values are immutable, **no reference cycles can form**, so counting is complete — there is
 nothing a tracing collector would reclaim that this misses.
 
-**Deferred (sound — leak-until-exit, never a use-after-free):** refcounted values flowing through
-a **generic** body (`T` is erased, so the callee can't release it — tied to the generic-ownership
-gap, [OFI.md](../OFI.md) OFI-009) and values left **unreceived in an abandoned channel**.
+**Deferred (sound — leak-until-exit, never a use-after-free):** values left **unreceived in an
+abandoned channel**. (A refcounted value flowing through a **generic** body is now released by the
+caller — the earlier erased-`T` over-retain was closed; see [OFI.md](../OFI.md) OFI-117.)
+
+---
+
+## Graphics & UI — Flare
+
+Ember has an **immediate-mode UI**, written in Ember over one blessed native dependency (MANIFESTO
+§5g). A UI is a *function of state that runs every frame* — no retained widget tree, no callbacks, no
+`Rc<RefCell>` graph — the shape that keeps the ownership model out of your way and reads cleanly for a
+model. You build with two imports: **`std/draw`** (primitives over the native backend) and
+**`std/flare`** (the widget and layout toolkit, layered on `std/ui` and `std/layout`).
+
+**The frame loop.** Ember drives the loop itself; the body *is* the frame.
+
+```ember
+import "std/draw"  as draw
+import "std/flare" as flare
+
+fn main() -> int {
+    draw.window(580, 400, "Hello Flare")
+    var f = flare.new()
+    loop {
+        if draw.closing() { break }     // window closed / Esc
+        draw.begin(f.bg())              // clear to the theme background
+        f.begin()                       // snapshot input, reset the layout tree
+        if f.primary("Click me") {      // a widget returns its event as a value
+            println("clicked")
+        }
+        f.finish()                      // solve layout, paint, record the frame tape
+        draw.finish()                   // present, pump OS events
+    }
+    draw.close()
+    return 0
+}
+```
+
+**The model in four ideas.**
+
+- **Events are return values** — `if f.button("Save") { save() }`. No handlers, no hidden control
+  flow: it is *errors-are-values* applied to input.
+- **Components are functions** — `fn Counter(mut f: flare.Flare, key: string) { … }`. No JSX, no
+  lifecycle; a component takes the `Flare` context and emits widgets.
+- **State is yours** — the loop owns plain `var`s; `f.state_int/str/bool/float(key, default)` (paired
+  with `f.set_*`) carries per-widget state across frames.
+- **Identity is explicit** — `f.key("row{i}") … f.key_clear()` scopes the widget and state ids so
+  duplicate-labelled widgets in a list stay distinct.
+
+**Layout is real flexbox**, re-solved every frame by `std/layout`: `f.row`/`f.column` (and the
+`_grow` variants), `f.spacer`, `f.strut`, `f.panel_begin`/`f.end`, `f.scroll_begin`/`f.scroll_end`,
+with `flare.START`/`CENTER`/`END`/`BETWEEN`/`STRETCH` for alignment.
+
+**Widgets (a sampler, not the whole set):** actions `button`/`primary`/`danger`/`ghost_button`;
+navigation `nav_item`/`avatar`; choice `segmented`; text `heading`/`label`/`text_muted`/`divider`;
+prose `paragraph`/`rich_text` (inline Markdown)/`markdown` (tables, code blocks, syntax
+highlighting); input `text_field`/`text_area`/`submit`; containers `bubble_begin`/`page_begin`/
+`splitter`; overlays `modal_begin`/`popover_begin`/`menu_item`; virtualised long lists
+`virtual_begin`/`virtual_item`; and a `DockTree` for draggable, tabbed, JSON-persistable docking.
+
+**Animation is deterministic** — a fixed per-frame timestep, so frames stay replayable and
+golden-testable: `f.spring(key, target)` eases a value, `f.at(dx, dy) { … } f.end_at()` offsets paint,
+and `f.animate_layout(key) { … }` FLIP-animates subtrees that moved. **Theming is data** —
+`f.use_dark()`/`f.use_light()` swap a `Style` struct; `f.set_zoom(pct)` (60–220) and `f.zoom_by(d)`
+scale the whole UI.
+
+**The backend.** The heavy work — paint, GPU, the OS event pump — is native C, so Ember only
+*describes* each frame and 60fps stays reachable on the bytecode VM. The screen is reached through
+**one** curated in-tree C library, **raylib**, with a real embedded TrueType font (Inter) baked in for
+crisp, zero-install text. The engine hides behind the Ember API, so it stays swappable. Every frame
+can also be recorded to a **UI tape** — input, draw commands, and high-level interactions as
+JSON-Lines, the same machine-readable shape as the execution tape.
+
+**Build & run.** Graphics is an **opt-in build**, so the default compiler stays dependency-free:
+
+```
+make graphics                                   # builds build/emberc-gfx (links raylib)
+EMBER_STD=./std build/emberc-gfx --emit=run examples/graphics/17_flare.em
+```
+
+**Status — [runs]:** layout, the widgets above, overlays, animation, theming/zoom, virtual lists,
+docking, and toasts; `std/ui` widgets even carry contracts. **Not yet:** `checkbox`/`slider` wrapped
+into Flare's flexbox layer (use `button`/`segmented` over a `var` meanwhile), real bold/italic faces
+(inline `**bold**`/`*italic*` are synthesised from one embedded weight — OFI-077), cross-block text
+selection in Markdown, and free-floating windows. The full tour is in
+[the book](THE_EMBER_BOOK.md) (ch. 25) and [docs/flare.md](flare.md).
 
 ---
 
@@ -1659,16 +1757,25 @@ gap, [OFI.md](../OFI.md) OFI-009) and values left **unreceived in an abandoned c
 
 ```
 emberc file.em                  # default: print the token stream
-emberc --emit=tokens file.em    # token stream
-emberc --emit=ast    file.em    # parsed AST
-emberc --emit=bytecode file.em  # compiled bytecode disassembly (with source lines)
-emberc --emit=run    file.em    # compile and execute; prints "=> <value>"
-emberc --emit=trace  file.em    # execute and emit the execution tape (JSON Lines)
-emberc --tape        file.em    # alias for --emit=trace
+emberc --emit=tokens   file.em  # token stream
+emberc --emit=ast      file.em  # parsed AST
+emberc --emit=bytecode file.em  # bytecode disassembly (with source lines)
+emberc --emit=run      file.em  # compile and execute; prints "=> <value>"
+emberc --emit=c        file.em  # emit the native C lowering to stdout
+emberc -o prog         file.em  # compile to a standalone native binary
+emberc --emit=trace    file.em  # execution tape, JSON Lines (alias: --tape)
+emberc --emit=check    file.em  # property-check contracts (see Contracts)
+emberc --emit=prove    file.em  # statically prove contracts where decidable
+emberc --emit=replay   file.em  # record/replay determinism check
+emberc --emit=docs     file.em  # render /// doc comments to a Markdown page
+emberc --lsp                    # run the language server
+emberc --doctor                 # environment / toolchain self-check
 ```
 
-Combinable flags: **`--release`** elides contract checks (see *Contracts*), and
-**`--diagnostics=json`** changes how compile errors are reported (see *Diagnostics* below).
+Combinable flags: **`--release`** elides contract checks (see *Contracts*),
+**`--diagnostics=json`** reports compile errors as JSON (see *Diagnostics* below), and
+**`--faults=human|agent`** selects the runtime-fault format; **`--version`** and **`--help`** do the
+obvious.
 
 Exit codes: `0` success, `64` usage error, `65` source error (lexical/syntax/type/runtime),
 `66` unreadable input file.

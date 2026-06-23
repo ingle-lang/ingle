@@ -1216,10 +1216,11 @@ ignored binding — "there's a value here but I don't care about it" — not the
 
 ### A couple of fine points
 
-Variant names are **globally unique** across your whole program — two enums can't both have a
-`Red`. In exchange, you can name a variant bare (`Origin`) or spelled out through its enum
-(`Shape.Origin`, `Circle` or `Shape.Circle`), whichever reads better; they mean the same
-thing.
+Within a module, variant names are **distinct** — two enums you can see at once can't both have a
+`Red`, and none may collide with the prelude's `Some`/`None`/`Ok`/`Err`. Across *different* modules
+they're free to repeat, since each module sees only its own. Either way, you can name a variant bare
+(`Origin`) or spelled out through its enum (`Shape.Origin`, `Circle` or `Shape.Circle`), whichever
+reads better; they mean the same thing.
 
 And one syntactic quirk you'll meet eventually: in the *header* of an `if`, `for`, or `match`,
 Ember switches off struct-literal syntax so that the `{` can unambiguously start the block. If
@@ -1879,26 +1880,32 @@ jobs channel, and the work fans out across whichever worker is free — a worker
 lines. (The shipped example `examples/05_concurrency.em` does exactly this: one dispatcher, four
 workers counting error lines, a results channel summed at the end. It runs today.)
 
-### One runtime, two speeds
+### One source, three speeds
 
-The default runtime runs your tasks as **green threads**
-cooperatively on a single OS thread — a `send` or `recv` that can't proceed yields, and the
-scheduler resumes it later. But the *same program*, with no source changes, can be compiled
-against a **parallel runtime** (the compiler built with `EMBER_PARALLEL=1`) where each task gets
-a real OS thread and runs on a separate core. Same `nursery`/`spawn`/`Channel<T>`, same answer —
-only the wall-clock time changes.
+The same program, with no source changes, runs on any of three schedulers — only the wall-clock time
+changes. The **default** runs your tasks as **green threads** cooperatively on a single OS thread: a
+`send` or `recv` that can't proceed yields, and the scheduler resumes it later. Built with
+`EMBER_PARALLEL=1` (and what a native binary uses), a **thread-per-task** runtime gives each task a
+real OS thread on its own core. And `make mn` selects an **M:N green-thread scheduler** — a small
+pool of OS threads multiplexing many lightweight fibers that *park* on a channel rather than block a
+thread, so thousands of tasks cost a handful of threads. One set of words,
+`nursery`/`spawn`/`Channel<T>`; one answer; three ways to spend your cores.
 
 This works *because* of ownership. Recall: structs and arrays are uniquely owned (never aliased
-across tasks), and strings and enums are immutable. So there's essentially no shared mutable
-state for threads to race over — the data-race class of bug is gone by construction, the same way
-use-after-free was. Both runtimes also detect a genuine **deadlock** (every task blocked on a
+across tasks), and strings and enums are immutable. So there's essentially no shared mutable state
+for threads to race over — the data-race class of bug is gone by construction, the same way
+use-after-free was. All three runtimes also detect a genuine **deadlock** (every task blocked on a
 channel that can never deliver) and report it as a clean runtime error instead of hanging.
 
-> **One honest limit.** Today, channel communication is **child-to-child**: `main` drives the
-> nursery's join, so it doesn't itself sit in a `recv` loop *during* the nursery. The pattern
-> above — workers talk over channels inside the nursery, `main` reads the results *after* it —
-> is the idiom. True many-core M:N scheduling, cancellation-on-failure, and `select`/timeouts
-> are designed and on the list ([Chapter 23](#chapter-23--the-not-yet-list)), not yet built.
+> **Where it stands, honestly.** The M:N scheduler is **built but gated** behind `make mn` while it
+> clears a wider soak (and grows right-sized fiber stacks for the hundred-thousand-fiber tier), so
+> the cooperative single-thread runtime is the default for now. Structured
+> **cancellation-on-failure** already rides with it — a failing task tears its group down at the next
+> yield seam. One limit remains across all three runtimes: channel communication is
+> **child-to-child**, because `main` drives the nursery's join rather than sitting in a `recv` loop
+> *during* it (the pattern above — workers talk inside the nursery, `main` reads results *after* — is
+> the idiom). Still on the list ([Chapter 23](#chapter-23--the-not-yet-list)): `select`/timeouts, and
+> flipping the default to M:N.
 
 > **Fireside trivia.** The word "nursery" for a scoped task group comes from the "structured
 > concurrency" movement of the late 2010s — the argument that concurrency should nest like
@@ -2075,10 +2082,10 @@ You feed it the raw response-body chunks `http.next` hands you; it returns the *
 framed so far and buffers the trailing partial across feeds. That's what turns a token-by-token API
 stream into a clean sequence of events your loop can act on.
 
-Then the graphics and UI stack, all resting on the immediate-mode idea from
-[Chapter 13](#chapter-13--memory-the-quiet-way) — *the UI is a pure function of state, redrawn
-fresh every frame, with no retained widget tree to keep in sync* — which is precisely why it stays
-clean under Ember's ownership model:
+Then the graphics and UI stack, all resting on one immediate-mode idea — *the UI is a pure function
+of state, redrawn fresh every frame, with no retained widget tree to keep in sync* — which is
+precisely why it stays clean under the ownership model of
+[Chapter 12](#chapter-12--ownership-without-tears):
 
 **`std/draw`** — immediate-mode drawing over the native graphics backend: open a window, then each
 frame clear it and issue primitives (rectangles, text, lines). Colours are packed `0xRRGGBB` ints;
@@ -2992,16 +2999,19 @@ not so you'll use them.
 
 - **Inferred return lifetimes** — so a borrowed parameter could be returned without `move`.
   Today, returning an owned value needs `move`.
-- **Full generic-body ownership and reclamation** — values flowing through a *generic* body are
-  reclaimed conservatively (sound, but they leak until program exit rather than freeing eagerly).
+- ~~**Full generic-body ownership and reclamation**~~ — **shipped** (June 2026). A generic body is
+  ownership-checked like concrete code — a type parameter is a move type by default, `Copy` opts out —
+  and refcounted values passing through it are reclaimed by the caller (OFI-009, and the OFI-117
+  tail). Earlier drafts listed this as a conservative leak-until-exit; that gap is closed.
 
 **Concurrency**
 
-- **True many-core M:N scheduling** as the default, **cancellation-on-failure**, and
-  **`select`/timeouts** (the non-blocking `try_recv` poll *is* here — it's `select`-with-a-default;
-  it's waiting on *several* channels at once, and timeouts, that aren't), plus **main↔child channel
-  communication during a nursery** (today it's child-to-child; `main` reads results after the
-  nursery).
+- **M:N scheduling as the *default*** — the M:N green-thread scheduler is **built but gated** behind
+  `make mn` (structured **cancellation-on-failure** rides with it) while it clears a wider soak; the
+  cooperative single-thread runtime stays the default until then. Also not yet: **`select`/timeouts**
+  (the non-blocking `try_recv` poll *is* here — it's `select`-with-a-default; waiting on *several*
+  channels at once, and timeouts, aren't), and **main↔child channel communication during a nursery**
+  (today it's child-to-child; `main` reads results after the nursery).
 
 **Values and text**
 
@@ -3189,8 +3199,8 @@ and interactive.
 
 ### The shape of a Flare program
 
-Here's a whole one — a window with a toolbar and a counter. It's `examples/17_flare.em`, shipped with
-the compiler:
+Here's a whole one — a window with a toolbar and a counter. It's `examples/graphics/17_flare.em`,
+shipped with the compiler:
 
 ```ember
 import "std/draw" as draw
@@ -3232,7 +3242,7 @@ fn main() -> int {
 Build the graphics compiler and run it:
 
 ```
-make graphics && EMBER_STD=./std build/emberc-gfx --emit=run examples/17_flare.em
+make graphics && EMBER_STD=./std build/emberc-gfx --emit=run examples/graphics/17_flare.em
 ```
 
 Four things in that loop are the entire model. The next four sections take them one at a time.

@@ -2683,9 +2683,20 @@ static void emit_stmt(CgcGen *g, const Stmt *s) {
             break;
         case STMT_EXPR:
             cgc_indent(g);
-            fputs("(void)(", g->out);
-            emit_expr(g, s->as.expr.expr);
-            fputs(");\n", g->out);
+            if (s->as.expr.release_temp) {
+                // OFI-096: the discarded result is a fresh OWNING temp (a string/array/struct/enum the
+                // checker flagged via release_temp) — drop it, mirroring the VM's `OP_RELEASE` (codegen.c).
+                // Without this the native backend leaked it (`(void)(E)` only) — a VM≠native divergence the
+                // differential test couldn't see (it compares stdout). `drop_value` is the same call
+                // emit_drops uses for every owned binding, so it releases a value-struct's heap fields too.
+                fputs("{ Value _dis = (", g->out);
+                emit_expr(g, s->as.expr.expr);
+                fputs("); drop_value(&g_em, _dis); }\n", g->out);
+            } else {
+                fputs("(void)(", g->out);
+                emit_expr(g, s->as.expr.expr);
+                fputs(");\n", g->out);
+            }
             break;
         case STMT_IF:
             cgc_indent(g);
@@ -3176,14 +3187,19 @@ int cgen_c_program(const Program *ast, const ModuleSet *modules,
                 fputs("};\n", out);
             }
         }
+        // DESIGNATED initializers (OFI-106): naming each field means a new StructType field (in
+        // include/program.h) can never silently MISALIGN the emitted table — an omitted field just
+        // zero-inits. Do NOT collapse this back to a positional `{ 0, fc, ... }`. `.name` is unused at
+        // runtime (omitted → NULL); a field_count==0 struct omits the per-field pointers (→ NULL).
         fprintf(out, "static const StructType em_structs[%d] = {\n", layout_count);
         for (int s = 0; s < layout_count; s++) {
             const StructLayout *L = &layouts[s];
             if (L->field_count > 0) {
-                fprintf(out, "    { 0, %d, %d, %d, em_s%d_off, em_s%d_knd, em_s%d_fst },\n",
+                fprintf(out, "    { .field_count = %d, .total_size = %d, .is_rc = %d,"
+                             " .offset = em_s%d_off, .kind = em_s%d_knd, .field_struct = em_s%d_fst },\n",
                         L->field_count, L->total_size, L->is_rc, s, s, s);
             } else {
-                fprintf(out, "    { 0, %d, %d, %d, 0, 0, 0 },\n",
+                fprintf(out, "    { .field_count = %d, .total_size = %d, .is_rc = %d },\n",
                         L->field_count, L->total_size, L->is_rc);
             }
         }

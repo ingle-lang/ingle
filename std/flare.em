@@ -119,12 +119,15 @@ struct VClip {
 }
 
 
-// ToastItem is one queued toast notification: a stable id (the presence key), its text, and the frame it was
-// raised (its age drives the auto-dismiss). See f.toast() / f.toast_layer().
+// ToastItem is one queued toast notification: a stable id (the presence key), its text, the frame it was
+// raised (its age drives the auto-dismiss), and an optional action button (label + a token returned when the
+// button is clicked, e.g. an "Undo"). See f.toast() / f.toast_action() / f.toast_layer().
 struct ToastItem {
     id: int
     text: string
     born: int
+    action: string
+    token: string
 }
 
 
@@ -341,6 +344,7 @@ struct Flare {
     _frame: int
     _toasts: [ToastItem]
     _tnext: int
+    _action: string         // token of a toast action clicked THIS frame ("" = none); read via take_action()
 
 
     // begin starts a frame: snapshot input, reset the layout tree, open the root column (it fills
@@ -355,6 +359,7 @@ struct Flare {
         self._modal_was = false
         self._in_modal = false
         self._anim = false              // springs/FLIP raise this again if anything moves this frame
+        self._action = ""               // a toast action fires for exactly one frame
         self._frame = self._frame + 1   // monotonic frame count (drives toast ages)
         self._steps = 1                 // deterministic fixed timestep by default (golden-stable); set_realtime
         if self._realtime {             // opts into wall-clock catch-up so heavy frames don't slow animations
@@ -1721,8 +1726,26 @@ struct Flare {
     // drawn once per frame by toast_layer(). Built on presence(), so a toast enters and leaves with the house
     // spring, and the dismiss is a deterministic frame count.
     fn toast(mut self, text: string) {
-        self._toasts.append(ToastItem { id: self._tnext, text: text, born: self._frame })
+        self._toasts.append(ToastItem { id: self._tnext, text: text, born: self._frame, action: "", token: "" })
         self._tnext = self._tnext + 1
+    }
+
+
+    // toast_action raises a toast with a clickable action button (e.g. "Undo"). When the button is pressed,
+    // take_action() returns `token` for one frame (and the toast dismisses). The canonical reversible-action
+    // pattern: do the action immediately, show "Done · Undo", and roll it back if the token comes back.
+    fn toast_action(mut self, text: string, action: string, token: string) {
+        self._toasts.append(ToastItem { id: self._tnext, text: text, born: self._frame, action: action, token: token })
+        self._tnext = self._tnext + 1
+    }
+
+
+    // take_action returns (and clears) the token of a toast action clicked this frame, or "" if none. Poll it
+    // once per frame: `if f.take_action() == "undo_delete" { ... }`.
+    fn take_action(mut self) -> string {
+        let t = self._action
+        self._action = ""
+        return t
     }
 
 
@@ -1749,18 +1772,38 @@ struct Flare {
             if present || p > 0.02 {
                 self._anim = true                             // keep the loop awake so age + exit keep ticking
                 let tw = measure_text(t.text, st.text_size)
-                let pw = tw + st.pad * 3
+                var aw = 0                                    // action button width (0 = a plain toast)
+                if t.action.len() > 0 {
+                    aw = measure_text(t.action, st.text_size) + st.pad * 2
+                }
+                let pw = tw + st.pad * 3 + aw
                 let ph = st.text_size + st.pad * 2 + 4
                 let px = (screen_width() - pw) / 2
                 let py = screen_height() - 60 - slot * (ph + 10)
-                let slide = to_int((1.0 - p) * 18.0)
+                let ty = py + to_int((1.0 - p) * 18.0)
+                let ax = px + pw - aw - st.pad                // action button's left edge (right-aligned in the pill)
+
+                var dismissed = false                         // a release over the action button fires its token + closes it
+                if aw > 0 && self.ui.was && !self.ui.down && self.ui.mx >= ax && self.ui.mx < px + pw && self.ui.my >= ty && self.ui.my < ty + ph {
+                    self._action = t.token
+                    dismissed = true
+                }
+
                 set_alpha(to_int(p * 255.0))                  // the whole pill fades with the presence value
-                fill_round(px, py + slide, pw, ph, st.radius, st.ink, 255)
-                stroke_round(px, py + slide, pw, ph, st.radius, 1, st.border, 90)
-                draw_text(t.text, px + (pw - tw) / 2, self._ty(py + slide, ph, st.text_size), st.text_size, st.panel)
+                fill_round(px, ty, pw, ph, st.radius, st.ink, 255)
+                stroke_round(px, ty, pw, ph, st.radius, 1, st.border, 90)
+                draw_text(t.text, px + (pw - aw - tw) / 2, self._ty(ty, ph, st.text_size), st.text_size, st.panel)
+                if aw > 0 {
+                    fill_round(ax, ty + 4, aw, ph - 8, st.radius - 2, st.accent, 255)
+                    let alw = measure_text(t.action, st.text_size)
+                    draw_text(t.action, ax + (aw - alw) / 2, self._ty(ty + 4, ph - 8, st.text_size), st.text_size, st.accent_ink)
+                }
                 set_alpha(255)
-                keep.append(t)
-                slot = slot + 1
+
+                if !dismissed {
+                    keep.append(t)
+                    slot = slot + 1
+                }
             }
             i = i + 1
         }
@@ -2954,7 +2997,8 @@ fn new() -> Flare {
         _vk: 0,
         _frame: 0,
         _toasts: [],
-        _tnext: 0
+        _tnext: 0,
+        _action: ""
     }
 }
 
