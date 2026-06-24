@@ -11,7 +11,7 @@ description: Install the emberc compiler and run your first Ember program. Ember
 Ember is in the lineage of C, C#, and Rust: ownership with move/borrow checking and deterministic
 reference counting (no GC, no pauses, no reference cycles), a real type system with generics and
 exhaustive pattern matching, structured concurrency, and verification built into the language. The
-reference compiler is written in C with no third-party dependencies.
+reference compiler is written in C with no third-party dependencies, and builds and runs on macOS and Linux.
 
 > Status: **active development** (pre-1.0). The language and compiler evolve together.
 

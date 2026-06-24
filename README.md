@@ -39,7 +39,7 @@ Website: **[ember-lang.org](https://ember-lang.org)**
 
 ## Build
 
-Requires a C17 compiler (Apple clang / gcc) and GNU Make. No other dependencies.
+Ember runs on **macOS and Linux** (x86_64 and arm64). The core build needs only a C17 compiler (Apple clang or gcc) and GNU Make — no other dependencies. On Linux the installer provisions the optional graphics/networking dependencies via your system package manager (apt/dnf/pacman/zypper/apk), building raylib from source where it isn't packaged.
 
 ```sh
 make            # builds build/emberc
