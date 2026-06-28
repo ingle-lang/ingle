@@ -468,6 +468,26 @@ static int struct_sid_of(CgcGen *g, const Expr *e) {
 }
 
 
+// is_addressable_vstruct reports whether `e` (already known to be a value struct) is a C LVALUE — a
+// value-struct local reached only through inline value-struct fields, so `<e>.fN = v` is a valid C
+// assignment that mutates in place. It is NOT addressable when reaching `e` requires unboxing a
+// value-struct field out of a boxed parent (a non-flat struct stores its value-struct fields boxed):
+// `em_struct_field_inline` then materialises a COPY, so a direct member-assign would mutate a
+// throwaway and isn't even an lvalue. Those need the read-modify-writeback path (OFI-155).
+static int is_addressable_vstruct(CgcGen *g, const Expr *e) {
+    if (struct_sid_of(g, e) < 0) {
+        return 0;                                  // not a value struct at all
+    }
+    if (e->kind == EXPR_IDENT) {
+        return 1;                                  // a value-struct local: a real C lvalue
+    }
+    if (e->kind == EXPR_GET) {
+        return is_addressable_vstruct(g, e->as.get.object);
+    }
+    return 0;                                       // a call/index/temp result is an rvalue
+}
+
+
 
 
 
@@ -1359,7 +1379,10 @@ static void emit_call(CgcGen *g, const Expr *e) {
         // concat, args/env/exit) → the em_native dispatcher. print/println keep their own path
         // above; the verification-only and graphics ids are not part of the native runtime.
         int nid = native_id_for_name(nm);
-        if (nid >= NATIVE_READ_LINE && nid <= NATIVE_EXIT) {
+        // The real native-runtime builtins go through em_native. That's the contiguous READ_LINE..EXIT
+        // band plus byte_slice (id 22, past the witness-only HASH_ANY/VALUE_EQ which are NOT runtime
+        // calls), so it's named explicitly rather than by widening the range over those two.
+        if ((nid >= NATIVE_READ_LINE && nid <= NATIVE_EXIT) || nid == NATIVE_BYTE_SLICE) {
             fprintf(g->out, "em_native(&g_em, %d, %zu, ", nid, e->as.call.arg_count);
             if (e->as.call.arg_count == 0) {
                 fputs("0)", g->out);
@@ -2667,10 +2690,75 @@ static void emit_stmt(CgcGen *g, const Stmt *s) {
                     fputs(");\n", g->out);
                     break;
                 }
+                if (!is_addressable_vstruct(g, target->as.get.object)) {
+                    // `boxedParent.inlineField.leaf = v` — the receiver value struct lives BOXED inside
+                    // a non-flat parent, so reading it materialises a copy (em_struct_field_inline);
+                    // a direct member-assign would mutate that throwaway and isn't a C lvalue (OFI-155).
+                    // Mirror the VM / the arr[i].leaf writeback: find the box boundary, unbox its inline
+                    // field into an addressable temp, set the leaf via the C lvalue chain on the temp,
+                    // then re-box and write it back with em_set_field (which now overwrites an inline
+                    // field correctly). An inline value-struct field is all-scalar, so there is exactly
+                    // one box boundary in the chain and the leaf is a scalar Value.
+                    const Expr *boundary = target->as.get.object;
+                    while (boundary->kind == EXPR_GET &&
+                           struct_sid_of(g, boundary->as.get.object) >= 0) {
+                        boundary = boundary->as.get.object;
+                    }
+                    const Expr *parent = boundary->as.get.object;
+                    if (parent->kind != EXPR_IDENT) {
+                        // The boxed parent is itself a field/index read (a fresh copy or a separate
+                        // writeback level) — emitting it twice would touch different objects. Fail
+                        // cleanly rather than silently mutate a copy; rebuild the struct immutably.
+                        cgc_error(g, s->line,
+                                  "native backend (OFI-155): nested value-struct field assignment "
+                                  "through a non-local boxed parent is not supported — rebuild the "
+                                  "struct immutably (Node{ …, field: Inner{ … } })");
+                        break;
+                    }
+                    int bsid   = struct_sid_of(g, boundary);
+                    int bn     = g->layouts[bsid].field_count;
+                    int bfield = boundary->as.get.field_index;
+                    // Field-index path from the leaf down to the boundary (leaf first).
+                    int path[32];
+                    int np = 0;
+                    for (const Expr *cur = target; cur != boundary; cur = cur->as.get.object) {
+                        if (np < 32) {
+                            path[np++] = cur->as.get.field_index;
+                        }
+                    }
+                    int tv = g->next_var++;
+                    int fv = g->next_var++;
+                    cgc_indent(g);
+                    fprintf(g->out, "{ Value v%d = em_struct_field_inline(&g_em, ", fv);
+                    emit_expr(g, parent);
+                    fprintf(g->out, ", %d); em_s%d v%d; em_unbox_struct(&g_em, %d, v%d, (Value*)&v%d, %d);"
+                                    " drop_value(&g_em, v%d); v%d",
+                            bfield, bsid, tv, bsid, fv, tv, bn, fv, tv);
+                    for (int i = np - 1; i >= 0; i--) {
+                        fprintf(g->out, ".f%d", path[i]);
+                    }
+                    fputs(" = ", g->out);
+                    emit_expr(g, s->as.assign.value);   // an all-scalar leaf is a Value
+                    fputs("; em_set_field(&g_em, ", g->out);
+                    emit_expr(g, parent);
+                    fprintf(g->out, ", %d, em_box_struct(&g_em, %d, (Value*)&v%d, %d)); }\n",
+                            bfield, bsid, tv, bn);
+                    break;
+                }
                 cgc_indent(g);
                 emit_expr(g, target->as.get.object);   // the receiver lvalue chain
                 fprintf(g->out, ".f%d = ", target->as.get.field_index);
-                emit_value_arg(g, s->as.assign.value);   // box a value-struct field value
+                int dsid = struct_sid_of(g, target->as.get.object);
+                if (dsid >= 0 && g->layouts[dsid].field_struct[target->as.get.field_index] >= 0) {
+                    // The target field is itself an inline value struct, so its C slot is an `em_s`,
+                    // not a `Value`: assign the RAW struct value (`o.b = In{…}`, `o.b = o.c`). Using
+                    // emit_value_arg here would box the struct into a Value and clang rejects
+                    // `em_s = Value` (a whole value-struct field assign on an addressable local; a
+                    // sibling of the OFI-155 boxed-parent case, pre-existing).
+                    emit_expr_raw(g, s->as.assign.value);
+                } else {
+                    emit_value_arg(g, s->as.assign.value);   // a scalar/boxed field is a Value slot
+                }
                 fputs(";\n", g->out);
                 break;
             }

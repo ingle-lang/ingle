@@ -101,6 +101,10 @@ for dir in "$ROOT"/tests/*/; do
     # The native stage is a DIFFERENTIAL suite (VM vs compiled binary), not a golden
     # comparison — handled in its own block below.
     [ "$stage" = "native" ] && continue
+    # The selfhost stage is the self-hosting bootstrap's DIFFERENTIAL suite (VM vs compiled binary over
+    # compiler-shaped programs), not a golden comparison. Driven separately by tests/run-selfhost.sh
+    # (`make selfhost`); see docs/design/self-hosting.md.
+    [ "$stage" = "selfhost" ] && continue
     ext=$(golden_ext "$stage")
     emit=$(emit_flag "$stage")
     extra=$(extra_flags "$stage")

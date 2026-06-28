@@ -35,6 +35,12 @@ jobs:
       - name: Regression suite
         run: make test
 
+      # --- Self-hosting bootstrap differential: compiler-shaped programs (recursive ASTs, symbol
+      #     tables) run on both backends with byte-identical stdout. The drift guard for the staged
+      #     port of the compiler into Ember (docs/design/self-hosting.md). ---
+      - name: Self-hosting differential
+        run: make selfhost
+
       # --- Concurrency: the multicore runtime (-pthread on Linux) + its correctness suite ---
       - name: Parallel build
         run: make parallel

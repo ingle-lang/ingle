@@ -4513,6 +4513,26 @@ static SemType check_expr_inner(Checker *c, Expr *e) {
                     }
                     return TY_STRING;
                 }
+                if (nid == NATIVE_BYTE_SLICE) {
+                    if (argc != 3) {
+                        type_error(c, e->line, e->col,
+                                   "byte_slice takes three arguments (string, start, end)");
+                    }
+                    SemType s0 = argc >= 1 ? check_expr(c, e->as.call.args[0]) : TY_ERROR;
+                    if (s0 != TY_ERROR && s0 != TY_STRING) {
+                        type_error(c, e->line, e->col,
+                                   "byte_slice's first argument must be a string");
+                    }
+                    SemType s1 = argc >= 2 ? check_expr(c, e->as.call.args[1]) : TY_ERROR;
+                    if (s1 != TY_ERROR && s1 != TY_INT) {
+                        type_error(c, e->line, e->col, "byte_slice's start must be an int");
+                    }
+                    SemType s2 = argc >= 3 ? check_expr(c, e->as.call.args[2]) : TY_ERROR;
+                    if (s2 != TY_ERROR && s2 != TY_INT) {
+                        type_error(c, e->line, e->col, "byte_slice's end must be an int");
+                    }
+                    return TY_STRING;
+                }
                 if (nid == NATIVE_ARGS) {
                     if (argc != 0) {
                         type_error(c, e->line, e->col, "args takes no arguments");

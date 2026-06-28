@@ -1,8 +1,39 @@
 # Self-hosting Ember — a staged bootstrap plan
 
-> Status: **plan only.** Nothing here is built yet. This document is the agreed route, not a
-> claim about today's compiler. Self-hosting is earned one differential-green stage at a time,
-> never by a big-bang rewrite, and only as far as it actually improves the language and toolchain.
+> Status: **M0–M2 landed; M3 (checker) and M4 (bytecode backend) both in progress (2026-06-27).**
+> Stage 0 is frozen (`stage0-v0.3.42`), the Stage A spikes are green, the **lexer** and **parser** are
+> byte-identical to stage-0 over the whole corpus on both backends, the **checker** reaches stage-0's
+> accept/reject verdict on 461/522 files with **zero false-rejects**, and the **bytecode backend** emits
+> disassembly byte-identical to `--emit=bytecode` across 14 gated fixtures (scalars, control flow,
+> strings, every struct representation, methods, arrays, moves, call-returns, non-identifier method
+> receivers, empty arrays, interpolation lines) on both backends. The whole pipeline is gated by
+> `make selfhost` (**1079 checks, 0 failures**) and folded into `make verify`. Self-hosting is earned
+> one differential-green stage at a time, never by a big-bang rewrite, and only as far as it actually
+> improves the language and toolchain.
+>
+> **Findings so far** (the dogfood paying off — every one filed as an OFI and most fixed):
+> - The central "can the language hold a compiler?" risk is **retired** — recursive ASTs (`Box`+`[]`),
+>   exhaustive `match`, `Map`/`Set` symbol tables, `Result`+`?` all run byte-identically VM==native; the
+>   lexer, parser, and a growing checker/backend now hold up over the full corpus.
+> - **OFI-157** — a VM-hosted recursive-descent parser must depth-guard well under `FRAMES_MAX = 256`
+>   (the native backend has no such cap, so an unguarded deep recurse is a silent VM/native divergence).
+>   `calc.em` guards at 100, ~2 VM frames per grammar level. **OPEN, documented constraint.**
+> - **OFI-155 (HIGH) — CLOSED 2026-06-27.** Native miscompiled in-place mutation of a value-struct
+>   *field* of a non-flat struct (`node.span.col = …`); fixed (runtime `em_set_field` inline branch +
+>   cgen read-modify-writeback). Residual **OFI-158** (low, OPEN): a non-local boxed parent
+>   (`o.mid.span.col`, `ns[i].span.col`) is a clean native error — rebuild immutably or use a local.
+> - **OFI-156 (OPEN)** — an imported enum's **bare** variant can't be constructed cross-module
+>   (`lx.TEof` → `undefined variable`); the multi-module front end routes bare tokens through a
+>   constructor fn (`lx.eof()`).
+> - **OFI-159 — CLOSED 2026-06-27.** `--emit=tokens` printed `INVALID` for 5 valid keywords
+>   (`extern`/`type`/`where`/`requires`/`ensures`) — a missing `TOKEN_NAMES[]` entry; fixed so the
+>   lexer differential measures against a correct oracle.
+> - **OFI-161 (OPEN)** — native: a free function with a `mut` STRUCT parameter doesn't persist the
+>   mutation (passes by value); `mut self` methods are unaffected, so the front end threads state through
+>   methods-in-struct rather than free `mut Parser` functions.
+> - **OFI-162 (OPEN)** — native: a *method* (`fn(self,…)`) that RETURNS a value-struct mis-compiles
+>   (zeroed fields; a hard `em_s13` C error in some uses); a free function returning the same struct is
+>   fine. Worked around in `selfhost/codegen.em` by returning an int classification code from the method.
 
 Two things, kept separate throughout (per [CLAUDE.md](../../CLAUDE.md)):
 
@@ -237,6 +268,11 @@ rebuilt without itself is a trap; keeping stage 0 is what avoids it.
 ## 6. Testing and gates
 
 - New `tests/selfhost/` tier plus a `make selfhost` target running the per-stage differentials.
+- **`tools/cgdiff.sh`** — the codegen DEV-LOOP harness (the dev counterpart to the `make selfhost` Stage-4
+  gate): point it at a probe (or `-d <dir>`, `-c` for a corpus sweep + first-divergence cause histogram) and
+  it runs the file through the stage-0 oracle, the VM, and the native self-hosted codegen, printing the
+  divergent *function* and first differing instructions — so an unbuilt or miscompiled construct is located
+  in one shot. It drove the enum/`match` build and is the instrument for the rest of M4.
 - As each stage goes green, fold its differential into `make verify` so it cannot silently regress.
 - Keep Crucible (memory ownership), Ledger (move-check), Ceilings, and opcheck pointed at both
   compilers as they diverge — the divergences are where the interesting bugs live, and the
@@ -248,12 +284,132 @@ rebuilt without itself is a trap; keeping stage 0 is what avoids it.
 
 ## 7. Milestones (sequence, not dates)
 
-- **M0** — freeze stage 0; Stage A spikes green on both backends.
-- **M1** — self-hosted lexer; token diff empty over the full corpus; in `make verify`.
-- **M2** — self-hosted parser; AST diff empty over the corpus.
-- **M3** — self-hosted checker; diagnostic parity over the check/fault corpora. *(The long pole —
-  budget the most here.)*
-- **M4** — self-hosted bytecode backend; first bootstrap; **VM fixed point byte-identical.**
+- **M0 ✅ DONE** — stage 0 frozen (`stage0-v0.3.42`); Stage A spikes green on both backends.
+- **M1 ✅ DONE 2026-06-27** — self-hosted lexer (`selfhost/lexer.em`); token diff **empty over the whole
+  corpus** (531/531 at last count, growing with the test suite), on both backends; folded into
+  `make verify` (the `selfhost` gate). Enablers landed: OFI-159 (corrected the `--emit=tokens` oracle),
+  the `byte_slice` builtin (byte-faithful lexemes), and a 3-agent adversarial pass (native parity, scales
+  to 1.15 M tokens, two malformed-input error positions fixed). OFI-153 (generate the keyword table from
+  `vocab.def`) is the remaining refinement.
+- **M2 ✅ DONE 2026-06-27** — self-hosted parser (`selfhost/parser.em`, imports the lexer); AST diff
+  **empty over all valid corpus files** (530/530 at last count) (`emberc --emit=ast`), VM and native;
+  gated in `make verify`. It parses itself identically. **Adversarially verified** (3-agent pass): spec
+  MATCHES on everything (precedence, lossy-but-parsed contracts/lambdas/named-args, desugaring, `>>`
+  split, interpolation, all productions); found + fixed two corpus-untriggered bugs — a float `1.5e3`
+  over-read (stage-0 `strtod`s past the lexeme; fixed via a token byte-offset + source over-read) and
+  import/extern paths stored raw not escape-decoded. The AST also gained a per-`Box` `line` field (the
+  prerequisite for M4's source-line column; adding it didn't change `ast_print`, so M2 stayed green).
+  Known **OFI-157 constraint**: the parser is recursive, so the *VM-run* parser hits the 256-frame cap at
+  ~48 levels of nesting (the native-compiled parser — what the gate uses — and the oracle both handle it);
+  real source nests shallowly, so the corpus and bootstrap are unaffected. Surfaced **OFI-161** (native
+  free-function `mut` struct param doesn't persist mutation — used methods-in-struct instead).
+- **M3 🔨 IN PROGRESS (building 2026-06-27)** — self-hosted checker (`selfhost/checker.em`,
+  methods-in-struct, int `SemType`); **full exact-diagnostic parity** the goal (Karl's call). The long
+  pole. **Now gated as Stage 3 of `make selfhost`** (`check_dump.em` driver): the verdict (ACCEPT/REJECT)
+  is diffed against the `emberc --emit=bytecode` oracle over the corpus. The gate **reports** the
+  verdict-match rate but **hard-fails on any false-reject** — the safety invariant (a false rejection is
+  a real bug; a missed rejection is just unfinished work). **Status: 461/522 verdict-match, 0
+  false-rejects** (VM == native; the semantics of each check were mapped from `src/check.c` by recon
+  workflows, implemented correct-by-construction, then adversarial workflows generated valid programs to
+  hunt false-rejects — they found and fixed 7 the corpus didn't exercise, e.g. a bare `Option`/`Result`
+  match and sized-field arithmetic). The **M3b ownership** work shipped only its SAFE CORE — the
+  structural *mutability* checks (assign-to-`let`, mutate-field/element-through-an-immutable-binding,
+  pass-immutable-to-`mut`-param, `Ptr`-as-struct-field) gated purely on the syntactic `is_var`/`qual`/
+  `TY_PTR` facts, plus break/continue-outside-loop and bool-condition checks. The move/leak/escape
+  *dataflow* (use-after-move, handle leaks, borrow-escape) is deliberately DEFERRED: a recon with
+  per-check false-reject risk ratings found it unsound to replicate in a checker that keeps fields/calls/
+  generics at `TY_INFER` — a naive version false-rejects pervasive valid code, so those stay accepted
+  missed-rejections. Built: name resolution (complete) + a growing type-inference layer.
+  `check_expr` returns a `SemType` (kept POSITIVE: top-level constants must be literals; `TY_INFER` is the
+  lenient unknown, and every check is gated on concretely-known operands so an unmodelled corner emits
+  nothing rather than a wrong diagnostic). Flat parallel-array TYPE TABLES (struct fields, struct methods,
+  enum variants, fn param types) are built in a `register_types` pass; `annotation_type` resolves user
+  structs/enums precisely while type-params, interfaces, newtypes, Self, generics and imports stay
+  `TY_INFER`. Checks implemented: arithmetic same-numeric-type (int-literal / f32 width adaptation),
+  redeclaration-in-scope, free-function + method arity, argument / field / let / return type mismatch,
+  struct-literal construction (no-such-field / field-type / every-field-set-once), match (duplicate-case /
+  non-exhaustive / wrong-variant / binding-arity, for plain user enums), and definite-return (an exact
+  replica of stage-0's terminator analysis). The semantics for each were mapped from `src/check.c` by a
+  recon workflow and adversarially verified. **Remaining**: the ~61 not-yet-rejected files are mostly
+  ownership/move (the hard dataflow, M3b) plus a few deferred checks that would risk false-rejects without
+  more modelling (newtype distinctness, no-such-method, named-field construction). **Sub-staging**: (a) verdict-parity via
+  name-resolution + type-inference + exhaustiveness [in progress]; (b) ownership/move dataflow [the
+  hardest] + contracts; (c) exact message + position parity over the error files (prerequisite: extend the
+  parser AST to carry `line:col` — adding positions won't change `ast_print`, so M2 stays green).
+- **M4 🔨 IN PROGRESS — a broad subset byte-identical, 2026-06-27.** Self-hosted bytecode backend
+  (`selfhost/codegen.em` + driver `codegen_dump.em`), emitting disassembly **byte-identical** to stage-0
+  `emberc --emit=bytecode` incl. the source-line column. Ports `src/codegen.c` (AST→bytecode) +
+  `src/chunk.c` (the disassembler); the 91-opcode table + LEB128/big-endian operand codec come straight
+  from `include/opcode.h`. Gated as **Stage 4** of `make selfhost` over a growing fixture set
+  (`tests/selfhost/codegen/*.em`, **14 byte-identical** at last count), both backends, whole pipeline
+  **1079/0**. **Done so far:** int/bool scalars + arithmetic; locals/stack slots; user-function & method
+  calls; returns; control flow (if/loop/break/continue jump emit+patch); strings (CONCAT, interpolation
+  TO_STRING, INCREF on a consumed place-read); **all three struct representations** (all-scalar multi-slot,
+  boxed for `var`/refcounted-field, nested struct fields boxed); arrays incl. `.len()`/`.append()` and the
+  element-kind table (empty `[]` kind from the `[T]` annotation); the **move/drop discipline** (owned
+  string/array/boxed-struct lets dropped at every exit; moves zero the slot so the unchanged exit-drop is a
+  no-op) — **this is the deferred ownership analysis landing in its codegen-driving role**; owned values
+  returned from a **call** tracked as droppable (a re-derived fn-return-type table); built-in / user methods
+  on **non-identifier receivers** (`a.vals.len()`, `t.text.len()`, `o.inner.mag()`); float literals; and
+  interpolation-hole source lines re-based onto the enclosing string. **An adversarial divergence hunt +
+  differential stress sweeps** drove this — they found ~12 corpus-untriggered divergences in supported
+  features (a missing `EFloat` case, a nested struct-literal not boxed, a multi-slot struct call-arg, a
+  refcounted-`var` reassign leak, …), each fixed + locked with a fixture, and surfaced OFI-162.
+  The owned/non-identifier struct-access part of the cluster is now done too: a field read off a call-result
+  uses `GET_FIELD_OWNED`, and a multi-slot struct returned from a call gets `BOX_STRUCT`'d before use as a
+  method receiver or a struct field value (mapped by a 5-agent workflow against `src/codegen.c`, verified
+  byte-identical). **A corpus-wide codegen differential** (the self-hosted backend run over all 434
+  stage-0-accepted corpus files) puts the real frontier in numbers: **64/434 byte-identical**, and the
+  divergences are dominated by *unbuilt features*, not the struct representation — only **3 files** need the
+  nested-inline `UNBOX_STRUCT` flattening (`let ln = Line{a:P,b:P}`), so that "Step 0" is **deferred-low**.
+  **Multi-module compilation** now works: the driver BFS-loads the entry file + every transitively-imported
+  module (deduped by path, mirroring `src/main.c`), merges their decls `[entry, import1, …]`, and numbers all
+  enum/struct/fn ids over the combined list — so an *imported* enum's `match` tags resolve correctly (a
+  2-module probe is byte-identical), cross-module function calls (`ps.parse(x)`) emit a plain `CALL`, and an
+  imported enum param (`ml.Lib`) is owned/dropped. Plus **numeric conversions** (`int(x)`/`i32(x)`/`u8(x)` →
+  `CONV <kind>`) and the **`match` 64-case cap** (stage-0 elides the end-`JUMP` beyond the 64th case — the
+  lexer's 71-variant `kind_name` needs this). Plus **`.bytes()`** (→ `STR_BYTES`, an owned byte array), **struct arrays** (`[Token]` →
+  `NEW_STRUCT_ARRAY` when the element has no unique-owner field; an appended struct literal is built boxed),
+  **array-element-type tracking** — `let t = arr[i]` now binds by the array's element kind (a
+  string-bearing struct → a boxed droppable copy, an all-scalar struct → `INDEX;UNBOX_STRUCT` multi-slot, a
+  string → `INDEX;INCREF`, a scalar → plain), with `arr[i].field` reading via `GET_FIELD_OWNED` (mapped by a
+  5-agent workflow); a **multi-module foundation audit** that found + fixed two real cross-module gaps
+  (qualified imported struct *types* `c.RGB` weren't resolved; cross-module call *return types* `c.green()`/
+  `c.make_rgb()` weren't typed — unified through `resolve_call_fn_index`), which **halved parser.em's
+  divergences (1338 → 692)** and dropped checker/codegen by ~800 each; refcounted-field/local `INCREF`
+  (enum fields/locals are refcounted like strings),
+  enum-returning method calls binding a droppable enum, and **`break`/`continue` loop-body cleanup** (they
+  DROP+POP the locals declared since loop entry before jumping). **🎉 The cumulative result: `selfhost/lexer.em`
+  now compiles BYTE-IDENTICAL to stage-0 on both the VM and native — the first fully self-compiling module**,
+  gated in `make selfhost`. Driving off the compiler's own files took parser.em from ~4100 → ~1300 diffs and
+  the corpus differential to **104/435**. **Short-circuit `&&`/`||`, global
+  constants, and crash-hardening** came first, also by pivoting the dev loop onto the compiler's OWN modules: `cgdiff` on selfhost/{lexer,parser,checker,codegen}.em showed the front-end
+  files were close but checker/codegen *crashed* the self-hosted codegen (an array-OOB). Three root causes,
+  all fixed: `&&`/`||` are short-circuit (jumps), not binops (they were hitting `op_kcount[-1]`); a top-level
+  `let` is an inlined compile-time constant (`return TY_INT` → `CONST (= 2)`); and a `match` on an *imported*
+  enum (`ps.Decl`) was indexing the local enum table with -1 — guarded (the correct cross-module tag is the
+  next milestone). checker.em and codegen.em now run to completion. **Built-in calls lower to `CALL_NATIVE`**
+  — `print`/`println`/`read_file`/`write_file`/`char_code`/
+  `args`/the math natives (core ids 0–22), with the per-native owning-temp `drop_mask` protocol (only
+  print/println/read_file/write_file drop their fresh string args, via keep+`PICK`+`DROP_UNDER`; the
+  transform natives release theirs internally), and native-return tracking so `let a = args()` is droppable.
+  That took the corpus differential to **90/435 byte-identical**. **For-loops are done** — both fused forms
+  (`FOR_RANGE` / `FOR_ARRAY`, incl. the indexed `for (i,x)`),
+  break/continue/nesting, and the per-iteration body-local drop, ported exactly from `src/codegen.c` and
+  Crucible-clean. Fixing them surfaced + closed a latent shared-unwind bug (a droppable block/loop/match
+  body local must `DROP` *then* `POP`; only function-exit is `DROP`-only). This pushed the corpus
+  differential from 64 → **79/434 byte-identical** (for-loops are pervasive, so many files flipped at once).
+  **Enums + `match` are done** (the prior highest-frequency feature): NEW_ENUM construction (bare + payload),
+  the `GET_TAG` tag-test dispatch chain ported exactly from `src/codegen.c` (payload binding, wildcard
+  catch-all, the subject-`POP`/early-exit drop discipline), an `EnumTable` that injects the prelude
+  `Option`/`Result` at the ids the parser can't see, and the enum move/drop discipline (enum lets/params are
+  owned and dropped; passing an owned string/enum local to a call `INCREF`s) — verified byte-identical and
+  **Crucible-clean** (187/187, covering enum/match). **Remaining M4, ranked by the corpus differential:**
+  closures/generics (the `GET_LOCAL`/witness-passing bulk); contracts (`requires`/`ensures`);
+  conversions (`CONV`); concurrency (channels/`SEND`); FFI (`CALL_C`); closures/generics; sized-int & float
+  **arithmetic** + interpolation render-kind (one shared `scalar_type_code`, the "M4b" batch); the
+  nested-inline flattening (deferred-low, 3 files); then the **VM fixed point** (the compiler compiles
+  its own source). The dev loop for all of this is **`tools/cgdiff.sh`** (below).
 - **M5** *(follow-on)* — self-hosted C-emit backend; native self-hosted binaries; `tests/native`
   green with the self-hosted compiler producing the C.
 
@@ -275,24 +431,114 @@ rebuilt without itself is a trap; keeping stage 0 is what avoids it.
 
 ---
 
-## 9. Proposed OFIs (ready to open; next free number is OFI-151)
+## 9. OFIs (filed 2026-06-26 in [`docs/OFI.md`](../OFI.md))
 
-These are raised per the CLAUDE.md OFI convention — gaps found while drawing up the plan. They are
-*proposed* here, not yet written into [`docs/OFI.md`](../OFI.md).
+The four proposed during planning, plus three surfaced by the Stage A dogfood:
 
-- **OFI-151** — `system()` / process-spawn builtin. Lets a self-hosted *native* driver invoke `cc`.
-  Not needed for VM-first; required only for an integrated `emberc -o bin` at Stage 5 (the
-  alternative is emit-C-then-external-`cc`).
-- **OFI-152** — bounds on generic enums / standalone methods. Open only if AST/visitor modelling
-  actually needs an interface bound on a generic enum's type parameter.
-- **OFI-153** — generate an Ember-consumable token/vocabulary table from `include/vocab.def`
-  (lexer self-host prerequisite; mirrors `tools/gen_editor_assets`).
-- **OFI-154** — `tests/selfhost/` differential tier + `make selfhost` gate, folded into `make verify`
-  as stages land.
+- **OFI-151** — `system()` / process-spawn builtin (Stage 5 native driver). **OPEN, deferred to Stage 5.**
+- **OFI-152** — bounds on generic enums / standalone methods. **OPEN, conditional** — only if AST/visitor
+  modelling needs it (the recursive `[Json]`/`Box` shape does not).
+- **OFI-153** — generate an Ember-consumable token table from `include/vocab.def` (lexer prerequisite).
+  **OPEN, opens with Stage 1.**
+- **OFI-154** — `tests/selfhost/` differential tier + `make selfhost` gate. **SHIPPED 2026-06-26.**
+- **OFI-155 (HIGH)** — native miscompiled in-place mutation of a value-struct field of a non-flat struct
+  (silent VM/native divergence). **CLOSED 2026-06-27** — runtime + cgen fix, adversarially verified.
+- **OFI-156** — cross-module construction of an imported enum's bare variant fails. **OPEN** — workaround:
+  constructor fns for bare tokens.
+- **OFI-157** — VM/native recursion-depth divergence (`FRAMES_MAX = 256`). **OPEN, documented constraint.**
+- **OFI-158** — native: nested value-struct field assign through a non-local boxed parent
+  (`o.mid.span.col`, `ns[i].span.col`) is a clean error. **OPEN, low** — local/`self` paths work.
+- **OFI-159** — `--emit=tokens` printed `INVALID` for 5 valid keywords (a missing `TOKEN_NAMES[]` entry).
+  **CLOSED 2026-06-27** — corrected the lexer oracle before the M1 differential measured against it.
+- **OFI-161** — native: a free function with a `mut` STRUCT parameter doesn't persist mutation (by-value).
+  **OPEN** — `mut self` methods are unaffected; the front end uses methods-in-struct. Surfaced at M2.
+- **OFI-162** — native: a *method* returning a value-struct mis-compiles (zeroed fields / hard `em_s13`
+  error); a free function returning the same struct is fine. **OPEN** — worked around at M4 by returning
+  an int code from the method (value-struct returns kept on free functions only).
 
 ---
 
-## 10. First concrete step
+## 10. Progress and next steps
 
-Freeze stage 0 and run the **Stage A recursive-AST spike** on both backends. It is the smallest piece
-of work that retires the most residual risk, and it gates everything after it.
+**M0–M2 are landed; M3 and M4 are in progress.** Stage 0 is frozen (`stage0-v0.3.42`), Stage A spikes are
+green, and the **lexer + parser are byte-identical to stage-0 over the whole corpus on both backends**.
+The **checker** reaches stage-0's verdict on 478/539 files with zero false-rejects, and the **bytecode
+backend** is byte-identical across 34 gated fixtures spanning scalars, control flow, strings, every struct
+representation, generic-struct monomorphization, match-binding payload classification, array element kinds,
+wrapping arithmetic, interpolation render kinds, methods, arrays, the move/drop discipline, call-returns,
+multi-module diamonds, and non-identifier receivers. **Two whole compiler modules now SELF-COMPILE
+byte-identical end-to-end on both backends: `selfhost/lexer.em` AND `selfhost/parser.em`** (the latter a
+~1700-line recursive-descent parser — 84/84 functions byte-identical) — both gated in `make selfhost` at
+**1135/0**, folded into `make verify`. Over the differential corpus (`tools/cgdiff.sh -c`) the self-hosted
+backend is byte-identical on **121/452** compiled files.
+
+Ranked next moves:
+0. **M4 — generic struct monomorphization** — **LANDED.** Stage-0 monomorphizes generic structs: each
+   instantiation (`Box<Ty>`, `Box<Expr>`, …) is a DISTINCT struct type with its own `NEW_STRUCT` id,
+   numbered after all declared structs, assigned in pre-order the first time each `Box<X>{…}` construction is
+   checked (deduped per arg-types). The self-hosted backend now mirrors this with an `InstColl` pre-pass
+   (`build_struct_instances`) that walks every function/method body in decl order, pre-order, registering
+   each generic-struct construction's canonical `ty_key` first-seen; `lit_struct_id(ty)` resolves a `Box<X>`
+   construction's `NEW_STRUCT` *operand* to `struct_count + instance_index` while the field LAYOUT stays the
+   base id. Gated by `tests/selfhost/codegen/monomorph.em`. Two earlier foundational audits also landed:
+   **multi-module** (cross-module enum/struct/call resolution — merged symbol universe, qualified types,
+   `resolve_call_fn_index`) which halved parser.em, and the **generic-struct-literal** `TyGeneric` fix in
+   `type_struct_id`.
+0b. **M4 — the refcount/type-classification layer** — **LANDED (this campaign).** A cluster of byte-exact
+   refcount/layout rules the self-hosted backend re-derives without a checker, all now mirroring stage-0 and
+   gated by `tests/selfhost/codegen/bindings_arrays.em`:
+   - **generic-struct return** (`ret_info` `TyGeneric` → base struct id) so `let x = mk()` of a `Box<T>`
+     binds as a struct (field reads resolve);
+   - **match-binding payload classification** — a `case V(x)` binding now carries its payload field's type:
+     a STRING binding INCREFs when consumed, a STRUCT binding resolves `.field` (generic-aware via
+     `ty_struct_id_g`), an ARRAY binding resolves `[i]`, an ENUM binding INCREFs as a refcounted borrow
+     (`EnumTable.vf_*` flat payload-field table + `variant_field_index`);
+   - **enum/refcounted array elements** — a new element-type code `-4` makes `arr[i]` of an `[Enum]` array
+     INCREF like a `[string]` element; one shared `elem_type_code` classifier feeds array params, array
+     `let`s, and bindings;
+   - **field-array indexing** (`self.toks[i].kind`) — `index_elem_code` now resolves an indexed struct FIELD
+     array (`StructTable.f_elem` + `field_elem_code`); previously the whole argument expression was dropped
+     (emitted nothing), which was the pervasive `GET_LOCAL`-class divergence in the compiler's own source;
+   - **array element kinds** — an empty `[]` / single `[x]` array as a struct field value takes the FIELD's
+     element kind (`f_arrkind`), and `elem_kind_of` now classifies boxed (struct/enum/array) elements as
+     `AEK_BOXED` instead of defaulting to int.
+   Deferred: generic `Option<T>`/`Result<T>` payload bindings (OFI-163, needs scrutinee type inference) and
+   inline-struct array literals (OFI-164).
+0c. **M4 — parser.em closed to byte-identical (this campaign).** The residual `selfhost/parser.em`
+   divergences all fell to small, baseline-verified fixes, taking it from 73/84 → **84/84 (whole module)**:
+   **wrapping arithmetic** (`wrapping_add/sub/mul` → the dedicated `WRAP_*` opcodes, not a CALL);
+   **interpolation `string_temp`** (an owning-temp string hole — a call/concat result — SKIPS `TO_STRING`,
+   which would leak its owned reference; `hole_is_str_temp`); **field-read owning-temp precision**
+   (`is_owning_temp_obj` — `arr[i].f` is `GET_FIELD_OWNED` only when the array stores INLINE structs, else a
+   borrowed `GET_FIELD`, mirroring the checker's `is_owning_temp`); **inline-struct discrimination**
+   (`struct_array_inline` now rejects a 16-byte NON-refcounted generic-param field like `Box<T>.value`, so
+   `[Box<Expr>]` is boxed not inline-packed — needed `StructTable.f_enum`); **generic-aware array elements**
+   (`elem_type_code` uses `ty_struct_id_g`, so a `[Box<Expr>]` element resolves to base `Box` — previously a
+   `value[0].value` argument vanished); **enum place-read `let`** (`let op = self.advance().kind` INCREFs +
+   binds a droppable enum); **bare-return unit** (`return` in a void fn pushes `CONST 0`, attributed to the
+   keyword's line — `SReturn` gained a `line` field, transparent to ast_print so M2 stays green); and the
+   **M4b scalar-kind foundation** — a per-slot `slot_kind` (set from a binding/param/match-binding's scalar
+   type) feeds `render_kind_of` (the `TO_STRING` interpolation kind: f64=9, bool=10) and `scalar_kind_of`
+   (a binary op's `num_kind` for float/sized operands). NEXT for M4b: `st_fkind`/fn-return scalar kinds so a
+   field/call hole renders right; then port `selfhost/codegen.em` + `selfhost/checker.em` toward the VM
+   fixed point.
+1. **M4 — the nested/owned struct-value lowering cluster.** Three known divergences
+   share one root — the backend's struct-value handling needs stage-0's owned-temp / flattening rules:
+   field access on a call-result or nested path (`mk().text`, `ln.a.x`) via `GET_FIELD_OWNED` and the
+   multi-slot flattening; a multi-slot struct returned from a call used as a method receiver (`make().m()`)
+   needs `BOX_STRUCT` before `PICK`; a struct-returning call as a struct field value needs boxing. This is
+   on the fixed-point critical path (the compiler reads `node.span.start` etc. pervasively). Map the rules
+   from `src/codegen.c` (`resolve_multislot_field`, `cg_field_slot_offset`, `emit_call_result_box`,
+   `fuzz_flatten_struct`) against live probes, then implement byte-identically.
+2. **M4b — sized & float scalar types**: one shared `scalar_type_code(expr)` feeds the binary-op `num_kind`,
+   the interpolation TO_STRING render-kind (bool=10, f32=8, f64=9, …), and the array element kind. Folds in
+   hunt bug #7 (bool interpolation render-kind) and sized/float arithmetic at once.
+3. **M4 — enums** (NEW_ENUM / GET_TAG / match dispatch) and **for-loops**, then closures/generics, then the
+   **VM fixed point** (run the self-hosted compiler on its own source; require its output to equal stage-0's).
+4. **M3 — the ownership/move dataflow (M3b)** and exact message+position parity (M3c): the remaining ~61
+   not-yet-rejected files are mostly the deferred move/leak/escape analysis, which lands here and in M4's
+   codegen-driving role together.
+5. **OFI-153** (refinement): generate the lexer's keyword table from `vocab.def` (mirror
+   `gen_editor_assets` + a sync gate), replacing the hand-mirrored tables.
+6. **OFI-156**: cross-module bare-variant construction — the multi-module front end currently routes bare
+   tokens through constructor fns; fixing it removes that boilerplate.

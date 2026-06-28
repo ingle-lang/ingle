@@ -39,6 +39,11 @@ static const char *const TOKEN_NAMES[TOK_COUNT] = {
     [TOK_FALSE]     = "FALSE",
     [TOK_IMPORT]    = "IMPORT",
     [TOK_AS]        = "AS",
+    [TOK_EXTERN]    = "EXTERN",
+    [TOK_TYPE]      = "TYPE",
+    [TOK_WHERE]     = "WHERE",
+    [TOK_REQUIRES]  = "REQUIRES",
+    [TOK_ENSURES]   = "ENSURES",
 
     [TOK_LPAREN]    = "LPAREN",
     [TOK_RPAREN]    = "RPAREN",

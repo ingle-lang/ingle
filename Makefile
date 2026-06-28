@@ -129,7 +129,7 @@ DEPS    := $(OBJECTS:.o=.d)
 GEN_BIN := build/gen_editor_assets
 GRAMMAR := editors/vscode/syntaxes/ember.tmLanguage.json
 
-.PHONY: all test test-update test-lsp doctor help release asan asan-par asan-trace install install-vscode build-zed install-zed parallel mn tsan-mn asan-mn mn-stress mn-graphics mn-net-graphics graphics net net-graphics db test-db test-graphics test-net test-parallel crucible ceilings ledger opcheck verify docs string-diff bench parbench gen-editor-assets check-editor-sync clean
+.PHONY: all test test-update test-lsp doctor help release asan asan-par asan-trace install install-vscode build-zed install-zed parallel mn tsan-mn asan-mn mn-stress mn-graphics mn-net-graphics graphics net net-graphics db test-db test-graphics test-net test-parallel selfhost crucible ceilings ledger opcheck verify docs string-diff bench parbench gen-editor-assets check-editor-sync clean
 
 all: $(BIN) $(RT_LIB) $(RT_LIB_PAR)
 
@@ -388,6 +388,13 @@ test-graphics: graphics
 # networking compiler first.
 test-net: net
 	@tests/run-net.sh
+
+# Self-hosting bootstrap differential (docs/design/self-hosting.md). Runs the compiler-shaped programs
+# under tests/selfhost/ on BOTH backends and requires byte-identical stdout — the drift guard for the
+# staged port of the compiler into Ember. Depends on `all` so build/emberc and the runtime static libs
+# (needed by `emberc -o`'s native link) exist; dependency-free, no display/libs.
+selfhost: all
+	@tests/run-selfhost.sh
 
 # Crucible — the memory-ownership fuzzer (tools/crucible.{c,sh}). Generates danger-zone programs
 # (value-structs through erased generics/aggregates, field mutation, interpolation, loops) and runs

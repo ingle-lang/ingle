@@ -63,7 +63,7 @@ fn main() -> int {
 }
 ```
 
-This is the payoff of [`resource` types](design/ptr-owning.md): the handle manages itself. There is no
+This is the payoff of [`resource` types](https://github.com/kmcnally5/ember-lang/blob/main/docs/design/ptr-owning.md): the handle manages itself. There is no
 `close()`, `finalize()`, or `ok()` to call, and no owner-borrows-worker dance — `?` "just works",
 because an owned `Db`/`Stmt` drops on the early-return path the same as on the normal one.
 
@@ -98,7 +98,7 @@ them (closing the connection / finalizing the statement) for you, on every path.
 ## What this is, and what is planned
 
 This is the **resource-based binding** — the complete, sound foundation. The owning-handle ergonomics
-([`resource` types](design/ptr-owning.md), OFI-122) are here: `Db`/`Stmt` close themselves, so the API
+([`resource` types](https://github.com/kmcnally5/ember-lang/blob/main/docs/design/ptr-owning.md), OFI-122) are here: `Db`/`Stmt` close themselves, so the API
 is `?`-clean with no `close`/`finalize`. Two layers are still planned on top:
 
 - **Ergonomic row helpers** — `query(db, sql, params) -> Result<[Row], string>` and a parametrised

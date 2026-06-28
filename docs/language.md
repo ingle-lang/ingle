@@ -8,8 +8,8 @@ description: The canonical syntax and semantics reference for Ember — a static
 
 The canonical *how-to-write-Ember* document. It is a **living reference**: it describes only
 what the language has actually grown to, and every feature slice updates it in the same commit.
-For the *why* behind the design see [../MANIFESTO.md](../MANIFESTO.md); for runnable samples see
-[../examples/](../examples/).
+For the *why* behind the design see [MANIFESTO.md](https://github.com/kmcnally5/ember-lang/blob/main/MANIFESTO.md); for runnable samples see
+[examples/](https://github.com/kmcnally5/ember-lang/tree/main/examples).
 
 > **Audience note.** Ember is designed LLM-first (MANIFESTO §5b). This reference is the single
 > source a model should rely on. Where a construct is designed and parses but does not yet
@@ -569,7 +569,7 @@ in Ember over a minimal native base, in a file, and `import` it like any other m
   are recycled (reuse is O(1) via a free-list); a move-type `V` is **deep-cloned on store** like a
   `std/map` value, so the arena owns its copy. There is no in-place `get_mut` (Ember has no interior
   mutability) — read out, edit, and `replace`. This is the blessed answer for graph- and pool-shaped
-  data (entity tables, retained UI nodes, object pools) that [the manifesto](../MANIFESTO.md)
+  data (entity tables, retained UI nodes, object pools) that [the manifesto](https://github.com/kmcnally5/ember-lang/blob/main/MANIFESTO.md)
   promises in place of escalating a borrow checker.
 
 **Also in `std/` (opt-in, application support).** Beyond the core collections above, the standard

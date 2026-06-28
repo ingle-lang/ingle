@@ -1275,6 +1275,17 @@ void em_set_field(EmberRt *ctx, Value structval, int idx, Value newval) {
     ObjStruct *s = AS_STRUCT(structval);
     int k;
     unsigned char *p = field_loc(ctx, s, idx, &k);
+    if (k == AEK_INLINE_STRUCT) {
+        // An inline NESTED value-struct field (`node.span = Span{…}`): the new value arrives BOXED,
+        // so copy its packed bytes into the inline slot and reclaim the source shell — exactly the
+        // VM's OP_SET_FIELD AEK_INLINE_STRUCT branch (OFI-155). Without this the boxed pointer would
+        // be written raw into a slot that holds packed leaves, and a later inline read returns
+        // garbage. An inline struct is all-scalar leaves, so there is no old value to release.
+        int nsid = field_inline_sid(ctx, s, idx);
+        memcpy(p, AS_STRUCT(newval)->data, (size_t)ctx->structs[nsid].total_size);
+        reclaim(ctx, AS_OBJ(newval));
+        return;
+    }
     if (k == AEK_BOXED) {
         drop_value(ctx, value_box(p, k));
     }
@@ -2112,6 +2123,22 @@ Value em_native(EmberRt *ctx, int nid, int argc, const Value *args) {
             ObjString *s = make_string(ctx, (size_t)w);
             memcpy(s->chars, buf, (size_t)w);
             return OBJ_VAL(s);
+        }
+        case NATIVE_BYTE_SLICE: {
+            // byte_slice(s, start, end) -> the raw bytes [start, end) of s as a string. BYTE-indexed
+            // (not code-point), so it faithfully preserves multi-byte UTF-8 — the exact-lexeme
+            // primitive the self-hosted lexer needs. Out-of-range bounds clamp; start>end is empty.
+            ObjString *s = argc >= 1 ? AS_STRING(args[0]) : NULL;
+            int64_t len = s ? (int64_t)s->length : 0;
+            int64_t lo  = argc >= 2 ? AS_INT(args[1]) : 0;
+            int64_t hi  = argc >= 3 ? AS_INT(args[2]) : 0;
+            if (lo < 0)   { lo = 0; }
+            if (hi > len) { hi = len; }
+            if (lo > hi)  { lo = hi; }
+            size_t n = (size_t)(hi - lo);
+            ObjString *out = make_string(ctx, n);
+            if (n > 0) { memcpy(out->chars, s->chars + lo, n); }
+            return OBJ_VAL(out);
         }
         case NATIVE_PARSE_FLOAT: {
             const char *str = argc >= 1 ? AS_CSTRING(args[0]) : "";

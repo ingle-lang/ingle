@@ -26,10 +26,10 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || exit 2
 
-ALL="build parallel test opcheck ceilings ledger crucible"
+ALL="build parallel test selfhost opcheck ceilings ledger crucible"
 case "${1:-}" in
     "")     GATES="$ALL" ;;
-    fast)   GATES="build parallel test opcheck ceilings ledger" ;;
+    fast)   GATES="build parallel test selfhost opcheck ceilings ledger" ;;
     *)      GATES="$*" ;;
 esac
 
@@ -59,6 +59,7 @@ for g in $GATES; do
         build)    run_gate build    make ;;
         parallel) run_gate parallel make parallel ;;
         test)     run_gate test     make test ;;
+        selfhost) run_gate selfhost make selfhost ;;
         opcheck)  run_gate opcheck  make opcheck ;;
         ceilings) run_gate ceilings make ceilings ;;
         ledger)   run_gate ledger   make ledger ;;

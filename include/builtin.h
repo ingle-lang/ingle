@@ -32,7 +32,11 @@ enum {
     // by name from Ember; referenced only from a witness vtable and dispatched by the
     // indirect-call opcodes when the type parameter is bound to a scalar/string.
     NATIVE_HASH_ANY      = 20,// hash(self) for a built-in key — hash any scalar/string Value
-    NATIVE_VALUE_EQ      = 21 // eq(self, other) for a built-in key — structural value equality
+    NATIVE_VALUE_EQ      = 21,// eq(self, other) for a built-in key — structural value equality
+
+    NATIVE_BYTE_SLICE    = 22 // byte_slice(s, start, end) -> string — the raw bytes [start,end) of
+                              // s, BYTE-indexed (not code-point); the faithful inverse of .bytes()
+                              // over a sub-range. Added for the self-hosted lexer (exact lexemes).
 };
 
 // A witness method slot normally holds an Ember function-table index. For a built-in

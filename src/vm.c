@@ -1236,6 +1236,22 @@ static Value call_native(VM *vm, int native_id, Value *args, int argc) {
             memcpy(s->chars, buf, (size_t)w);
             return OBJ_VAL(s);
         }
+        case NATIVE_BYTE_SLICE: {
+            // byte_slice(s, start, end) -> the raw bytes [start, end) of s as a string. BYTE-indexed
+            // (not code-point), so it faithfully preserves multi-byte UTF-8 — the exact-lexeme
+            // primitive the self-hosted lexer needs. Out-of-range bounds clamp; start>end is empty.
+            ObjString *s = argc >= 1 ? AS_STRING(args[0]) : NULL;
+            int64_t len = s ? (int64_t)s->length : 0;
+            int64_t lo  = argc >= 2 ? AS_INT(args[1]) : 0;
+            int64_t hi  = argc >= 3 ? AS_INT(args[2]) : 0;
+            if (lo < 0)   { lo = 0; }
+            if (hi > len) { hi = len; }
+            if (lo > hi)  { lo = hi; }
+            size_t n = (size_t)(hi - lo);
+            ObjString *out = make_string(RT(vm), n);
+            if (n > 0) { memcpy(out->chars, s->chars + lo, n); }
+            return OBJ_VAL(out);
+        }
         case NATIVE_PARSE_FLOAT: {
             const char *str = argc >= 1 ? AS_CSTRING(args[0]) : "";
             return FLOAT_VAL(strtod(str, NULL));

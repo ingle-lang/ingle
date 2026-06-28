@@ -6,12 +6,12 @@ description: Engineering decisions behind the Ember compiler and toolchain (embe
 
 # Ember — Compiler & Toolchain Architecture
 
-*Engineering decisions for the **compiler and toolchain**. The counterpart to [MANIFESTO.md](../MANIFESTO.md). Started June 2026.*
+*Engineering decisions for the **compiler and toolchain**. The counterpart to [MANIFESTO.md](https://github.com/kmcnally5/ember-lang/blob/main/MANIFESTO.md). Started June 2026.*
 
 The manifesto records why the **language** is the way it is. This document records why the
 **compiler, toolchain, and repository** are the way they are — the engineering decisions that
 future work must respect but that say nothing about Ember-the-language. The project insists on
-keeping these two apart (see [CLAUDE.md](../CLAUDE.md): *"don't conflate"* the language and the
+keeping these two apart (see [CLAUDE.md](https://github.com/kmcnally5/ember-lang/blob/main/CLAUDE.md): *"don't conflate"* the language and the
 compiler); this is where the compiler half lives.
 
 It is a **living** document, not an append-only log: each entry states the rule that is true
@@ -66,7 +66,7 @@ copies are **derived** — never hand-maintained in parallel. Where the consumer
 an eventual bug. A generator that nobody is *forced* to run drifts just as badly — so the value is
 in the **enforced diff**, not merely in having a generator. First instance: the lexical vocabulary
 (keywords, builtins, primitives) lived in four hand-copied places; it now lives in
-[`include/vocab.def`](../include/vocab.def) (X-macros), `#include`d by the lexer and the LSP, with
+[`include/vocab.def`](https://github.com/kmcnally5/ember-lang/blob/main/include/vocab.def) (X-macros), `#include`d by the lexer and the LSP, with
 the TextMate grammar generated from it and gated by `make check-editor-sync` (OFI-033).
 
 ---
@@ -1379,7 +1379,7 @@ backend change, ~12 lines. VM==native verified; regression `tests/run/spawn_qual
 
 ## Decision: `Ptr` linearity (must-close) is a checker-only AND-merge dataflow, not a destructor
 
-*Decided 2026-06-19. Full design + adversarial review: [docs/design/ptr-linearity.md](design/ptr-linearity.md). Closes OFI-049's leak half.*
+*Decided 2026-06-19. Full design + adversarial review: [docs/design/ptr-linearity.md](https://github.com/kmcnally5/ember-lang/blob/main/docs/design/ptr-linearity.md). Closes OFI-049's leak half.*
 
 The double-close half of OFI-049 (2026-06-18) made `Ptr` **move-only** (affine — used at most once) and
 deliberately gave it **no scope-exit destructor** (Ember can't know whether an arbitrary C handle is
@@ -1648,3 +1648,43 @@ The one gap is provisioning, not portability: **raylib is not packaged in Debian
 graphics flagship is built from raylib source in CI and the installer falls back to the plain compiler
 where the distro lacks it (OFI-142). The language, its concurrency, the native backend, and networking
 (libcurl) are fully portable with zero special provisioning.
+
+
+## Decision: stage 0 is a frozen, reproducible-from-zero bootstrap reference (`stage0-v0.3.42`)
+
+The self-hosting bootstrap ([docs/design/self-hosting.md](https://github.com/kmcnally5/ember-lang/blob/main/docs/design/self-hosting.md)) ports the compiler
+into Ember one differential-green stage at a time. That only works if the C reference compiler —
+**stage 0** — is pinned and reproducible, because it is the oracle every ported stage is measured
+against. The decisions:
+
+- **The freeze is a git tag, not a vendored binary.** `stage0-v0.3.42` (annotated) marks the reference
+  commit — the compiler as it stood before any of it was ported into Ember. A *binary* would rot
+  (codesign, libc, arch); a tagged *source* commit that builds from zero with no third-party deps is the
+  durable artifact. The repo's first tag, so it sets the convention: `stage0-vX.Y.Z`, a namespace
+  distinct from any future release tags. `EMBER_VERSION` (`include/version.h`) stays the single source of
+  truth and is unchanged by the freeze.
+
+- **"Frozen" means the `--emit` oracles stay byte-stable, not merely that a binary exists.** The
+  bootstrap diffs each ported stage against stage 0's `--emit=tokens|ast|bytecode|run` output, so it is
+  those output formats — not just "it compiles" — that are held immutable for the duration. If stage 0
+  must change (a security fix, a new host compiler), it is re-tagged deliberately, never edited in place.
+
+- **Reproduce-from-zero (any supported host, no third-party deps):**
+
+  ```
+  git clone <repo> && cd ember
+  git checkout stage0-v0.3.42
+  make                      # dev compiler  -> build/emberc        (-O0 -g, the working binary)
+  make release              # release build -> build/emberc-release (-O2 -DNDEBUG)
+  ./build/emberc --version  # emberc 0.3.42
+  ```
+
+  The build is portable C17 with an empty dependency tree (Apple clang or gcc); Linux needs only the
+  additive `-D_DEFAULT_SOURCE`, `-lm`, and `-pthread` already baked into the one Makefile (see the Linux
+  decision above; OFI-141). The four oracle modes are then available immediately:
+  `./build/emberc --emit=tokens|ast|bytecode|run <file.em>`.
+
+- **stage 0 is kept indefinitely.** A self-hosted language that can't be rebuilt without itself is a
+  trap; keeping a from-C reference (and the tag that pins it) is what guarantees the project can always
+  re-bootstrap. The eventual reproducibility fixed point (stage-1 output ≡ stage-2 output, the
+  *Trusting Trust* construction) is stated as a property to demonstrate, not a security claim.
