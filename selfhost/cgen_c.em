@@ -316,12 +316,13 @@ struct CgcGen {
     }
 
 
-    // emit_drops prints `drop_value(&g_em, <cname>);` for every owned binding, innermost (latest) first —
-    // the order the runtime releases scope-exit owners (cgen_c.c:emit_drops).
-    fn emit_drops(self) {
+    // emit_drops prints `drop_value(&g_em, <cname>);` for every owned binding in [from, len), innermost
+    // (latest) first — the order the runtime releases scope-exit owners (cgen_c.c:emit_drops). `from` = 0
+    // at a function exit; a block/loop passes its scope mark to drop only what the block declared.
+    fn emit_drops(self, from: int) {
         var i = self.sc_drop.len() - 1
         loop {
-            if i < 0 {
+            if i < from {
                 break
             }
             if self.sc_drop[i] {
@@ -329,6 +330,34 @@ struct CgcGen {
             }
             i = i - 1
         }
+    }
+
+
+    // truncate_scope drops scope entries past `mark` (a block's locals leave scope at its `}`). Rebuilds the
+    // parallel arrays (Ember has no array pop), mirroring cgen_c.c's `g->scope_len = mark`.
+    fn truncate_scope(mut self, mark: int) {
+        var nn: [string] = []
+        var nc: [string] = []
+        var nk: [int] = []
+        var nu: [bool] = []
+        var nd: [bool] = []
+        var i = 0
+        loop {
+            if i >= mark {
+                break
+            }
+            nn.append(self.sc_name[i])
+            nc.append(self.sc_cname[i])
+            nk.append(self.sc_kind[i])
+            nu.append(self.sc_unboxed[i])
+            nd.append(self.sc_drop[i])
+            i = i + 1
+        }
+        self.sc_name = nn
+        self.sc_cname = nc
+        self.sc_kind = nk
+        self.sc_unboxed = nu
+        self.sc_drop = nd
     }
 
 
@@ -654,6 +683,68 @@ struct CgcGen {
     }
 
 
+    // emit_block_raw emits a statement list WITHOUT managing scope (the caller — e.g. a for-loop that
+    // pushed its loop variable before the body — handles the drops/truncate itself).
+    fn emit_block_raw(mut self, body: [ps.Stmt]) {
+        var i = 0
+        loop {
+            if i >= body.len() {
+                break
+            }
+            self.emit_stmt(body[i])
+            i = i + 1
+        }
+    }
+
+
+    // emit_block_stmts emits a scoped block (an if/loop/bare-block body): its owned locals are dropped at
+    // the block's normal exit and leave scope (cgen_c.c:emit_block_scoped).
+    fn emit_block_stmts(mut self, body: [ps.Stmt]) {
+        let mark = self.sc_name.len()
+        var i = 0
+        loop {
+            if i >= body.len() {
+                break
+            }
+            self.emit_stmt(body[i])
+            i = i + 1
+        }
+        self.emit_drops(mark)
+        self.truncate_scope(mark)
+    }
+
+
+    // emit_if renders `if (em_truthy(<cond>)) { … }` with an optional `else { … }` / `else if …` chain.
+    // `leading` is the prefix before `if` — the indent for a top-level if, "" when chained after `} else `.
+    fn emit_if(mut self, cond: ps.Expr, then_blk: [ps.Stmt], els: [ps.Stmt], leading: string) {
+        let c = self.emit_expr(cond)
+        println("{leading}if (em_truthy({c})) \{")
+        self.indent = self.indent + 1
+        self.emit_block_stmts(then_blk)
+        self.indent = self.indent - 1
+        if els.len() > 0 {
+            match els[0] {
+                case SBlock(body) {
+                    println("{self.ind()}\} else \{")
+                    self.indent = self.indent + 1
+                    self.emit_block_stmts(body)
+                    self.indent = self.indent - 1
+                    println("{self.ind()}\}")
+                }
+                case SIf(econd, ethen, eels) {
+                    print("{self.ind()}\} else ")
+                    self.emit_if(econd.value, ethen, eels, "")
+                }
+                case _ {
+                    println("{self.ind()}\}")
+                }
+            }
+        } else {
+            println("{self.ind()}\}")
+        }
+    }
+
+
     fn emit_stmt(mut self, s: ps.Stmt) {
         match s {
             case SReturn(value, line) {
@@ -667,7 +758,7 @@ struct CgcGen {
                     }
                     println("{self.ind()}\{ Value v{r} = {rv};")
                     self.indent = self.indent + 1
-                    self.emit_drops()
+                    self.emit_drops(0)
                     println("{self.ind()}return v{r};")
                     self.indent = self.indent - 1
                     println("{self.ind()}\}")
@@ -694,6 +785,102 @@ struct CgcGen {
                     let owned = self.is_string_expr(value.value)
                     println("{self.ind()}Value v{id} = {self.emit_concat_operand(value.value)};")
                     self.push(name, "v{id}", 0 - 1, false, owned)
+                }
+            }
+            case SIf(cond, then_blk, els) {
+                self.emit_if(cond.value, then_blk, els, self.ind())
+            }
+            case SLoop(body) {
+                println("{self.ind()}for (;;) \{")
+                self.indent = self.indent + 1
+                self.emit_block_stmts(body)
+                self.indent = self.indent - 1
+                println("{self.ind()}\}")
+            }
+            case SFor(vname, index_var, iter, body) {
+                // Both forms wrap in a `{ }` block. Range `for i in lo..hi`: declare lo/hi as int64_t `t`
+                // temps, loop the index `t`, bind the loop var as a fresh Value each pass. Array `for x in
+                // xs`: evaluate the array once into a `v`, loop over `em_array_len`, bind each element via
+                // `em_index`. Per-pass owned body locals are dropped (cgen_c.c:STMT_FOR). The `t` and `v`
+                // names SHARE the one counter; only the loop variable(s) are pushed into the binding scope.
+                match iter.value {
+                    case ERange(lo, hi) {
+                        let lo_t = self.fresh_var()
+                        let hi_t = self.fresh_var()
+                        let ix = self.fresh_var()
+                        println("{self.ind()}\{")
+                        self.indent = self.indent + 1
+                        println("{self.ind()}int64_t t{lo_t} = AS_INT({self.emit_expr(lo.value)});")
+                        println("{self.ind()}int64_t t{hi_t} = AS_INT({self.emit_expr(hi.value)});")
+                        println("{self.ind()}for (int64_t t{ix} = t{lo_t}; t{ix} < t{hi_t}; t{ix}++) \{")
+                        self.indent = self.indent + 1
+                        let vid = self.fresh_var()
+                        println("{self.ind()}Value v{vid} = INT_VAL(t{ix});")
+                        let mark = self.sc_name.len()
+                        self.push(vname, "v{vid}", 0 - 1, false, false)
+                        self.emit_block_raw(body)
+                        self.emit_drops(mark)
+                        self.truncate_scope(mark)
+                        self.indent = self.indent - 1
+                        println("{self.ind()}\}")
+                        self.indent = self.indent - 1
+                        println("{self.ind()}\}")
+                    }
+                    case _ {
+                        let av = self.fresh_var()
+                        let nv = self.fresh_var()
+                        let ix = self.fresh_var()
+                        println("{self.ind()}\{")
+                        self.indent = self.indent + 1
+                        println("{self.ind()}Value v{av} = {self.emit_expr(iter.value)};")
+                        println("{self.ind()}int64_t t{nv} = AS_INT(em_array_len(v{av}));")
+                        println("{self.ind()}for (int64_t t{ix} = 0; t{ix} < t{nv}; t{ix}++) \{")
+                        self.indent = self.indent + 1
+                        let xv = self.fresh_var()
+                        println("{self.ind()}Value v{xv} = em_index(&g_em, v{av}, INT_VAL(t{ix}));")
+                        let mark = self.sc_name.len()
+                        if index_var != "" {
+                            let iv = self.fresh_var()
+                            println("{self.ind()}Value v{iv} = INT_VAL(t{ix});")
+                            self.push(index_var, "v{iv}", 0 - 1, false, false)
+                        }
+                        self.push(vname, "v{xv}", 0 - 1, false, false)
+                        self.emit_block_raw(body)
+                        self.emit_drops(mark)
+                        self.truncate_scope(mark)
+                        self.indent = self.indent - 1
+                        println("{self.ind()}\}")
+                        self.indent = self.indent - 1
+                        println("{self.ind()}\}")
+                    }
+                }
+            }
+            case SBreak(line) {
+                println("{self.ind()}break;")
+            }
+            case SContinue(line) {
+                println("{self.ind()}continue;")
+            }
+            case SBlock(body) {
+                println("{self.ind()}\{")
+                self.indent = self.indent + 1
+                self.emit_block_stmts(body)
+                self.indent = self.indent - 1
+                println("{self.ind()}\}")
+            }
+            case SAssign(target, value) {
+                // M5c: assignment to a scalar `var` → `vN = (ctype)AS_INT(<rhs>);` (re-stored at width).
+                match target.value {
+                    case EIdent(name) {
+                        let k = self.lookup_kind(name)
+                        let cn = self.lookup_cname(name)
+                        if self.lookup_unboxed(name) {
+                            let ct = scalar_ctype(k)
+                            println("{self.ind()}{cn} = ({ct})AS_INT({self.emit_expr(value.value)});")
+                        }
+                    }
+                    case _ {
+                    }
                 }
             }
             case SExpr(expr) {
@@ -744,19 +931,20 @@ fn native_cfn(name: string) -> string {
 }
 
 
-// binop_cfn maps a binop id (ps.binop_id) to its em_* runtime C function.
+// binop_cfn maps a binop id (ps.binop_id: 1 + / 2 - / 3 * / 4 / / 5 % / 6 < / 7 <= / 8 > / 9 >= / 10 == /
+// 11 != / 14 & / 15 | / 16 ^ / 17 << / 18 >>) to its em_* runtime C function.
 fn binop_cfn(bid: int) -> string {
     if bid == 1 { return "em_add" }
     if bid == 2 { return "em_sub" }
     if bid == 3 { return "em_mul" }
     if bid == 4 { return "em_div" }
     if bid == 5 { return "em_mod" }
-    if bid == 6 { return "em_eq_op" }
-    if bid == 7 { return "em_neq_op" }
-    if bid == 8 { return "em_lt" }
-    if bid == 9 { return "em_le" }
-    if bid == 10 { return "em_gt" }
-    if bid == 11 { return "em_ge" }
+    if bid == 6 { return "em_lt" }
+    if bid == 7 { return "em_le" }
+    if bid == 8 { return "em_gt" }
+    if bid == 9 { return "em_ge" }
+    if bid == 10 { return "em_eq_op" }
+    if bid == 11 { return "em_neq_op" }
     if bid == 14 { return "em_bitand" }
     if bid == 15 { return "em_bitor" }
     if bid == 16 { return "em_bitxor" }
@@ -766,16 +954,16 @@ fn binop_cfn(bid: int) -> string {
 }
 
 
-// binop_wants_ctx: em_add / em_eq_op / em_neq_op take `&g_em` and retain their (consumed) operands.
+// binop_wants_ctx: em_add (1) / em_eq_op (10) / em_neq_op (11) take `&g_em` and retain their consumed operands.
 fn binop_wants_ctx(bid: int) -> bool {
-    return bid == 1 || bid == 6 || bid == 7
+    return bid == 1 || bid == 10 || bid == 11
 }
 
 
-// binop_has_nk: the numeric ops (arithmetic + ordered compares + shifts) carry a trailing num_kind;
-// equality and bitwise ops do not.
+// binop_has_nk: arithmetic (1–5), ordered compares (6–9), and shifts (17–18) carry a trailing num_kind;
+// equality (10–11) and bitwise (14–16) do not.
 fn binop_has_nk(bid: int) -> bool {
-    return bid == 1 || bid == 2 || bid == 3 || bid == 4 || bid == 5 || bid == 8 || bid == 9 || bid == 10 || bid == 11 || bid == 17 || bid == 18
+    return (bid >= 1 && bid <= 9) || bid == 17 || bid == 18
 }
 
 
@@ -831,7 +1019,7 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, fn_names: [string], fn_r
     }
     // the implicit trailing return — preceded by the owned-binding drops on the fall-through path
     if g.scope_has_drops() {
-        g.emit_drops()
+        g.emit_drops(0)
     }
     println("    return INT_VAL(0);")
     println("\}")
