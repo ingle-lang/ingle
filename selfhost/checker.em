@@ -153,6 +153,7 @@ struct Checker {
     fn_ptype: [int]            // every free-fn param SemType, concatenated (arg-type check)
     fn_pqual: [int]            // ...and each param's qualifier (0 none / 1 mut / 2 move), parallel to fn_ptype
     fn_extern: [bool]          // ...is this entry an `extern "c"` fn (no bytecode slot — cannot be spawned)?
+    struct_garity: [int]       // ...generic type-parameter count per struct (parallel to `structs`; 0 for a newtype)
     newtypes: [string]         // newtype names (a newtype value must stay lenient, NOT resolve to a struct)
     sf_owner: [int]            // struct-field table: owning struct index (parallel to `structs`)
     sf_name: [string]          // ...field name
@@ -612,6 +613,7 @@ struct Checker {
                         self.error("a type with this name is already declared in this module")
                     }
                     self.structs.append(name)
+                    self.struct_garity.append(generics.len())
                 }
                 case DEnum(name, generics, impls, variants) {
                     if self.is_duplicate_type(name) {
@@ -703,6 +705,7 @@ struct Checker {
                         self.error("a type with this name is already declared in this module")
                     }
                     self.structs.append(name)        // a newtype name occupies a type slot (is_known)
+                    self.struct_garity.append(0)     // ...a newtype is never generic (keep parallel to structs)
                     self.fns.append(name)            // ...and a constructor: UserId(x)
                     self.newtypes.append(name)        // ...but its VALUE stays lenient (not a struct type)
                 }
@@ -1889,6 +1892,14 @@ struct Checker {
                     }
                     return TY_INFER
                 }
+                // The `<…>` type-argument count must EXACTLY equal the struct's generic-parameter count: a
+                // generic `Box<T>` requires `Box<X>` (not bare `Box`), a non-generic `P` rejects `P<int>`,
+                // and `Box<A,B>` is wrong. Skip a qualified (imported) type — its arity isn't known here.
+                if ty_qual(ty.value) == "" {
+                    if ty_arg_count(ty.value) != self.struct_garity[si] {
+                        self.error("wrong number of type arguments for this struct")
+                    }
+                }
                 // Each provided field must name a declared field, with an assignable value.
                 var i = 0
                 loop {
@@ -2376,6 +2387,41 @@ fn ty_name(t: ps.Ty) -> string {
 }
 
 
+// ty_qual returns a type annotation's module qualifier ("" if unqualified). A qualified type names an
+// imported struct/enum whose generic arity this module doesn't know — so generic-arity checks skip it.
+fn ty_qual(t: ps.Ty) -> string {
+    match t {
+        case TyName(qual, name) {
+            return qual
+        }
+        case TyGeneric(qual, name, args) {
+            return qual
+        }
+        case TyArray(elem) {
+            return ""
+        }
+        case TyFn(params, ret) {
+            return ""
+        }
+    }
+}
+
+
+// ty_arg_count returns the number of TYPE arguments written in an annotation: 0 for a plain `Name` (and a
+// non-generic form), or the count for `Name<A, B, …>`. Used to check a struct-literal's `<…>` against the
+// struct's declared generic-parameter count.
+fn ty_arg_count(t: ps.Ty) -> int {
+    match t {
+        case TyGeneric(qual, name, args) {
+            return args.len()
+        }
+        case _ {
+            return 0
+        }
+    }
+}
+
+
 // index_of returns the first index of `v` in `xs`, or -1 if absent (the struct/enum id = its index).
 fn index_of(xs: [string], v: string) -> int {
     var i = 0
@@ -2434,6 +2480,7 @@ fn check(src: string) -> bool {
     var fn_ptype: [int] = []
     var fn_pqual: [int] = []
     var fn_extern: [bool] = []
+    var struct_garity: [int] = []
     var newtypes: [string] = []
     var sf_owner: [int] = []
     var sf_name: [string] = []
@@ -2457,7 +2504,7 @@ fn check(src: string) -> bool {
     var tparams: [string] = []
     var locals: [Local] = []
     var diags: [string] = []
-    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_ret: fn_ret, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, fn_extern: fn_extern, newtypes: newtypes, sf_owner: sf_owner, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_moveself: sm_moveself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, nursery_depth: 0, locals: locals, local_moved: [], local_consumed: [], loop_break_consumed: [], loop_saw_break: false, scope_depth: 0, diags: diags }
+    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_ret: fn_ret, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, fn_extern: fn_extern, struct_garity: struct_garity, newtypes: newtypes, sf_owner: sf_owner, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_moveself: sm_moveself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, nursery_depth: 0, locals: locals, local_moved: [], local_consumed: [], loop_break_consumed: [], loop_saw_break: false, scope_depth: 0, diags: diags }
     c.register(decls)                    // pass 1: NAMES (so forward references resolve)
     c.register_types(decls)              // pass 1b: signatures, fields, variants (needs names registered)
     c.check_all(decls)                   // pass 2: bodies
