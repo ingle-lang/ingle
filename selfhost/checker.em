@@ -105,10 +105,7 @@ struct Local {
     depth: int
     ty: int                    // the binding's SemType (TY_INFER when not yet inferable)
     is_var: bool               // true for `var`/`mut`/`move`; false for `let` and borrowed bindings
-    // ---- ownership dataflow state (the move/linearity engine) ----
     owned: bool                // owns its value (a local, or a `move` param) vs borrows it (a plain param)
-    moved: bool                // value moved out on SOME reaching path — a later use is an error (OR-merge)
-    move_line: int             // source line of the move (0 = not moved), for the diagnostic note
 }
 
 
@@ -153,6 +150,8 @@ struct Checker {
     self_is_var: bool          // is the enclosing method's receiver `mut self`/`move self` (mutable)?
     loop_depth: int            // enclosing loop/for nesting (break/continue must be inside one)
     locals: [Local]
+    local_moved: [bool]        // MUTABLE move state, parallel to `locals` (element-struct writeback isn't
+                               // self-compilable yet — OFI-061 — so the moved flag lives in a scalar array)
     scope_depth: int
     diags: [string]            // collected diagnostic messages (positions added in M3c)
 
@@ -166,7 +165,7 @@ struct Checker {
     // declare also enforces no-redeclaration-in-the-same-scope: a binding whose name already exists at the
     // current depth is an error (stage-0 treats a function's params and its body top level as one scope;
     // nested blocks open deeper scopes where shadowing IS allowed). `_` is the discard name, never a redecl.
-    fn declare(mut self, name: string, ty: int, is_var: bool) {
+    fn declare(mut self, name: string, ty: int, is_var: bool, owned: bool) {
         if name != "_" {
             var i = self.locals.len() - 1
             loop {
@@ -183,7 +182,8 @@ struct Checker {
                 i = i - 1
             }
         }
-        self.locals.append(Local{ name: name, depth: self.scope_depth, ty: ty, is_var: is_var, owned: false, moved: false, move_line: 0 })
+        self.locals.append(Local{ name: name, depth: self.scope_depth, ty: ty, is_var: is_var, owned: owned })
+        self.local_moved.append(false)
     }
 
 
@@ -216,6 +216,83 @@ struct Checker {
             i = i - 1
         }
         return false
+    }
+
+
+    // local_slot returns the innermost in-scope `locals` index of `name`, or -1.
+    fn local_slot(self, name: string) -> int {
+        var i = self.locals.len() - 1
+        loop {
+            if i < 0 {
+                break
+            }
+            if self.locals[i].name == name {
+                return i
+            }
+            i = i - 1
+        }
+        return 0 - 1
+    }
+
+
+    // is_move_type reports whether a value of SemType `t` is MOVED (vs copied) on transfer — a uniquely-owned
+    // mutable aggregate: a struct or an array (mirrors src/check.c:is_move_type). Scalars, strings, and enums
+    // copy/share. (rc structs are NOT move types, but the self-host parser drops the rc flag — handled in the
+    // rc regime; for now an rc struct used-after-copy is the one residual risk, watched by the gate.)
+    fn is_move_type(self, t: int) -> bool {
+        if t >= STRUCT_BASE && t < ENUM_BASE {
+            return true
+        }
+        return t == TY_ARRAY || t == TY_PTR
+    }
+
+
+    // consume_move marks an OWNED MOVE-TYPE local as moved when it is consumed by-value into an OWNER (a
+    // let/var initialiser, a return, a struct-field value, an array element, a `move` argument). A borrowed
+    // param/binding (owned==false), a copy-type value, or a non-identifier expression is NOT a move.
+    fn consume_move(mut self, e: ps.Expr, line: int) {
+        match e {
+            case EIdent(name) {
+                let slot = self.local_slot(name)
+                if slot >= 0 {
+                    if self.locals[slot].owned && self.local_moved[slot] == false && self.is_boxed_move(slot) {
+                        self.local_moved[slot] = true
+                    }
+                }
+            }
+            case _ {
+            }
+        }
+    }
+
+
+    // merge_moved ORs another moved-snapshot into the current state (the OR-merge: moved on ANY path).
+    fn merge_moved(mut self, other: [bool]) {
+        var i = 0
+        loop {
+            if i >= self.local_moved.len() {
+                break
+            }
+            if i < other.len() {
+                if other[i] {
+                    self.local_moved[i] = true
+                }
+            }
+            i = i + 1
+        }
+    }
+
+
+    // is_boxed_move reports whether local `slot` is DEFINITELY a boxed move value — an array/Ptr, or a `var`
+    // (mutated ⇒ boxed) struct. A `let` struct is left lenient: an all-scalar one is MULTI-SLOT (copied, not
+    // moved — check.c:2627), and without recursive all-scalar analysis we can't tell it from a boxed one, so
+    // we never mark it (no false-reject; a boxed-let-struct move is simply not yet caught).
+    fn is_boxed_move(self, slot: int) -> bool {
+        let t = self.locals[slot].ty
+        if t == TY_ARRAY || t == TY_PTR {
+            return true
+        }
+        return t >= STRUCT_BASE && t < ENUM_BASE && self.locals[slot].is_var
     }
 
 
@@ -777,6 +854,8 @@ struct Checker {
         }
         var fresh: [Local] = []
         self.locals = fresh
+        var freshm: [bool] = []
+        self.local_moved = freshm
         self.scope_depth = 0
         self.self_is_var = false
         self.loop_depth = 0
@@ -789,7 +868,7 @@ struct Checker {
                 self.self_is_var = f.params[p].qual != 0    // `mut self` / `move self` receiver is mutable
             } else {
                 // a `mut`/`move` parameter is a mutable binding; a plain (borrow) parameter is not.
-                self.declare(f.params[p].name, self.param_type(f.params[p]), f.params[p].qual != 0)
+                self.declare(f.params[p].name, self.param_type(f.params[p]), f.params[p].qual != 0, f.params[p].qual == 2)
             }
             p = p + 1
         }
@@ -839,15 +918,18 @@ struct Checker {
 
     fn truncate_locals(mut self, n: int) {
         var kept: [Local] = []
+        var keptm: [bool] = []
         var i = 0
         loop {
             if i >= n {
                 break
             }
-            kept.append(Local{ name: self.locals[i].name, depth: self.locals[i].depth, ty: self.locals[i].ty, is_var: self.locals[i].is_var, owned: self.locals[i].owned, moved: self.locals[i].moved, move_line: self.locals[i].move_line })
+            kept.append(Local{ name: self.locals[i].name, depth: self.locals[i].depth, ty: self.locals[i].ty, is_var: self.locals[i].is_var, owned: self.locals[i].owned })
+            keptm.append(self.local_moved[i])           // a move on an OUTER local persists past an inner scope
             i = i + 1
         }
         self.locals = kept
+        self.local_moved = keptm
     }
 
 
@@ -883,6 +965,7 @@ struct Checker {
         match s {
             case SLet(is_var, name, ty, value) {
                 let vt = self.check_expr(value.value)  // initialiser checked BEFORE the binding is in scope
+                self.consume_move(value.value, value.line)   // `let q = p` moves an owned move-type p
                 if vt == TY_UNIT {
                     self.error("cannot bind a call that returns no value")
                 }
@@ -891,9 +974,9 @@ struct Checker {
                     if assignable(vt, bt, is_int_literal(value.value), is_float_literal(value.value)) == false {
                         self.error("binding annotation does not match the value's type")
                     }
-                    self.declare(name, bt, is_var)     // an annotated binding carries its declared type
+                    self.declare(name, bt, is_var, true)     // an annotated binding carries its declared type
                 } else {
-                    self.declare(name, vt, is_var)     // ...otherwise infer it from the initialiser
+                    self.declare(name, vt, is_var, true)     // ...otherwise infer it from the initialiser
                 }
             }
             case SReturn(value, line) {
@@ -940,9 +1023,31 @@ struct Checker {
                 if ct != TY_INFER && ct != TY_ERROR && ct != TY_BOOL {
                     self.error("'if' condition must be a bool")
                 }
+                // Move dataflow: each branch is checked from the SAME pre-state, then their moved-sets are
+                // merged (OR) — reachability-gated (a diverging branch's moves don't reach the join).
+                let pre = clone_bools(self.local_moved)
                 self.check_block(then_blk)
+                let then_state = clone_bools(self.local_moved)
+                let then_div = block_returns(then_blk)
+                self.local_moved = clone_bools(pre)              // restore: the else path starts fresh
                 if els.len() > 0 {
                     self.check_stmt(els[0])
+                    let else_div = stmt_returns(els[0])
+                    if then_div {
+                        if else_div == false {
+                            // only else reaches the join — keep the else state (current)
+                        } else {
+                            self.local_moved = clone_bools(pre)  // both diverge: join unreachable
+                        }
+                    } else if else_div {
+                        self.local_moved = clone_bools(then_state)   // only then reaches
+                    } else {
+                        self.merge_moved(then_state)             // both reach: OR the moved-sets
+                    }
+                } else {
+                    if then_div == false {
+                        self.local_moved = clone_bools(then_state)   // then fall-through (⊇ pre); implicit else = pre
+                    }
                 }
             }
             case SFor(vname, index_var, iter, body) {
@@ -950,9 +1055,9 @@ struct Checker {
                 self.scope_depth = self.scope_depth + 1
                 self.loop_depth = self.loop_depth + 1
                 let saved = self.locals.len()
-                self.declare(vname, TY_INFER, false)        // a for-loop binding is an immutable borrow
+                self.declare(vname, TY_INFER, false, false)        // a for-loop binding is an immutable borrow
                 if index_var != "" {
-                    self.declare(index_var, TY_INFER, false)
+                    self.declare(index_var, TY_INFER, false, false)
                 }
                 var i = 0
                 loop {
@@ -1047,7 +1152,7 @@ struct Checker {
                         if bi >= cases[ci].pattern.bindings.len() {
                             break
                         }
-                        self.declare(cases[ci].pattern.bindings[bi], TY_INFER, false)   // a match binding is a borrow
+                        self.declare(cases[ci].pattern.bindings[bi], TY_INFER, false, false)   // a match binding is a borrow
                         bi = bi + 1
                     }
                     var si = 0
@@ -1123,6 +1228,10 @@ struct Checker {
                     return TY_ERROR
                 }
                 if self.resolve_local(name) {
+                    let slot = self.local_slot(name)
+                    if slot >= 0 && self.local_moved[slot] {
+                        self.error("use of '{name}' after it was moved")
+                    }
                     return self.local_type(name)
                 }
                 let ve = self.variant_enum(name)     // a bare user-enum variant carries its enum type
@@ -1512,6 +1621,22 @@ fn is_float_literal(e: ps.Expr) -> bool {
 
 // ---- definite-return terminator analysis (exact replica of stage-0 check.c stmt_returns/block_returns)
 // block_returns: a block returns on every path iff some statement does (the rest is then unreachable).
+// clone_bools returns an independent copy of a bool array (a moved-state snapshot — Ember arrays alias on
+// assignment, so a dataflow snapshot must deep-copy).
+fn clone_bools(xs: [bool]) -> [bool] {
+    var out: [bool] = []
+    var i = 0
+    loop {
+        if i >= xs.len() {
+            break
+        }
+        out.append(xs[i])
+        i = i + 1
+    }
+    return out
+}
+
+
 fn block_returns(body: [ps.Stmt]) -> bool {
     var i = 0
     loop {
@@ -1788,7 +1913,7 @@ fn check(src: string) -> bool {
     var tparams: [string] = []
     var locals: [Local] = []
     var diags: [string] = []
-    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, newtypes: newtypes, sf_owner: sf_owner, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, locals: locals, scope_depth: 0, diags: diags }
+    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, newtypes: newtypes, sf_owner: sf_owner, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, locals: locals, local_moved: [], scope_depth: 0, diags: diags }
     c.register(decls)                    // pass 1: NAMES (so forward references resolve)
     c.register_types(decls)              // pass 1b: signatures, fields, variants (needs names registered)
     c.check_all(decls)                   // pass 2: bodies
