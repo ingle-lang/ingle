@@ -111,6 +111,73 @@ fn build_fn_ret_kinds(decls: [ps.Decl]) -> [int] {
 }
 
 
+// c_escape renders a string's bytes as the contents of a C string literal (no surrounding quotes),
+// mirroring cgen_c.c:emit_c_string_literal: `"`/`\` are backslash-escaped, newline/tab/CR use their named
+// escapes, printable ASCII passes through, and any other byte is a 3-digit octal escape.
+fn c_escape(s: string) -> string {
+    let bs = s.bytes()
+    var out = ""
+    var i = 0
+    loop {
+        if i >= bs.len() {
+            break
+        }
+        let c = int(bs[i])
+        if c == 34 || c == 92 {
+            out = out + "\\" + from_char_code(c)        // " or \
+        } else if c == 10 {
+            out = out + "\\n"
+        } else if c == 9 {
+            out = out + "\\t"
+        } else if c == 13 {
+            out = out + "\\r"
+        } else if c >= 32 && c < 127 {
+            out = out + from_char_code(c)
+        } else {
+            out = out + "\\" + from_char_code(48 + (c / 64)) + from_char_code(48 + ((c / 8) % 8)) + from_char_code(48 + (c % 8))
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
+// build_fn_ret_str marks each body-bearing fn (parallel to build_fn_names) that returns a `string`, so a
+// `let g = f()` of a string-returning call is tracked as an owned (droppable) binding.
+fn build_fn_ret_str(decls: [ps.Decl]) -> [bool] {
+    var out: [bool] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.has_body {
+                    out.append(f.ret.len() > 0 && is_string_ty(f.ret[0]))
+                }
+            }
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        out.append(methods[mi].ret.len() > 0 && is_string_ty(methods[mi].ret[0]))
+                    }
+                    mi = mi + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
 // scalar_ctype maps a width-kind to its C storage type (mirrors cgen_c.c:scalar_ctype; M5a uses 0 = i64).
 fn scalar_ctype(kind: int) -> string {
     if kind == 0 {
@@ -195,8 +262,11 @@ struct CgcGen {
     sc_kind: [int]             // ...its scalar TYPE width-kind (for `let` inference), or -1 for a non-scalar
     sc_unboxed: [bool]         // ...is the STORAGE an unboxed C scalar (a scalar `let` vN, re-box on read)?
                                // a param is a Value (a0, read as-is) even when its TYPE is a scalar.
+    sc_drop: [bool]            // ...is this binding an OWNED heap value (a string) dropped at scope exit?
+    indent: int                // current C indentation depth (1 = the function-body level, 4 spaces each)
     fn_names: [string]         // every body-bearing fn in em_fn_N order (free fns + `Struct.method`)
     fn_ret_kind: [int]         // ...each fn's return width-kind (for a `let x = f()` scalar binding)
+    fn_ret_str: [bool]         // ...does each fn return a string (a `let x = f()` owned binding)?
 
 
     fn fresh_var(mut self) -> int {
@@ -206,11 +276,59 @@ struct CgcGen {
     }
 
 
-    fn push(mut self, name: string, cname: string, kind: int, unboxed: bool) {
+    fn push(mut self, name: string, cname: string, kind: int, unboxed: bool, drop: bool) {
         self.sc_name.append(name)
         self.sc_cname.append(cname)
         self.sc_kind.append(kind)
         self.sc_unboxed.append(unboxed)
+        self.sc_drop.append(drop)
+    }
+
+
+    // ind returns the current indentation (4 spaces per level).
+    fn ind(self) -> string {
+        var s = ""
+        var i = 0
+        loop {
+            if i >= self.indent {
+                break
+            }
+            s = s + "    "
+            i = i + 1
+        }
+        return s
+    }
+
+
+    // scope_has_drops reports whether any in-scope binding is an owned heap value needing a drop at exit.
+    fn scope_has_drops(self) -> bool {
+        var i = 0
+        loop {
+            if i >= self.sc_drop.len() {
+                break
+            }
+            if self.sc_drop[i] {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+
+    // emit_drops prints `drop_value(&g_em, <cname>);` for every owned binding, innermost (latest) first —
+    // the order the runtime releases scope-exit owners (cgen_c.c:emit_drops).
+    fn emit_drops(self) {
+        var i = self.sc_drop.len() - 1
+        loop {
+            if i < 0 {
+                break
+            }
+            if self.sc_drop[i] {
+                println("{self.ind()}drop_value(&g_em, {self.sc_cname[i]});")
+            }
+            i = i - 1
+        }
     }
 
 
@@ -302,10 +420,28 @@ struct CgcGen {
             case ECall(callee, args) {
                 return self.emit_call(callee.value, args)
             }
+            case EStr(parts) {
+                return self.emit_str(parts)
+            }
             case _ {
                 return "INT_VAL(0)"
             }
         }
+    }
+
+
+    // emit_str renders a string literal. A single literal run (no interpolation) is an interned, cached
+    // `em_str` via a function-local static, retained on read (cgen_c.c). Interpolation (holes) is deferred.
+    fn emit_str(mut self, parts: [ps.StrPart]) -> string {
+        if parts.len() == 1 && parts[0].hole.len() == 0 {
+            let bytes = c_escape(parts[0].text)
+            let blen = parts[0].text.bytes().len()
+            return "(\{ static Value _li; static char _ls; if (!_ls) \{ _ls = 1; _li = em_str(&g_em, \"{bytes}\", {blen}); \} if (IS_OBJ(_li)) OBJ_RETAIN(AS_OBJ(_li)); _li; \})"
+        }
+        if parts.len() == 0 {
+            return "(\{ static Value _li; static char _ls; if (!_ls) \{ _ls = 1; _li = em_str(&g_em, \"\", 0); \} if (IS_OBJ(_li)) OBJ_RETAIN(AS_OBJ(_li)); _li; \})"
+        }
+        return "INT_VAL(0)"            // interpolation (holes) — deferred to the interp increment
     }
 
 
@@ -341,21 +477,38 @@ struct CgcGen {
     }
 
 
-    // emit_concat_operand wraps a BORROWED operand (an ident read / field read / array index) in the
-    // retain dance so a consuming op (em_add/eq/neq) keeps the owner's reference balanced; anything else
-    // (a literal/call/computed temp) is emitted as-is. (M5a: only the ident-borrow case arises.)
+    // emit_concat_operand renders an operand of a CONSUMING op (em_add/eq/neq — they drop both operands),
+    // or a returned value. An OWNED binding read is MOVED out (own_into_slot — it transfers ownership);
+    // a BORROWED binding read (a non-owned scalar/Value ident) is wrapped in the retain dance so the
+    // owner's reference stays balanced; anything else (a literal/call/computed temp) is emitted as-is.
     fn emit_concat_operand(mut self, e: ps.Expr) -> string {
-        var borrow = false
         match e {
             case EIdent(name) {
-                borrow = true
+                if self.lookup_drop(name) {
+                    return "own_into_slot(&g_em, {self.lookup_cname(name)})"   // owned → move
+                }
+                let v = self.fresh_var()
+                return "(\{ Value v{v} = {self.emit_expr(e)}; if (IS_OBJ(v{v})) OBJ_RETAIN(AS_OBJ(v{v})); v{v}; \})"
             }
             case _ {
             }
         }
-        if borrow {
-            let v = self.fresh_var()
-            return "(\{ Value v{v} = {self.emit_expr(e)}; if (IS_OBJ(v{v})) OBJ_RETAIN(AS_OBJ(v{v})); v{v}; \})"
+        return self.emit_expr(e)
+    }
+
+
+    // emit_call_arg renders a user-call argument: the callee takes OWNERSHIP, so an owned binding is MOVED
+    // in via own_into_slot; a non-owned binding / literal / temp is passed AS-IS (no retain — unlike a
+    // consuming em_add operand, a plain call does not need the owner's reference balanced separately).
+    fn emit_call_arg(mut self, e: ps.Expr) -> string {
+        match e {
+            case EIdent(name) {
+                if self.lookup_drop(name) {
+                    return "own_into_slot(&g_em, {self.lookup_cname(name)})"
+                }
+            }
+            case _ {
+            }
         }
         return self.emit_expr(e)
     }
@@ -376,7 +529,7 @@ struct CgcGen {
                         if i > 0 {
                             s = s + ", "
                         }
-                        s = s + self.emit_expr(args[i])
+                        s = s + self.emit_call_arg(args[i])
                         i = i + 1
                     }
                     return s + ")"
@@ -398,8 +551,15 @@ struct CgcGen {
             }
             case EBinary(op, l, r) {
                 let bid = ps.binop_id(op)
-                // arithmetic / bitwise / shift produce a numeric value; comparisons/logic produce a bool
-                if bid >= 1 && bid <= 5 {
+                // `+` is STRING concat (not a scalar) when either operand is a string, else int addition.
+                if bid == 1 {
+                    if self.is_string_expr(l.value) || self.is_string_expr(r.value) {
+                        return 0 - 1
+                    }
+                    return 0
+                }
+                // other arithmetic / bitwise / shift produce a numeric value; compares/logic produce a bool
+                if bid >= 2 && bid <= 5 {
                     return 0
                 }
                 if bid >= 14 && bid <= 18 {
@@ -431,35 +591,144 @@ struct CgcGen {
 
 
     // emit_stmt prints the C for one statement (4-space indented inside a function body).
+    fn lookup_drop(self, name: string) -> bool {
+        var i = self.sc_name.len() - 1
+        loop {
+            if i < 0 {
+                break
+            }
+            if self.sc_name[i] == name {
+                return self.sc_drop[i]
+            }
+            i = i - 1
+        }
+        return false
+    }
+
+
+    // is_string_expr reports whether an expression produces a STRING (an owned heap value, dropped at
+    // scope exit). M5b: a string literal, an owned string binding, and a string concatenation.
+    fn is_string_expr(self, e: ps.Expr) -> bool {
+        match e {
+            case EStr(parts) {
+                return true
+            }
+            case EIdent(name) {
+                return self.lookup_drop(name)
+            }
+            case EBinary(op, l, r) {
+                if ps.binop_id(op) == 1 {
+                    return self.is_string_expr(l.value) || self.is_string_expr(r.value)
+                }
+                return false
+            }
+            case ECall(callee, args) {
+                match callee.value {
+                    case EIdent(name) {
+                        let fi = self.fn_index(name)
+                        if fi >= 0 {
+                            return self.fn_ret_str[fi]
+                        }
+                    }
+                    case _ {
+                    }
+                }
+                return false
+            }
+            case _ {
+                return false
+            }
+        }
+    }
+
+
     fn emit_stmt(mut self, s: ps.Stmt) {
         match s {
             case SReturn(value, line) {
-                if value.len() > 0 {
-                    println("    return {self.emit_expr(value[0].value)};")
+                if self.scope_has_drops() {
+                    // Evaluate the value into a temp, drop the function's owned locals/params, then return it.
+                    // The value goes through emit_concat_operand (own a moved binding / retain a borrow).
+                    let r = self.fresh_var()
+                    var rv = "INT_VAL(0)"
+                    if value.len() > 0 {
+                        rv = self.emit_concat_operand(value[0].value)
+                    }
+                    println("{self.ind()}\{ Value v{r} = {rv};")
+                    self.indent = self.indent + 1
+                    self.emit_drops()
+                    println("{self.ind()}return v{r};")
+                    self.indent = self.indent - 1
+                    println("{self.ind()}\}")
                 } else {
-                    println("    return UNIT_VAL;")
+                    if value.len() > 0 {
+                        println("{self.ind()}return {self.emit_expr(value[0].value)};")
+                    } else {
+                        println("{self.ind()}return INT_VAL(0);")    // a bare return yields unit (0), like the VM
+                    }
                 }
             }
             case SLet(is_var, name, ty, value) {
                 // The binding's C variable number is taken BEFORE the initialiser (so a `let` is vN and the
                 // initialiser's retain temps follow as v(N+1)…). A scalar binding lowers to a typed C scalar
-                // unboxed from the Value (`int64_t vN = (int64_t)AS_INT(<rhs>)`); a Value binding retains a
-                // borrowed initialiser. (cgen_c.c:STMT_LET; M5a covers the i64 scalar + plain Value cases.)
+                // unboxed from the Value (`int64_t vN = (int64_t)AS_INT(<rhs>)`); a string binding is an
+                // owned Value (dropped at scope exit). (cgen_c.c:STMT_LET.)
                 let id = self.fresh_var()
                 let kind = self.scalar_kind_of(value.value)
                 if kind >= 0 {
                     let ct = scalar_ctype(kind)
-                    println("    {ct} v{id} = ({ct})AS_INT({self.emit_expr(value.value)});")
-                    self.push(name, "v{id}", kind, true)        // unboxed C scalar storage
+                    println("{self.ind()}{ct} v{id} = ({ct})AS_INT({self.emit_expr(value.value)});")
+                    self.push(name, "v{id}", kind, true, false)        // unboxed C scalar storage
                 } else {
-                    println("    Value v{id} = {self.emit_concat_operand(value.value)};")
-                    self.push(name, "v{id}", 0 - 1, false)
+                    let owned = self.is_string_expr(value.value)
+                    println("{self.ind()}Value v{id} = {self.emit_concat_operand(value.value)};")
+                    self.push(name, "v{id}", 0 - 1, false, owned)
+                }
+            }
+            case SExpr(expr) {
+                // A bare expression statement. M5b: a builtin call (`println(x)`) whose result is discarded
+                // → `(void)(em_<name>(&g_em, <args>));`. The args are borrowed (read as-is).
+                match expr.value {
+                    case ECall(callee, args) {
+                        match callee.value {
+                            case EIdent(name) {
+                                let nat = native_cfn(name)
+                                if nat != "" {
+                                    var s = "{self.ind()}(void)({nat}(&g_em"
+                                    var i = 0
+                                    loop {
+                                        if i >= args.len() {
+                                            break
+                                        }
+                                        s = s + ", " + self.emit_expr(args[i])
+                                        i = i + 1
+                                    }
+                                    println(s + "));")
+                                }
+                            }
+                            case _ {
+                            }
+                        }
+                    }
+                    case _ {
+                    }
                 }
             }
             case _ {
             }
         }
     }
+}
+
+
+// native_cfn maps a builtin name to its em_* runtime C function (M5b: the print family), or "" if not one.
+fn native_cfn(name: string) -> string {
+    if name == "println" {
+        return "em_println"
+    }
+    if name == "print" {
+        return "em_print"
+    }
+    return ""
 }
 
 
@@ -501,11 +770,23 @@ fn binop_has_nk(bid: int) -> bool {
 // emit_fn_body prints a single function's C definition: `static Value em_fn_N(params) { … }` with the
 // implicit trailing `return INT_VAL(0);` stage-0 always emits. The params are pushed into scope as the
 // Value bindings a0, a1, … (a method's `self` is the leading a0). (C braces escaped `\{`/`\}`.)
-fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, fn_names: [string], fn_ret_kind: [int]) {
-    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], fn_names: fn_names, fn_ret_kind: fn_ret_kind }
+fn is_string_ty(ty: ps.Ty) -> bool {
+    match ty {
+        case TyName(qual, name) {
+            return qual == "" && name == "string"
+        }
+        case _ {
+            return false
+        }
+    }
+}
+
+
+fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, fn_names: [string], fn_ret_kind: [int], fn_ret_str: [bool]) {
+    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], indent: 1, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str }
     var ai = 0
     if has_self {
-        g.push("self", "a0", 0 - 1, false)
+        g.push("self", "a0", 0 - 1, false, false)
         ai = 1
     }
     var p = 0
@@ -515,11 +796,14 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, fn_names: [string], fn_r
         }
         if f.params[p].is_self == false {
             // a param's TYPE scalar-kind (so `let x = a` infers a scalar) — but its STORAGE is the Value aN.
+            // A string param is an OWNED value, dropped at every exit.
             var pk = 0 - 1
+            var owned = false
             if f.params[p].ty.len() > 0 {
                 pk = ty_scalar_kind(f.params[p].ty[0])
+                owned = is_string_ty(f.params[p].ty[0])
             }
-            g.push(f.params[p].name, "a{ai}", pk, false)
+            g.push(f.params[p].name, "a{ai}", pk, false, owned)
             ai = ai + 1
         }
         p = p + 1
@@ -532,6 +816,10 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, fn_names: [string], fn_r
         }
         g.emit_stmt(f.body[i])
         i = i + 1
+    }
+    // the implicit trailing return — preceded by the owned-binding drops on the fall-through path
+    if g.scope_has_drops() {
+        g.emit_drops()
     }
     println("    return INT_VAL(0);")
     println("\}")
@@ -661,6 +949,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
     let total = fn_count(decls)
     let fn_names = build_fn_names(decls)
     let fn_ret_kind = build_fn_ret_kinds(decls)
+    let fn_ret_str = build_fn_ret_str(decls)
     println("// Generated by `emberc --emit=c` from {filename}. Do not edit.")
     println("// The bytecode VM is the reference semantics; tests/native diffs the two.")
     println("#include \"ember_rt.h\"")
@@ -757,7 +1046,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
         match decls[k] {
             case DFn(f) {
                 if f.has_body {
-                    emit_fn_body(f, b, false, fn_names, fn_ret_kind)
+                    emit_fn_body(f, b, false, fn_names, fn_ret_kind, fn_ret_str)
                     b = b + 1
                     if b < total {
                         println("")
@@ -771,7 +1060,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
                         break
                     }
                     if methods[mi].has_body {
-                        emit_fn_body(methods[mi], b, true, fn_names, fn_ret_kind)
+                        emit_fn_body(methods[mi], b, true, fn_names, fn_ret_kind, fn_ret_str)
                         b = b + 1
                         if b < total {
                             println("")
