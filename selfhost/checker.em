@@ -287,6 +287,41 @@ struct Checker {
 
 
     // ---- Pass 1: register all top-level NAMES so forward references resolve -----------------------------
+    // type_exists reports whether `name` is already a declared type (a struct/newtype, an enum, or an
+    // interface).
+    fn type_exists(self, name: string) -> bool {
+        return index_of(self.structs, name) >= 0 || index_of(self.enums, name) >= 0 || index_of(self.ifaces, name) >= 0
+    }
+
+
+    // is_fieldless_concrete reports whether `t` is a CONCRETE value type that cannot carry fields — a
+    // primitive (int/float/bool/string/sized) or a known enum. A struct, an interface value, or an
+    // unmodelled (TY_INFER) / aliased object is NOT (it stays lenient — field access may be valid).
+    fn is_fieldless_concrete(self, t: int) -> bool {
+        if t == TY_INT || t == TY_FLOAT || t == TY_BOOL || t == TY_STRING {
+            return true
+        }
+        if t >= TY_I8 && t <= TY_F32 {
+            return true
+        }
+        if t >= ENUM_BASE && t < ENUM_BASE + self.enums.len() {
+            return true
+        }
+        return false
+    }
+
+
+    // is_duplicate_type reports a duplicate TYPE declaration. The prelude enums Option/Result are pre-seeded
+    // but user code MAY redeclare them (a self-contained test often defines its own `enum Option<T>`), so a
+    // redeclaration of a prelude name is NOT a duplicate.
+    fn is_duplicate_type(self, name: string) -> bool {
+        if name == "Option" || name == "Result" {
+            return false
+        }
+        return self.type_exists(name)
+    }
+
+
     fn register(mut self, decls: [ps.Decl]) {
         var i = 0
         loop {
@@ -295,6 +330,9 @@ struct Checker {
             }
             match decls[i] {
                 case DFn(f) {
+                    if index_of(self.fns, f.name) >= 0 {
+                        self.error("a function with this name is already declared in this module")
+                    }
                     self.fns.append(f.name)
                     self.fn_names.append(f.name)
                     var pc = 0
@@ -311,9 +349,15 @@ struct Checker {
                     self.fn_arity.append(pc)
                 }
                 case DStruct(name, generics, impls, fields, methods) {
+                    if self.is_duplicate_type(name) {
+                        self.error("a type with this name is already declared in this module")
+                    }
                     self.structs.append(name)
                 }
                 case DEnum(name, generics, impls, variants) {
+                    if self.is_duplicate_type(name) {
+                        self.error("a type with this name is already declared in this module")
+                    }
                     self.enums.append(name)
                     var v = 0
                     loop {
@@ -325,6 +369,9 @@ struct Checker {
                     }
                 }
                 case DInterface(name, generics, methods) {
+                    if self.is_duplicate_type(name) {
+                        self.error("a type with this name is already declared in this module")
+                    }
                     self.ifaces.append(name)         // an interface is a type NAME but not a struct id
                 }
                 case DImport(path, alias) {
@@ -344,6 +391,9 @@ struct Checker {
                     }
                 }
                 case DType(name, base) {
+                    if self.is_duplicate_type(name) {
+                        self.error("a type with this name is already declared in this module")
+                    }
                     self.structs.append(name)        // a newtype name occupies a type slot (is_known)
                     self.fns.append(name)            // ...and a constructor: UserId(x)
                     self.newtypes.append(name)        // ...but its VALUE stays lenient (not a struct type)
@@ -716,6 +766,9 @@ struct Checker {
         match s {
             case SLet(is_var, name, ty, value) {
                 let vt = self.check_expr(value.value)  // initialiser checked BEFORE the binding is in scope
+                if vt == TY_UNIT {
+                    self.error("cannot bind a call that returns no value")
+                }
                 if ty.len() > 0 {
                     let bt = self.annotation_type(ty[0])
                     if assignable(vt, bt, is_int_literal(value.value), is_float_literal(value.value)) == false {
@@ -729,7 +782,9 @@ struct Checker {
             case SReturn(value, line) {
                 if value.len() > 0 {
                     let vt = self.check_expr(value[0].value)
-                    if self.current_return != TY_UNIT && self.current_return != TY_ERROR && self.current_return != TY_INFER {
+                    if self.current_return == TY_UNIT {
+                        self.error("cannot return a value from a function with no declared return type")
+                    } else if self.current_return != TY_ERROR && self.current_return != TY_INFER {
                         if assignable(vt, self.current_return, is_int_literal(value[0].value), is_float_literal(value[0].value)) == false {
                             self.error("returned value's type does not match the function's return type")
                         }
@@ -818,6 +873,11 @@ struct Checker {
                 if st >= ENUM_BASE && st < ENUM_BASE + self.enums.len() {
                     known = true
                     eid = st - ENUM_BASE
+                }
+                // a CONCRETE non-enum subject (int/string/bool/struct/…) can't be matched; an unmodelled
+                // (TY_INFER) or error subject stays lenient.
+                if known == false && st != TY_INFER && st != TY_ERROR {
+                    self.error("'match' requires an enum value")
                 }
                 var vnames: [string] = []
                 var varity: [int] = []
@@ -1057,6 +1117,9 @@ struct Checker {
                         let recv = self.check_expr(object.value)
                         if recv >= STRUCT_BASE && recv < ENUM_BASE {
                             let mr = self.method_row(recv - STRUCT_BASE, mname)
+                            if mr < 0 && mname != "clone" {
+                                self.error("no such method on this struct")   // `clone` is a built-in deep copy
+                            }
                             if mr >= 0 {
                                 if args.len() != self.sm_arity[mr] {
                                     self.error("wrong number of arguments to method")
@@ -1085,7 +1148,12 @@ struct Checker {
                 return TY_INFER
             }
             case EGet(object, name) {
-                self.check_expr(object.value)        // `name` is a field/method, not a variable
+                let ot = self.check_expr(object.value)   // `name` is a field/method, not a variable
+                // a CONCRETE non-struct value (a primitive or an enum) has no fields; an INFER/aliased/struct
+                // object stays lenient.
+                if self.is_fieldless_concrete(ot) {
+                    self.error("field access requires a struct value")
+                }
                 return TY_INFER
             }
             case EIndex(object, index) {
@@ -1193,6 +1261,12 @@ struct Checker {
                 if is_builtin(name) == false && self.is_known(name) == false {
                     self.error("undefined variable")
                 }
+            }
+            case EGet(object, mname) {
+                // a method-call RECEIVER (`recv.m(...)`): validate the receiver only — the method itself is
+                // resolved by the ECall handler. Do NOT route through the bare-EGet field-access check (a
+                // method on a string/array is not a struct field).
+                self.check_expr(object.value)
             }
             case _ {
                 self.check_expr(callee)
