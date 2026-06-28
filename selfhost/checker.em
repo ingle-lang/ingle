@@ -105,6 +105,10 @@ struct Local {
     depth: int
     ty: int                    // the binding's SemType (TY_INFER when not yet inferable)
     is_var: bool               // true for `var`/`mut`/`move`; false for `let` and borrowed bindings
+    // ---- ownership dataflow state (the move/linearity engine) ----
+    owned: bool                // owns its value (a local, or a `move` param) vs borrows it (a plain param)
+    moved: bool                // value moved out on SOME reaching path — a later use is an error (OR-merge)
+    move_line: int             // source line of the move (0 = not moved), for the diagnostic note
 }
 
 
@@ -179,7 +183,7 @@ struct Checker {
                 i = i - 1
             }
         }
-        self.locals.append(Local{ name: name, depth: self.scope_depth, ty: ty, is_var: is_var })
+        self.locals.append(Local{ name: name, depth: self.scope_depth, ty: ty, is_var: is_var, owned: false, moved: false, move_line: 0 })
     }
 
 
@@ -840,7 +844,7 @@ struct Checker {
             if i >= n {
                 break
             }
-            kept.append(Local{ name: self.locals[i].name, depth: self.locals[i].depth, ty: self.locals[i].ty, is_var: self.locals[i].is_var })
+            kept.append(Local{ name: self.locals[i].name, depth: self.locals[i].depth, ty: self.locals[i].ty, is_var: self.locals[i].is_var, owned: self.locals[i].owned, moved: self.locals[i].moved, move_line: self.locals[i].move_line })
             i = i + 1
         }
         self.locals = kept
