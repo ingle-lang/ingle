@@ -350,5 +350,39 @@ if [ -f "$EMBERCSRC" ] && [ "$HAVE_CC" -eq 1 ]; then
     rm -f "$selfbin"
 fi
 
+# ---- Stage 6: the self-hosted C-EMIT backend (selfhost/cgen_c.em via cgen_c_dump.em) ----------------
+# The M5 native backend (AST → C). Each fixture's self-hosted C output must be byte-identical to stage-0
+# `emberc --emit=c`, on BOTH the VM and a native build — the same differential as every other stage. Built
+# incrementally (M5a = int scalars), so the gated set grows as features land.
+CCSRC="$ROOT/selfhost/cgen_c_dump.em"
+if [ -f "$CCSRC" ]; then
+    ccbin=""
+    if [ "$HAVE_CC" -eq 1 ]; then
+        ccbin="${TMPDIR:-/tmp}/emberc_selfhost_cgenc_$$"
+        if ! (cd "$ROOT" && "$BIN" -o "$ccbin" selfhost/cgen_c_dump.em >/dev/null 2>&1); then
+            echo "FAIL    selfhost/cgen_c_dump.em  (native compile failed)"
+            fail=$((fail + 1)); ccbin=""
+        fi
+    fi
+    ccpass=0; ccfail=0
+    for src in $(cd "$ROOT" && find tests/selfhost/cgen_c -name '*.em' 2>/dev/null | sort); do
+        oracle=$(cd "$ROOT" && "$BIN" --emit=c "$src" 2>/dev/null)
+        if [ -n "$ccbin" ]; then
+            actual=$(cd "$ROOT" && "$ccbin" "$src" 2>/dev/null | sed '/^=> 0$/d')
+        else
+            actual=$(cd "$ROOT" && "$BIN" --emit=run selfhost/cgen_c_dump.em "$src" 2>/dev/null | sed '/^=> 0$/d')
+        fi
+        if [ "$oracle" = "$actual" ]; then
+            ccpass=$((ccpass + 1))
+        else
+            ccfail=$((ccfail + 1))
+            echo "FAIL    self-hosted C-emit differs from stage-0 on $src"
+        fi
+    done
+    [ -n "$ccbin" ] && rm -f "$ccbin"
+    echo "selfhost cgen_c: $ccpass/$((ccpass + ccfail)) M5 C-emit fixtures byte-identical to stage-0 --emit=c"
+    pass=$((pass + ccpass)); fail=$((fail + ccfail))
+fi
+
 echo "selfhost: passed $pass, failed $fail"
 [ "$fail" -eq 0 ]
