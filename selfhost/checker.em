@@ -45,6 +45,14 @@ fn is_numeric(t: int) -> bool {
 }
 
 
+// is_numeric_typename reports whether a name is a numeric WIDTH-conversion spelling (`u8(x)`, `i32(x)`)
+// — the exact set check.c:numeric_typename recognises. Note `float`/`bool`/`string` are NOT here (only
+// `f32`/`f64`/`i*`/`u*`/`int`): a call to a free function so named parses as a conversion (OFI-066).
+fn is_numeric_typename(name: string) -> bool {
+    return name == "i8" || name == "i16" || name == "i32" || name == "i64" || name == "int" || name == "u8" || name == "u16" || name == "u32" || name == "u64" || name == "f32" || name == "f64"
+}
+
+
 // scalar_class collapses a SemType to a coarse comparable class: 1 = any numeric width, 2 = string,
 // 3 = bool, 0 = everything else (struct/enum/array/Ptr/unit/unmodelled — compared leniently, i.e. skipped).
 fn scalar_class(t: int) -> int {
@@ -572,6 +580,11 @@ struct Checker {
                 case DFn(f) {
                     if index_of(self.fns, f.name) >= 0 {
                         self.error("a function with this name is already declared in this module")
+                    }
+                    // a FREE function named like a numeric width type is unreachable — a call `i32(x)` parses
+                    // as a width conversion before free-fn resolution (OFI-066). (Methods use `x.i32()`: fine.)
+                    if is_numeric_typename(f.name) {
+                        self.error("a function cannot be named like a numeric type (a call would parse as a width conversion)")
                     }
                     self.fns.append(f.name)
                     self.fn_names.append(f.name)
