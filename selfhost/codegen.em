@@ -138,7 +138,7 @@ fn build_structs(decls: [ps.Decl]) -> StructTable {
             break
         }
         match decls[n] {
-            case DStruct(name, generics, impls, fields, methods) {
+            case DStruct(name, generics, impls, fields, methods, kind) {
                 names.append(name)
             }
             case DEnum(name, generics, impls, variants) {
@@ -168,7 +168,7 @@ fn build_structs(decls: [ps.Decl]) -> StructTable {
             break
         }
         match decls[i] {
-            case DStruct(name, generics, impls, fields, methods) {
+            case DStruct(name, generics, impls, fields, methods, kind) {
                 var fi = 0
                 loop {
                     if fi >= fields.len() {
@@ -854,7 +854,7 @@ fn build_struct_instances(decls: [ps.Decl], snames: [string]) -> [string] {
                     c.walk_body(f.body)
                 }
             }
-            case DStruct(name, generics, impls, fields, methods) {
+            case DStruct(name, generics, impls, fields, methods, kind) {
                 var mi = 0
                 loop {
                     if mi >= methods.len() {
@@ -3896,7 +3896,7 @@ fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string]) -
             break
         }
         match decls[i] {
-            case DStruct(name, generics, impls, fields, methods) {
+            case DStruct(name, generics, impls, fields, methods, kind) {
                 var mi = 0
                 loop {
                     if mi >= methods.len() {
@@ -3939,7 +3939,7 @@ fn build_fn_names(decls: [ps.Decl]) -> [string] {
             break
         }
         match decls[i] {
-            case DStruct(name, generics, impls, fields, methods) {
+            case DStruct(name, generics, impls, fields, methods, kind) {
                 var mi = 0
                 loop {
                     if mi >= methods.len() {

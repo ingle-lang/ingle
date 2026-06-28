@@ -133,7 +133,7 @@ fn main() -> int {
             break
         }
         match decls[i] {
-            case DStruct(name, generics, impls, fields, methods) {
+            case DStruct(name, generics, impls, fields, methods, kind) {
                 var mi = 0
                 loop {
                     if mi >= methods.len() {

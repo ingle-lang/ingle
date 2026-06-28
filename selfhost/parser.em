@@ -140,7 +140,7 @@ struct FnDecl {
 
 enum Decl {
     DFn(f: FnDecl)
-    DStruct(name: string, generics: [GenericParam], impls: [string], fields: [Field], methods: [FnDecl])
+    DStruct(name: string, generics: [GenericParam], impls: [string], fields: [Field], methods: [FnDecl], kind: int)
     DEnum(name: string, generics: [GenericParam], impls: [string], variants: [Variant])
     DInterface(name: string, generics: [GenericParam], methods: [FnDecl])
     DImport(path: string, alias: string)
@@ -540,8 +540,8 @@ fn p_decl(d: Decl, depth: int) {
         case DFn(f) {
             p_fn(f, depth)
         }
-        case DStruct(name, generics, impls, fields, methods) {
-            println("{pad}Struct {name}")
+        case DStruct(name, generics, impls, fields, methods, kind) {
+            println("{pad}Struct {name}")              // kind (rc/resource) is intentionally not printed (matches stage-0)
             p_generics(generics, depth + 1)
             if impls.len() > 0 {
                 var s = "{ind(depth + 1)}implements:"
@@ -1086,12 +1086,16 @@ struct Parser {
             let w = self.peek().text
             if w == "rc" || w == "resource" {
                 let _ = self.advance()
-                return self.parse_struct()
+                var k = 1
+                if w == "resource" {
+                    k = 2
+                }
+                return self.parse_struct(k)
             }
         }
         match self.peek_kind() {
             case TFn { return DFn(self.parse_fn(true)) }
-            case TStruct { return self.parse_struct() }
+            case TStruct { return self.parse_struct(0) }
             case TEnum { return self.parse_enum() }
             case TInterface { return self.parse_interface() }
             case TImport { return self.parse_import() }
@@ -1300,7 +1304,7 @@ struct Parser {
     }
 
 
-    fn parse_struct(mut self) -> Decl {
+    fn parse_struct(mut self, kind: int) -> Decl {   // kind: 0 plain, 1 rc, 2 resource
         let _ = self.advance()                      // struct
         let name = self.advance().text
         let generics = self.parse_generics()
@@ -1334,7 +1338,7 @@ struct Parser {
             }
         }
         let _ = self.expect(TAG_RBRACE)
-        return DStruct(name, generics, impls, fields, methods)
+        return DStruct(name, generics, impls, fields, methods, kind)
     }
 
 

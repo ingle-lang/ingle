@@ -160,6 +160,7 @@ struct Checker {
     fg_param: [int]            // ...the generic-parameter index within that function
     fg_bound: [string]         // ...one bound name (an interface, or "Copy") on that param
     struct_garity: [int]       // ...generic type-parameter count per struct (parallel to `structs`; 0 for a newtype)
+    struct_kind: [int]         // ...struct kind (0 plain / 1 rc / 2 resource), parallel to `structs` (0 for a newtype)
     sg_struct: [int]           // struct generic-bound table: struct id (one row per param-bound)
     sg_param: [int]            // ...the generic-parameter index within that struct
     sg_bound: [string]         // ...one bound name (an interface, or "Copy") on that param
@@ -625,12 +626,13 @@ struct Checker {
                         self.fn_ret.append(TY_UNIT)
                     }
                 }
-                case DStruct(name, generics, impls, fields, methods) {
+                case DStruct(name, generics, impls, fields, methods, kind) {
                     if self.is_duplicate_type(name) {
                         self.error("a type with this name is already declared in this module")
                     }
                     self.structs.append(name)
                     self.struct_garity.append(generics.len())
+                    self.struct_kind.append(kind)        // 0 plain, 1 rc, 2 resource
                 }
                 case DEnum(name, generics, impls, variants) {
                     if self.is_duplicate_type(name) {
@@ -723,6 +725,7 @@ struct Checker {
                     }
                     self.structs.append(name)        // a newtype name occupies a type slot (is_known)
                     self.struct_garity.append(0)     // ...a newtype is never generic (keep parallel to structs)
+                    self.struct_kind.append(0)       // ...and not rc/resource
                     self.fns.append(name)            // ...and a constructor: UserId(x)
                     self.newtypes.append(name)        // ...its VALUE carries a distinct NEWTYPE band
                     self.newtype_base.append(self.annotation_type(base.value))   // ...over this base type (for unwrap)
@@ -818,7 +821,7 @@ struct Checker {
                         e = e + 1
                     }
                 }
-                case DStruct(name, generics, impls, fields, methods) {
+                case DStruct(name, generics, impls, fields, methods, kind) {
                     let sid = index_of(self.structs, name)
                     self.tparams = gp_names(generics)        // the struct's own type-params shadow types
                     // Record this struct's generic-parameter bounds (one row per param-bound) and its
@@ -932,6 +935,12 @@ struct Checker {
                         if ft == TY_PTR && has_drop == false {
                             self.error("a 'Ptr' is a linear FFI handle and cannot be a struct field")
                         }
+                        // An `rc struct` is deeply immutable and shared, so each field must be immutably
+                        // shareable — a scalar, string, enum, or another rc struct. An array / plain struct /
+                        // Ptr / channel carries a mutable interior into a shared value (check.c:7571).
+                        if kind == 1 && self.rc_field_ok(ft) == false {
+                            self.error("an 'rc struct' field must be immutably shareable (a scalar, string, enum, or another 'rc struct')")
+                        }
                         fi = fi + 1
                     }
                     var mi = 0
@@ -1005,7 +1014,7 @@ struct Checker {
                     self.tparams = gp_names(f.generics)
                     self.check_fn(f)
                 }
-                case DStruct(name, generics, impls, fields, methods) {
+                case DStruct(name, generics, impls, fields, methods, kind) {
                     var m = 0
                     loop {
                         if m >= methods.len() {
@@ -1185,6 +1194,30 @@ struct Checker {
             return bound == "Hash" || bound == "Eq"
         }
         return false
+    }
+
+
+    // rc_field_ok reports whether a SemType is a legal `rc struct` field — immutably shareable: a scalar,
+    // string, enum, newtype (its scalar base), or ANOTHER rc struct. An array / plain struct / Ptr / fn /
+    // channel can carry a mutable interior into a shared value, so it is rejected. Unmodelled (TY_INFER)
+    // types stay lenient. Mirrors check.c:7571.
+    fn rc_field_ok(self, ft: int) -> bool {
+        if ft == TY_INFER || ft == TY_ERROR {
+            return true
+        }
+        if ft == TY_BOOL || ft == TY_STRING || is_numeric(ft) {
+            return true
+        }
+        if ft >= NEWTYPE_BASE {
+            return true                          // a newtype over a scalar/string is shareable
+        }
+        if ft >= ENUM_BASE && ft < NEWTYPE_BASE {
+            return true                          // an enum is a shareable value
+        }
+        if ft >= STRUCT_BASE && ft < ENUM_BASE {
+            return self.struct_kind[ft - STRUCT_BASE] == 1   // another rc struct, but NOT a plain struct
+        }
+        return false                             // array / Ptr / fn / channel — a mutable interior
     }
 
 
@@ -1412,6 +1445,67 @@ struct Checker {
     // check_immutable_root emits the field/element-mutation diagnostic when an assignment `root.f = v` /
     // `root[i] = v` is rooted at an IMMUTABLE binding (a `let` local, a borrowed param, or a plain `self`).
     // A root that is not a resolvable local (a call result, a global) is left lenient — never flagged.
+    // is_rc_struct reports whether a SemType is a concrete `rc struct` band.
+    fn is_rc_struct(self, t: int) -> bool {
+        if t >= STRUCT_BASE && t < ENUM_BASE {
+            return self.struct_kind[t - STRUCT_BASE] == 1
+        }
+        return false
+    }
+
+
+    // path_type resolves the concrete SemType of an lvalue PATH (`h.cfg.port`) by walking the struct-field
+    // table from a known local root — without the global ripple of making check_expr's EGet return field
+    // types. Anything not a known struct path stays TY_INFER (lenient). Read-only (no diagnostics).
+    fn path_type(self, e: ps.Expr) -> int {
+        match e {
+            case EIdent(name) {
+                if self.resolve_local(name) {
+                    return self.local_type(name)
+                }
+                return TY_INFER
+            }
+            case EGet(object, fname) {
+                let ot = self.path_type(object.value)
+                if ot >= STRUCT_BASE && ot < ENUM_BASE {
+                    let row = self.field_row(ot - STRUCT_BASE, fname)
+                    if row >= 0 {
+                        return self.sf_type[row]
+                    }
+                }
+                return TY_INFER
+            }
+            case _ {
+                return TY_INFER
+            }
+        }
+    }
+
+
+    // mutation_through_rc reports whether an assignment target writes THROUGH an `rc` value at any path step
+    // (`h.cfg.port = …` where `h.cfg` is an rc struct) — illegal even when the root binding is mutable, since
+    // an rc struct is deeply immutable and shared (the laundering case; check.c:5896).
+    fn mutation_through_rc(self, target: ps.Expr) -> bool {
+        match target {
+            case EGet(object, fname) {
+                if self.is_rc_struct(self.path_type(object.value)) {
+                    return true
+                }
+                return self.mutation_through_rc(object.value)
+            }
+            case EIndex(object, index) {
+                if self.is_rc_struct(self.path_type(object.value)) {
+                    return true
+                }
+                return self.mutation_through_rc(object.value)
+            }
+            case _ {
+                return false
+            }
+        }
+    }
+
+
     fn check_immutable_root(mut self, target: ps.Expr, is_field: bool) {
         let root = assign_root_ident(target)
         if root.len() == 0 {
@@ -1555,10 +1649,16 @@ struct Checker {
                     case EGet(object, fname) {
                         self.check_expr(target.value)
                         self.check_immutable_root(target.value, true)
+                        if self.mutation_through_rc(target.value) {
+                            self.error("cannot assign through a field or element of an 'rc' value; an rc struct is deeply immutable and shared")
+                        }
                     }
                     case EIndex(object, index) {
                         self.check_expr(target.value)
                         self.check_immutable_root(target.value, false)
+                        if self.mutation_through_rc(target.value) {
+                            self.error("cannot assign through a field or element of an 'rc' value; an rc struct is deeply immutable and shared")
+                        }
                     }
                     case _ {
                         self.check_expr(target.value)
@@ -2883,6 +2983,7 @@ fn check(src: string) -> bool {
     var fg_param: [int] = []
     var fg_bound: [string] = []
     var struct_garity: [int] = []
+    var struct_kind: [int] = []
     var sg_struct: [int] = []
     var sg_param: [int] = []
     var sg_bound: [string] = []
@@ -2913,7 +3014,7 @@ fn check(src: string) -> bool {
     var tparams: [string] = []
     var locals: [Local] = []
     var diags: [string] = []
-    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_ret: fn_ret, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, fn_ptparam: fn_ptparam, fn_extern: fn_extern, fg_name: fg_name, fg_param: fg_param, fg_bound: fg_bound, struct_garity: struct_garity, sg_struct: sg_struct, sg_param: sg_param, sg_bound: sg_bound, simpl_struct: simpl_struct, simpl_iface: simpl_iface, newtypes: newtypes, newtype_base: newtype_base, sf_owner: sf_owner, sf_tparam: sf_tparam, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_moveself: sm_moveself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, nursery_depth: 0, locals: locals, local_moved: [], local_consumed: [], loop_break_consumed: [], loop_saw_break: false, local_unbounded_tp: [], scope_depth: 0, diags: diags }
+    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_ret: fn_ret, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, fn_ptparam: fn_ptparam, fn_extern: fn_extern, fg_name: fg_name, fg_param: fg_param, fg_bound: fg_bound, struct_garity: struct_garity, struct_kind: struct_kind, sg_struct: sg_struct, sg_param: sg_param, sg_bound: sg_bound, simpl_struct: simpl_struct, simpl_iface: simpl_iface, newtypes: newtypes, newtype_base: newtype_base, sf_owner: sf_owner, sf_tparam: sf_tparam, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_moveself: sm_moveself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, nursery_depth: 0, locals: locals, local_moved: [], local_consumed: [], loop_break_consumed: [], loop_saw_break: false, local_unbounded_tp: [], scope_depth: 0, diags: diags }
     c.register(decls)                    // pass 1: NAMES (so forward references resolve)
     c.register_types(decls)              // pass 1b: signatures, fields, variants (needs names registered)
     c.check_all(decls)                   // pass 2: bodies
