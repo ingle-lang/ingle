@@ -913,12 +913,14 @@ struct Checker {
                     // resource struct defines a `drop` method — so that is the sound proxy for the exception.
                     var has_drop = false
                     var dmi = 0
+                    var drop_idx = 0 - 1
                     loop {
                         if dmi >= methods.len() {
                             break
                         }
                         if methods[dmi].name == "drop" {
                             has_drop = true
+                            drop_idx = dmi
                         }
                         dmi = dmi + 1
                     }
@@ -934,6 +936,15 @@ struct Checker {
                         self.sf_tparam.append(ty_tparam_index(generics, fields[fi].ty))
                         if ft == TY_PTR && has_drop == false {
                             self.error("a 'Ptr' is a linear FFI handle and cannot be a struct field")
+                        }
+                        // OFI-122: a `resource` struct's `drop` MUST close every linear Ptr handle field — a
+                        // `drop` that never references the field leaks it (check.c:5635). (References-anywhere
+                        // is a sound under-approximation: a real close passes `self.field` to `fclose`, so a
+                        // valid drop always references it; a borrow-but-no-close drop is a rare missed case.)
+                        if kind == 2 && ft == TY_PTR && drop_idx >= 0 {
+                            if stmts_use_self_field(methods[drop_idx].body, fields[fi].name) == false {
+                                self.error("a 'resource' drop does not close its 'Ptr' handle field on every path")
+                            }
                         }
                         // An `rc struct` is deeply immutable and shared, so each field must be immutably
                         // shareable — a scalar, string, enum, or another rc struct. An array / plain struct /
@@ -2724,6 +2735,176 @@ fn contains(xs: [string], v: string) -> bool {
 
 
 // gp_names extracts the names of a generic-parameter list (so they can shadow same-named types).
+// expr_uses_self_field reports whether `self.<field>` appears anywhere in an expression (used to verify a
+// `resource` drop references — and thus closes — each Ptr handle field). Recurses through the expression
+// forms a drop body realistically uses; leaf/other forms return false.
+fn expr_uses_self_field(e: ps.Expr, field: string) -> bool {
+    match e {
+        case EGet(object, fname) {
+            match object.value {
+                case EIdent(n) {
+                    if n == "self" && fname == field {
+                        return true
+                    }
+                }
+                case _ {
+                }
+            }
+            return expr_uses_self_field(object.value, field)
+        }
+        case ECall(callee, args) {
+            if expr_uses_self_field(callee.value, field) {
+                return true
+            }
+            var i = 0
+            loop {
+                if i >= args.len() {
+                    break
+                }
+                if expr_uses_self_field(args[i], field) {
+                    return true
+                }
+                i = i + 1
+            }
+            return false
+        }
+        case EUnary(op, operand) {
+            return expr_uses_self_field(operand.value, field)
+        }
+        case EBinary(op, l, r) {
+            return expr_uses_self_field(l.value, field) || expr_uses_self_field(r.value, field)
+        }
+        case EIndex(object, index) {
+            return expr_uses_self_field(object.value, field) || expr_uses_self_field(index.value, field)
+        }
+        case ETry(operand) {
+            return expr_uses_self_field(operand.value, field)
+        }
+        case ERange(lo, hi) {
+            return expr_uses_self_field(lo.value, field) || expr_uses_self_field(hi.value, field)
+        }
+        case EArray(elems, lines) {
+            var i = 0
+            loop {
+                if i >= elems.len() {
+                    break
+                }
+                if expr_uses_self_field(elems[i], field) {
+                    return true
+                }
+                i = i + 1
+            }
+            return false
+        }
+        case EStr(parts) {
+            var i = 0
+            loop {
+                if i >= parts.len() {
+                    break
+                }
+                if parts[i].hole.len() == 1 {
+                    if expr_uses_self_field(parts[i].hole[0], field) {
+                        return true
+                    }
+                }
+                i = i + 1
+            }
+            return false
+        }
+        case EStructLit(ty, fields) {
+            var i = 0
+            loop {
+                if i >= fields.len() {
+                    break
+                }
+                if expr_uses_self_field(fields[i].value, field) {
+                    return true
+                }
+                i = i + 1
+            }
+            return false
+        }
+        case _ {
+            return false
+        }
+    }
+}
+
+
+// stmts_use_self_field / stmt_uses_self_field walk a statement list for `self.<field>` (drop-body scan).
+fn stmts_use_self_field(body: [ps.Stmt], field: string) -> bool {
+    var i = 0
+    loop {
+        if i >= body.len() {
+            break
+        }
+        if stmt_uses_self_field(body[i], field) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+
+fn stmt_uses_self_field(s: ps.Stmt, field: string) -> bool {
+    match s {
+        case SLet(iv, n, ty, v) {
+            return expr_uses_self_field(v.value, field)
+        }
+        case SReturn(v, line) {
+            if v.len() > 0 {
+                return expr_uses_self_field(v[0].value, field)
+            }
+            return false
+        }
+        case SExpr(e) {
+            return expr_uses_self_field(e.value, field)
+        }
+        case SAssign(t, v) {
+            return expr_uses_self_field(t.value, field) || expr_uses_self_field(v.value, field)
+        }
+        case SIf(cond, then_blk, els) {
+            return expr_uses_self_field(cond.value, field) || stmts_use_self_field(then_blk, field) || stmts_use_self_field(els, field)
+        }
+        case SFor(vn, iv, iter, body) {
+            return expr_uses_self_field(iter.value, field) || stmts_use_self_field(body, field)
+        }
+        case SLoop(body) {
+            return stmts_use_self_field(body, field)
+        }
+        case SMatch(value, cases) {
+            if expr_uses_self_field(value.value, field) {
+                return true
+            }
+            var i = 0
+            loop {
+                if i >= cases.len() {
+                    break
+                }
+                if stmts_use_self_field(cases[i].body, field) {
+                    return true
+                }
+                i = i + 1
+            }
+            return false
+        }
+        case SSpawn(call) {
+            return expr_uses_self_field(call.value, field)
+        }
+        case SNursery(body) {
+            return stmts_use_self_field(body, field)
+        }
+        case SBlock(body) {
+            return stmts_use_self_field(body, field)
+        }
+        case _ {
+            return false
+        }
+    }
+}
+
+
 fn gp_names(gs: [ps.GenericParam]) -> [string] {
     var out: [string] = []
     var i = 0
