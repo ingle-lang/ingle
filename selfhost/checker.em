@@ -38,6 +38,8 @@ let TY_U64: int = 16
 let TY_F32: int = 17
 let STRUCT_BASE: int = 1000000
 let ENUM_BASE: int = 2000000
+let NEWTYPE_BASE: int = 3000000   // a newtype value's band (NEWTYPE_BASE + index into `newtypes`): a distinct
+                                  // nominal type — inherits compare/show, but not arithmetic/iteration/raw-base
 
 
 fn is_numeric(t: int) -> bool {
@@ -163,7 +165,8 @@ struct Checker {
     sg_bound: [string]         // ...one bound name (an interface, or "Copy") on that param
     simpl_struct: [int]        // struct-implements table: struct id
     simpl_iface: [string]      // ...one interface name the struct declares it `implements`
-    newtypes: [string]         // newtype names (a newtype value must stay lenient, NOT resolve to a struct)
+    newtypes: [string]         // newtype names (a newtype VALUE carries a NEWTYPE_BASE band; parallel to newtype_base)
+    newtype_base: [int]        // ...the base SemType of each newtype (`type Money = int` → TY_INT) — for unwrap
     sf_owner: [int]            // struct-field table: owning struct index (parallel to `structs`)
     sf_name: [string]          // ...field name
     sf_type: [int]             // ...field SemType (TY_INFER for any non-primitive)
@@ -721,7 +724,8 @@ struct Checker {
                     self.structs.append(name)        // a newtype name occupies a type slot (is_known)
                     self.struct_garity.append(0)     // ...a newtype is never generic (keep parallel to structs)
                     self.fns.append(name)            // ...and a constructor: UserId(x)
-                    self.newtypes.append(name)        // ...but its VALUE stays lenient (not a struct type)
+                    self.newtypes.append(name)        // ...its VALUE carries a distinct NEWTYPE band
+                    self.newtype_base.append(self.annotation_type(base.value))   // ...over this base type (for unwrap)
                 }
             }
             i = i + 1
@@ -1055,8 +1059,9 @@ struct Checker {
                     }
                     return p
                 }
-                if contains(self.newtypes, name) {
-                    return TY_INFER                  // a newtype VALUE is lenient (not its base, not a struct)
+                let nti = index_of(self.newtypes, name)
+                if nti >= 0 {
+                    return NEWTYPE_BASE + nti        // a newtype is a DISTINCT nominal type (not its base, not a struct)
                 }
                 if contains(self.ifaces, name) {
                     return TY_INFER                  // an interface-typed value coerces from any implementor
@@ -1135,6 +1140,9 @@ struct Checker {
         if pt == TY_BOOL || pt == TY_STRING || is_numeric(pt) {
             return true
         }
+        if pt >= NEWTYPE_BASE && pt - NEWTYPE_BASE < self.newtype_base.len() {
+            return self.hole_showable(self.newtype_base[pt - NEWTYPE_BASE])   // a newtype renders via its base
+        }
         if pt >= STRUCT_BASE && pt < ENUM_BASE {
             return self.method_row(pt - STRUCT_BASE, "show") >= 0
         }
@@ -1166,6 +1174,9 @@ struct Checker {
     fn type_satisfies_bound(self, t: int, bound: string) -> bool {
         if t == TY_INFER || t == TY_ERROR {
             return true
+        }
+        if t >= NEWTYPE_BASE && t - NEWTYPE_BASE < self.newtype_base.len() {
+            return self.type_satisfies_bound(self.newtype_base[t - NEWTYPE_BASE], bound)   // newtype ⇒ its base
         }
         if t >= STRUCT_BASE && t < ENUM_BASE {
             return self.struct_implements(t - STRUCT_BASE, bound)
@@ -1593,7 +1604,12 @@ struct Checker {
                 }
             }
             case SFor(vname, index_var, iter, body) {
-                self.check_expr(iter.value)
+                let itty = self.check_expr(iter.value)
+                // A newtype is a distinct nominal type, not its base — it is NOT iterable (`for x in userId`
+                // is an error; unwrap first). Arrays/slices/strings/ranges and unmodelled (TY_INFER) stay fine.
+                if itty >= NEWTYPE_BASE {
+                    self.error("a newtype value is not iterable; iterate its unwrapped base instead")
+                }
                 self.scope_depth = self.scope_depth + 1
                 self.loop_depth = self.loop_depth + 1
                 let saved = self.locals.len()
@@ -2076,6 +2092,10 @@ struct Checker {
                             let fi = self.fn_index_of(name)      // a free-fn / extern call: its declared return
                             if fi >= 0 {
                                 return self.fn_ret[fi]
+                            }
+                            let nti = index_of(self.newtypes, name)
+                            if nti >= 0 {
+                                return NEWTYPE_BASE + nti        // a newtype constructor `Money(x)` yields a Money
                             }
                         }
                     }
@@ -2869,6 +2889,7 @@ fn check(src: string) -> bool {
     var simpl_struct: [int] = []
     var simpl_iface: [string] = []
     var newtypes: [string] = []
+    var newtype_base: [int] = []
     var sf_owner: [int] = []
     var sf_tparam: [int] = []
     var sf_name: [string] = []
@@ -2892,7 +2913,7 @@ fn check(src: string) -> bool {
     var tparams: [string] = []
     var locals: [Local] = []
     var diags: [string] = []
-    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_ret: fn_ret, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, fn_ptparam: fn_ptparam, fn_extern: fn_extern, fg_name: fg_name, fg_param: fg_param, fg_bound: fg_bound, struct_garity: struct_garity, sg_struct: sg_struct, sg_param: sg_param, sg_bound: sg_bound, simpl_struct: simpl_struct, simpl_iface: simpl_iface, newtypes: newtypes, sf_owner: sf_owner, sf_tparam: sf_tparam, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_moveself: sm_moveself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, nursery_depth: 0, locals: locals, local_moved: [], local_consumed: [], loop_break_consumed: [], loop_saw_break: false, local_unbounded_tp: [], scope_depth: 0, diags: diags }
+    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_ret: fn_ret, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, fn_ptparam: fn_ptparam, fn_extern: fn_extern, fg_name: fg_name, fg_param: fg_param, fg_bound: fg_bound, struct_garity: struct_garity, sg_struct: sg_struct, sg_param: sg_param, sg_bound: sg_bound, simpl_struct: simpl_struct, simpl_iface: simpl_iface, newtypes: newtypes, newtype_base: newtype_base, sf_owner: sf_owner, sf_tparam: sf_tparam, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_moveself: sm_moveself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, nursery_depth: 0, locals: locals, local_moved: [], local_consumed: [], loop_break_consumed: [], loop_saw_break: false, local_unbounded_tp: [], scope_depth: 0, diags: diags }
     c.register(decls)                    // pass 1: NAMES (so forward references resolve)
     c.register_types(decls)              // pass 1b: signatures, fields, variants (needs names registered)
     c.check_all(decls)                   // pass 2: bodies
