@@ -5,11 +5,11 @@
 > `parser.em`, `checker.em`, `codegen.em` — compile their OWN source byte-identically to stage-0 on both
 > the VM and native backends** (the self-hosted compiler reproduces itself). The **lexer** and **parser**
 > are also byte-identical over the whole corpus; the **checker** reaches stage-0's accept/reject verdict on
-> **521/541 files with zero false-rejects (20 not-yet-rejected)** — and its M3b **ownership dataflow engine**
+> **527/541 files with zero false-rejects (14 not-yet-rejected)** — and its M3b **ownership dataflow engine**
 > (use-after-move + the `Ptr` must-consume leak scan, dual OR/AND merges) has now SHIPPED; the **bytecode
 > backend** is byte-identical across 36 gated fixtures plus the compiler's own ~6000 lines. The whole
 > pipeline is gated by `make selfhost` (**1139 checks, 0 failures**) and folded into `make verify`. The
-> remaining work is **checker completeness** (the 20 not-yet-rejected invalid files; it never false-rejects,
+> remaining work is **checker completeness** (the 14 not-yet-rejected invalid files; it never false-rejects,
 > so it already compiles every valid program including itself) and **packaging a standalone self-hosted
 > driver**. Self-hosting is earned one differential-green stage at a time, never by a big-bang rewrite, and
 > only as far as it actually improves the language and toolchain.
@@ -311,8 +311,8 @@ rebuilt without itself is a trap; keeping stage 0 is what avoids it.
   (Karl's call). The long pole. **Now gated as Stage 3 of `make selfhost`** (`check_dump.em` driver): the
   verdict (ACCEPT/REJECT) is diffed against the `emberc --emit=bytecode` oracle over the corpus. The gate
   **reports** the verdict-match rate but **hard-fails on any false-reject** — the safety invariant (a false
-  rejection is a real bug; a missed rejection is just unfinished work). **Status: 521/541 verdict-match, 0
-  false-rejects, 20 not-yet-rejected** (VM == native; the semantics of each check were mapped from
+  rejection is a real bug; a missed rejection is just unfinished work). **Status: 527/541 verdict-match, 0
+  false-rejects, 14 not-yet-rejected** (VM == native; the semantics of each check were mapped from
   `src/check.c` by recon workflows, implemented correct-by-construction, then adversarial workflows
   generated valid programs to hunt false-rejects — they found and fixed 7 the corpus didn't exercise, e.g.
   a bare `Option`/`Result` match and sized-field arithmetic). **The M3b ownership DATAFLOW engine — deferred
@@ -351,11 +351,19 @@ rebuilt without itself is a trap; keeping stage 0 is what avoids it.
   type-argument arity** at a struct literal (`Box<A,B>` / bare `Box` / `P<int>` all wrong — a new
   `struct_garity` table) and the **Show** contract on interpolation holes (a struct-without-`show` / enum /
   array can't render — `hole_showable`). The semantics for each were mapped from `src/check.c` and
-  adversarially verified. **Remaining (20, a different tier — these need NEW machinery, not mechanical
-  checks, and carry real false-reject risk because generics/newtypes are erased to `TY_INFER`):**
-  *generic-bound satisfaction & substitution* (`copy_struct`, `bound_unsatisfied`, `generic_bound`,
-  `unbounded_method`, `generic_field`, `generic_variant_type` — needs type-param bound modelling + `T→int`
-  substitution); *borrow/escape analysis* (`borrow_conflict`, `escape_borrow`, `slice_escape`,
+  adversarially verified. A further sub-campaign (2026-06-28) closed the entire **generic-bound +
+  substitution** cluster — `generic_bound` (a type argument must satisfy its parameter's interface bound at a
+  struct literal — per-struct `sg_*` bound tables + `type_satisfies_bound` + struct `implements`),
+  `copy_struct` / `bound_unsatisfied` (a bare-`T` value parameter binds `T` to the argument, so its type
+  must satisfy `T`'s Copy/interface bounds at the call — per-fn `fg_*` tables + `fn_ptparam`),
+  `unbounded_method` (no method on an unbounded type-param — a `local_unbounded_tp` parallel array),
+  `generic_field` (a field declared `T` is checked at the construction's concrete argument — `Box<int>{value:
+  "no"}` — `sf_tparam` substitution), and `generic_variant_type` (a `let x: Option<int> = Some("s")` payload
+  is checked against the annotation's type argument). The parser gained an `is_copy` flag on `GenericParam`
+  (tracked separately so `ast_print` stays byte-identical). Every step was differential-gated, so the
+  pervasive `Box<Expr>`/`Option<X>` usage in the compiler stayed 0-false-reject. **Remaining (14, each its
+  own modelling layer the erased — `TY_INFER` — checker lacks, with real false-reject risk):**
+  *borrow/escape analysis* (`borrow_conflict`, `escape_borrow`, `slice_escape`,
   `slice_frozen`); *concrete newtype-value modelling* (`newtype_arith`/`mismatch`/`not_iterable`); and a
   parse-time *literal-range* check (a front-end change, not the checker). A further cluster is **blocked on
   the parser AST**, which currently omits the flags they need (`parser.em` header): rc/resource flags
@@ -506,7 +514,7 @@ bytecode VM and the native backend: **all four modules — `selfhost/lexer.em`, 
 --emit=bytecode MODULE` == the self-hosted lexer→parser→codegen run on MODULE, on every function of every
 module). The whole self-hosted toolchain is gated in `make selfhost` at **1139/0**, folded into `make
 verify`. The lexer + parser are also byte-identical over the WHOLE corpus on both backends, the checker
-reaches stage-0's verdict on **521/541 files with zero false-rejects (20 not-yet-rejected)**, and the bytecode backend is byte-identical
+reaches stage-0's verdict on **527/541 files with zero false-rejects (14 not-yet-rejected)**, and the bytecode backend is byte-identical
 across 36 gated fixtures (scalars, control flow, strings, every struct representation, generic-struct
 monomorphization, match-binding payload classification, array element kinds, wrapping & float/sized
 arithmetic, interpolation render kinds, unary ops, methods, the move/drop discipline, multi-module diamonds).
@@ -573,7 +581,7 @@ Ranked next moves:
    field/call hole renders right; then port `selfhost/codegen.em` + `selfhost/checker.em` toward the VM
    fixed point.
 The VM fixed point is reached and the M3b ownership dataflow has shipped, so the frontier is now
-**checker completeness** (the 20 not-yet-rejected files) and the **standalone bootstrap**. Ranked:
+**checker completeness** (the 14 not-yet-rejected files) and the **standalone bootstrap**. Ranked:
 
 0d. **M3 — the use-site expected-type + arity + Show batch — LANDED (2026-06-28).** Rather than thread an
    `expected` type through all of `check_expr` (invasive, and a fixed-point risk), the corpus's
@@ -582,33 +590,34 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    non-Option/Result type (`try_bad_return`). Plus generic type-argument **arity** at a struct literal
    (`generic_arity`, via `struct_garity`) and the **Show** contract on interpolation holes
    (`interp_not_showable`, via `hole_showable`). All five verified against stage-0, false-reject-free.
-1. **M3 — generic-bound satisfaction & substitution (recommended next).** The bound data (`T: Copy`,
-   interface bounds) is already in the AST (`GenericParam.bounds`), so no parser work is needed — but it
-   needs NEW machinery the synthesize-only checker lacks: a per-function/struct type-param bound table, a
-   way to distinguish an *unbounded* type-param from a bounded one (today both erase to `TY_INFER`), and
-   `T→concrete` substitution from a struct-literal/call's type arguments. Closes `copy_struct`,
-   `bound_unsatisfied`, `generic_bound`, `unbounded_method`, `generic_field`, `generic_variant_type` (~6
-   files). **Carries real false-reject risk** — generics are pervasive in the corpus (incl. the compiler
-   itself), so every step must be differential-gated. The next focused sub-campaign.
-2. **M3 — borrow/escape analysis** (`borrow_conflict`, `escape_borrow`, `slice_escape`, `slice_frozen`) and
+0e. **M3 — generic-bound satisfaction & substitution — LANDED (2026-06-28).** The whole cluster, built
+   correct-by-construction against `src/check.c` and differential-gated at every step so the pervasive
+   `Box`/`Option` usage stayed 0-false-reject: per-struct (`sg_*`) and per-fn (`fg_*`) type-param bound
+   tables, `type_satisfies_bound` + struct-`implements`, a bare-`T` value-param→type-param map (`fn_ptparam`)
+   for call-site Copy/interface bounds, a `local_unbounded_tp` parallel array for the unbounded-method ban,
+   and `sf_tparam`/annotation-driven substitution for generic field and `Option`/`Result` payload checks.
+   The parser gained an `is_copy` flag on `GenericParam` (tracked separately so `ast_print` stays
+   byte-identical). Closes `generic_bound`, `copy_struct`, `bound_unsatisfied`, `unbounded_method`,
+   `generic_field`, `generic_variant_type`.
+1. **M3 — borrow/escape analysis** (`borrow_conflict`, `escape_borrow`, `slice_escape`, `slice_frozen`) and
    **concrete newtype-value modelling** (`newtype_arith`/`mismatch`/`not_iterable`) — each its own modelling
-   layer the erased checker doesn't have yet.
-3. **M3 — parser-AST extension, then the flag-dependent checks.** The `ast_print` AST deliberately omits
+   layer the erased checker doesn't have yet (the recommended next sub-campaigns).
+2. **M3 — parser-AST extension, then the flag-dependent checks.** The `ast_print` AST deliberately omits
    rc/resource modifiers, refinement predicates, and named-arg names (`parser.em` header). Surface those
-   flags (without changing `--emit=ast`, to keep M2 green), then add the rc-immutability, resource-drop,
-   refinement-cycle, and named-construction checks (`rc_*`, `resource_*`, `refinement_self_cycle`,
-   `enum_named`).
-4. **M3 — the front-end + parity tail**: a parse-time literal-range check (`int_literal_range`, a
+   flags (without changing `--emit=ast`, to keep M2 green — the `is_copy` flag added for the generic cluster
+   is the template), then add the rc-immutability, resource-drop, refinement-cycle, and named-construction
+   checks (`rc_*`, `resource_*`, `refinement_self_cycle`, `enum_named`).
+3. **M3 — the front-end + parity tail**: a parse-time literal-range check (`int_literal_range`, a
    lexer/parser change, not the checker). Then **M3c** — exact
    message + position parity over the error files (prerequisite: extend the parser AST to carry `line:col`;
    adding positions won't change `ast_print`, so M2 stays green).
-5. **The standalone bootstrap.** A self-hosted driver that LINKS the front end + codegen into a runnable
+4. **The standalone bootstrap.** A self-hosted driver that LINKS the front end + codegen into a runnable
    binary (emitting object code / a runnable chunk), replacing the differential `--emit=run` path — turning
    the proven fixed point into an actually self-built `emberc`.
-6. **M4 deferred-low — nested-inline struct flattening.** The `UNBOX_STRUCT` path for a `let ln =
+5. **M4 deferred-low — nested-inline struct flattening.** The `UNBOX_STRUCT` path for a `let ln =
    Line{a:P, b:P}` of recursively-all-scalar nested value structs; only ~3 corpus files need it (most real
    structs have a string/array/enum field → boxed), so it stays low priority.
-7. **Cleanup OFIs.** **OFI-165** (method-call args lack the owning-temp keep+drop discipline — worked around
+6. **Cleanup OFIs.** **OFI-165** (method-call args lack the owning-temp keep+drop discipline — worked around
    with a named-local idiom), **OFI-163/164** (generic Option/Result payload INCREF; inline-struct array
    literals), **OFI-153** (generate the lexer keyword table from `vocab.def` + a sync gate), and **OFI-156**
    (cross-module bare-variant construction, currently routed through constructor fns).
