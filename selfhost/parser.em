@@ -146,7 +146,7 @@ enum Decl {
     DImport(path: string, alias: string)
     DLet(is_var: bool, name: string, ty: [Ty], value: Box<Expr>)
     DExtern(abi: string, fns: [FnDecl])
-    DType(name: string, base: Box<Ty>)
+    DType(name: string, base: Box<Ty>, pred: [Box<Expr>])   // pred: [] none, [expr] = the `where` refinement
 }
 
 
@@ -649,8 +649,8 @@ fn p_decl(d: Decl, depth: int) {
                 i = i + 1
             }
         }
-        case DType(name, base) {
-            println("{pad}Type {name} = {ty_str(base.value)}")
+        case DType(name, base, pred) {
+            println("{pad}Type {name} = {ty_str(base.value)}")   // the `where` predicate is not printed (matches stage-0)
         }
     }
 }
@@ -1130,12 +1130,13 @@ struct Parser {
         let name = self.advance().text
         let _ = self.advance()                      // =
         let base = self.parse_type()
-        // optional `where Expr` refinement (parsed to consume, not printed)
+        // optional `where Expr` refinement (captured for the self-cycle check; not printed by ast_print)
+        var pred: [Box<Expr>] = []
         if self.at(TAG_WHERE) {
             let _ = self.advance()
-            let _ = self.parse_expr()
+            pred.append(Box<Expr>{ value: self.parse_expr(), line: 0 })
         }
-        return DType(name, Box<Ty>{ value: base, line: 0 })
+        return DType(name, Box<Ty>{ value: base, line: 0 }, pred)
     }
 
 

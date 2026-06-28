@@ -719,7 +719,7 @@ struct Checker {
                         e = e + 1
                     }
                 }
-                case DType(name, base) {
+                case DType(name, base, pred) {
                     if self.is_duplicate_type(name) {
                         self.error("a type with this name is already declared in this module")
                     }
@@ -729,6 +729,11 @@ struct Checker {
                     self.fns.append(name)            // ...and a constructor: UserId(x)
                     self.newtypes.append(name)        // ...its VALUE carries a distinct NEWTYPE band
                     self.newtype_base.append(self.annotation_type(base.value))   // ...over this base type (for unwrap)
+                    // OFI-150: a `where` predicate cannot construct its OWN type — checking it would require
+                    // checking it, a non-terminating cycle (`type Loop = int where Loop(self) > 0`, check.c:4790).
+                    if pred.len() == 1 && expr_calls_name(pred[0].value, name) {
+                        self.error("a newtype's 'where' predicate cannot construct its own type")
+                    }
                 }
             }
             i = i + 1
@@ -2735,6 +2740,61 @@ fn contains(xs: [string], v: string) -> bool {
 
 
 // gp_names extracts the names of a generic-parameter list (so they can shadow same-named types).
+// expr_calls_name reports whether an expression contains a CALL to the free name `name` (`name(…)`) — used
+// to detect a newtype `where` predicate that constructs its own type. Recurses through the forms a
+// predicate realistically uses.
+fn expr_calls_name(e: ps.Expr, name: string) -> bool {
+    match e {
+        case ECall(callee, args) {
+            match callee.value {
+                case EIdent(n) {
+                    if n == name {
+                        return true
+                    }
+                }
+                case _ {
+                }
+            }
+            if expr_calls_name(callee.value, name) {
+                return true
+            }
+            var i = 0
+            loop {
+                if i >= args.len() {
+                    break
+                }
+                if expr_calls_name(args[i], name) {
+                    return true
+                }
+                i = i + 1
+            }
+            return false
+        }
+        case EUnary(op, operand) {
+            return expr_calls_name(operand.value, name)
+        }
+        case EBinary(op, l, r) {
+            return expr_calls_name(l.value, name) || expr_calls_name(r.value, name)
+        }
+        case EIndex(object, index) {
+            return expr_calls_name(object.value, name) || expr_calls_name(index.value, name)
+        }
+        case EGet(object, fname) {
+            return expr_calls_name(object.value, name)
+        }
+        case ETry(operand) {
+            return expr_calls_name(operand.value, name)
+        }
+        case ERange(lo, hi) {
+            return expr_calls_name(lo.value, name) || expr_calls_name(hi.value, name)
+        }
+        case _ {
+            return false
+        }
+    }
+}
+
+
 // expr_uses_self_field reports whether `self.<field>` appears anywhere in an expression (used to verify a
 // `resource` drop references — and thus closes — each Ptr handle field). Recurses through the expression
 // forms a drop body realistically uses; leaf/other forms return false.
