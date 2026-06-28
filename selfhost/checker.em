@@ -155,6 +155,11 @@ struct Checker {
     locals: [Local]
     local_moved: [bool]        // MUTABLE move state, parallel to `locals` (element-struct writeback isn't
                                // self-compilable yet — OFI-061 — so the moved flag lives in a scalar array)
+    local_consumed: [bool]     // the must-consume DUAL (AND-merge): for an OWNED Ptr local, false = an open
+                               // handle obligation (leaks at an exit), true = discharged; true for everything
+                               // else (no obligation). OFI-049.
+    loop_break_consumed: [bool]  // AND-merge of the consumed-state at each `break` in the current loop — the
+    loop_saw_break: bool         // post-loop consumed-state is the merge of all break-exit paths (close-on-break).
     scope_depth: int
     diags: [string]            // collected diagnostic messages (positions added in M3c)
 
@@ -187,6 +192,8 @@ struct Checker {
         }
         self.locals.append(Local{ name: name, depth: self.scope_depth, ty: ty, is_var: is_var, owned: owned, mvparam: mvparam })
         self.local_moved.append(false)
+        // an OWNED Ptr local is an OPEN obligation (consumed=false); everything else has none (true).
+        self.local_consumed.append((owned && ty == TY_PTR) == false)
     }
 
 
@@ -262,13 +269,70 @@ struct Checker {
                         // OFI-049: a BORROWED Ptr (a plain `f: Ptr` param) may not be closed or transferred —
                         // the caller still owns the handle; this would double-close / strand them.
                         self.error("cannot close or transfer a borrowed 'Ptr'; take it by 'move' to gain ownership (declare the parameter 'move f: Ptr', not 'f' or 'mut f')")
-                    } else if self.locals[slot].owned && self.local_moved[slot] == false && self.is_boxed_move(slot) {
+                    } else if self.locals[slot].owned && self.is_boxed_move(slot) {
                         self.local_moved[slot] = true
+                        self.local_consumed[slot] = true   // a Ptr handle obligation is discharged on this path
                     }
                 }
             }
             case _ {
             }
+        }
+    }
+
+
+    // report_unconsumed_ptrs reports each OWNED Ptr local (index >= from) still OPEN (consumed==false) on the
+    // current path — an opened-but-not-closed leak (OFI-049). Called at function exits (return / fall-through).
+    fn report_unconsumed_ptrs(mut self, from: int) {
+        var i = from
+        loop {
+            if i >= self.locals.len() {
+                break
+            }
+            if self.locals[i].owned {
+                if self.locals[i].ty == TY_PTR {
+                    if self.local_consumed[i] == false {
+                        self.error("'{self.locals[i].name}' is a 'Ptr' opened but not closed on this path")
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+
+
+    // merge_consumed ANDs another consumed-snapshot into the current state (a Ptr obligation is discharged
+    // after a join only if discharged on EVERY reaching path).
+    fn merge_consumed(mut self, other: [bool]) {
+        var i = 0
+        loop {
+            if i >= self.local_consumed.len() {
+                break
+            }
+            if i < other.len() {
+                if other[i] == false {
+                    self.local_consumed[i] = false
+                }
+            }
+            i = i + 1
+        }
+    }
+
+
+    // merge_into_break ANDs another consumed-snapshot into the loop's break accumulator (a Ptr is discharged
+    // on the post-loop path only if discharged on EVERY break path).
+    fn merge_into_break(mut self, other: [bool]) {
+        var i = 0
+        loop {
+            if i >= self.loop_break_consumed.len() {
+                break
+            }
+            if i < other.len() {
+                if other[i] == false {
+                    self.loop_break_consumed[i] = false
+                }
+            }
+            i = i + 1
         }
     }
 
@@ -968,6 +1032,11 @@ struct Checker {
         self.locals = fresh
         var freshm: [bool] = []
         self.local_moved = freshm
+        var freshc: [bool] = []
+        self.local_consumed = freshc
+        var freshbrk: [bool] = []
+        self.loop_break_consumed = freshbrk
+        self.loop_saw_break = false
         self.scope_depth = 0
         self.self_is_var = false
         self.loop_depth = 0
@@ -1001,6 +1070,11 @@ struct Checker {
             self.check_stmt(f.body[i])
             i = i + 1
         }
+        // Leak scan at the trailing fall-through exit — only when that exit is reachable (a body that always
+        // returns leaves the join unreachable, and its merged consumed-state is stale, so don't scan it).
+        if block_returns(f.body) == false {
+            self.report_unconsumed_ptrs(0)
+        }
         // Definite-return (OFI-029): a function with a concretely-known non-unit return type must return
         // on every path. The terminator analysis is an exact replica of stage-0, so this never false-rejects
         // a function stage-0 accepts. (Generic/Self/unmodelled returns are TY_INFER → skipped.)
@@ -1031,6 +1105,7 @@ struct Checker {
     fn truncate_locals(mut self, n: int) {
         var kept: [Local] = []
         var keptm: [bool] = []
+        var keptc: [bool] = []
         var i = 0
         loop {
             if i >= n {
@@ -1038,10 +1113,12 @@ struct Checker {
             }
             kept.append(Local{ name: self.locals[i].name, depth: self.locals[i].depth, ty: self.locals[i].ty, is_var: self.locals[i].is_var, owned: self.locals[i].owned, mvparam: self.locals[i].mvparam })
             keptm.append(self.local_moved[i])           // a move on an OUTER local persists past an inner scope
+            keptc.append(self.local_consumed[i])
             i = i + 1
         }
         self.locals = kept
         self.local_moved = keptm
+        self.local_consumed = keptc
     }
 
 
@@ -1112,7 +1189,9 @@ struct Checker {
                             self.error("returned value's type does not match the function's return type")
                         }
                     }
+                    self.consume_move(value[0].value, line)   // a returned owned handle transfers out (discharges it)
                 }
+                self.report_unconsumed_ptrs(0)                // every owned Ptr still open on this exit path leaks
             }
             case SExpr(expr) {
                 let vt = self.check_expr(expr.value)
@@ -1146,6 +1225,14 @@ struct Checker {
                             }
                             let slot = self.local_slot(name)
                             if slot >= 0 {
+                                // reassigning an owned Ptr that still holds an open handle drops it (a Ptr has
+                                // no destructor) — a leak. It must be closed (or moved out) before overwrite.
+                                if self.locals[slot].owned && self.locals[slot].ty == TY_PTR {
+                                    if self.local_consumed[slot] == false && self.local_moved[slot] == false {
+                                        self.error("reassigning '{name}' drops the 'Ptr' handle it still holds — close it first")
+                                    }
+                                    self.local_consumed[slot] = false   // now owns the freshly-assigned handle
+                                }
                                 self.local_moved[slot] = false
                             }
                         }
@@ -1168,30 +1255,36 @@ struct Checker {
                 if ct != TY_INFER && ct != TY_ERROR && ct != TY_BOOL {
                     self.error("'if' condition must be a bool")
                 }
-                // Move dataflow: each branch is checked from the SAME pre-state, then their moved-sets are
-                // merged (OR) — reachability-gated (a diverging branch's moves don't reach the join).
+                // Dataflow: each branch is checked from the SAME pre-state; at the join, moved OR-merges and
+                // consumed AND-merges — reachability-gated (a diverging branch doesn't reach the join).
                 let pre = clone_bools(self.local_moved)
+                let prec = clone_bools(self.local_consumed)
                 self.check_block(then_blk)
                 let then_state = clone_bools(self.local_moved)
+                let then_consumed = clone_bools(self.local_consumed)
                 let then_div = block_diverges(then_blk)
                 self.local_moved = clone_bools(pre)              // restore: the else path starts fresh
+                self.local_consumed = clone_bools(prec)
                 if els.len() > 0 {
                     self.check_stmt(els[0])
                     let else_div = stmt_diverges(els[0])
                     if then_div {
-                        if else_div == false {
-                            // only else reaches the join — keep the else state (current)
-                        } else {
+                        if else_div {
                             self.local_moved = clone_bools(pre)  // both diverge: join unreachable
+                            self.local_consumed = clone_bools(prec)
                         }
+                        // else only: keep the else state (current)
                     } else if else_div {
                         self.local_moved = clone_bools(then_state)   // only then reaches
+                        self.local_consumed = clone_bools(then_consumed)
                     } else {
-                        self.merge_moved(then_state)             // both reach: OR the moved-sets
+                        self.merge_moved(then_state)             // both reach: moved OR, consumed AND
+                        self.merge_consumed(then_consumed)
                     }
                 } else {
                     if then_div == false {
-                        self.local_moved = clone_bools(then_state)   // then fall-through (⊇ pre); implicit else = pre
+                        self.local_moved = clone_bools(then_state)   // then fall-through (⊇ pre); else = pre
+                        self.merge_consumed(then_consumed)           // consumed: prec AND then_consumed
                     }
                 }
             }
@@ -1205,6 +1298,11 @@ struct Checker {
                     self.declare(index_var, TY_INFER, false, false, false)
                 }
                 let pre = clone_bools(self.local_moved)
+                let prec = clone_bools(self.local_consumed)
+                let outer_saw = self.loop_saw_break
+                let outer_brk = clone_bools(self.loop_break_consumed)
+                self.loop_saw_break = false
+                self.loop_break_consumed = []
                 var i = 0
                 loop {
                     if i >= body.len() {
@@ -1217,6 +1315,14 @@ struct Checker {
                     self.check_loop_backedge(pre, saved)
                 }
                 self.local_moved = clone_bools(pre)
+                // a `for` exits via the iterator running dry (≈ the pre-state, since it may run 0 times) OR a
+                // `break`; the join AND-merges them, so a Ptr closed only on break still leaks on natural exit.
+                self.local_consumed = clone_bools(prec)
+                if self.loop_saw_break {
+                    self.merge_consumed(self.loop_break_consumed)
+                }
+                self.loop_saw_break = outer_saw
+                self.loop_break_consumed = outer_brk
                 self.truncate_locals(saved)
                 self.loop_depth = self.loop_depth - 1
                 self.scope_depth = self.scope_depth - 1
@@ -1225,16 +1331,38 @@ struct Checker {
                 self.loop_depth = self.loop_depth + 1
                 let pre = clone_bools(self.local_moved)
                 let loop_base = self.locals.len()
+                // save & reset the break accumulator (loops nest); collect this loop's break-exit states.
+                let outer_saw = self.loop_saw_break
+                let outer_brk = clone_bools(self.loop_break_consumed)
+                self.loop_saw_break = false
+                self.loop_break_consumed = []
                 self.check_block(body)
                 if block_exits_loop(body) == false {     // the body can reach the back-edge
                     self.check_loop_backedge(pre, loop_base)
                 }
                 self.local_moved = clone_bools(pre)      // loop-internal moves don't persist out (lenient)
+                // a `loop {}` falls through only via `break`; the post-loop consumed-state is the AND of the
+                // break paths (else the join is unreachable — leave the state as-is, leniently).
+                if self.loop_saw_break {
+                    self.local_consumed = clone_bools(self.loop_break_consumed)
+                }
+                self.loop_saw_break = outer_saw
+                self.loop_break_consumed = outer_brk
                 self.loop_depth = self.loop_depth - 1
             }
             case SBreak(line) {
                 if self.loop_depth == 0 {
                     self.error("'break' outside of a loop")
+                }
+                // record the consumed-state on this break path — the post-loop state AND-merges every break.
+                // (A named snapshot, not an inline `clone_bools(...)` arg — the self-hosted codegen doesn't yet
+                // drop an inline owning-temp array passed to a method's borrow parameter. OFI-165.)
+                if self.loop_saw_break {
+                    let snap = clone_bools(self.local_consumed)
+                    self.merge_into_break(snap)
+                } else {
+                    self.loop_break_consumed = clone_bools(self.local_consumed)
+                    self.loop_saw_break = true
                 }
             }
             case SContinue(line) {
@@ -2211,7 +2339,7 @@ fn check(src: string) -> bool {
     var tparams: [string] = []
     var locals: [Local] = []
     var diags: [string] = []
-    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_ret: fn_ret, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, newtypes: newtypes, sf_owner: sf_owner, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_moveself: sm_moveself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, locals: locals, local_moved: [], scope_depth: 0, diags: diags }
+    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_ret: fn_ret, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, newtypes: newtypes, sf_owner: sf_owner, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_moveself: sm_moveself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, locals: locals, local_moved: [], local_consumed: [], loop_break_consumed: [], loop_saw_break: false, scope_depth: 0, diags: diags }
     c.register(decls)                    // pass 1: NAMES (so forward references resolve)
     c.register_types(decls)              // pass 1b: signatures, fields, variants (needs names registered)
     c.check_all(decls)                   // pass 2: bodies

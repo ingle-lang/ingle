@@ -3363,7 +3363,24 @@ struct Chunk {
                                         self.cur_line = target.line
                                         self.emit(OP_GET_LOCAL)
                                         self.emit_idx(slot)
-                                        self.gen_consume(value.value, value.line)   // field takes the value
+                                        if array_lit_is_empty(value.value) {
+                                            // an empty `[]` field value carries no element kind — take it from
+                                            // the FIELD's declared `[T]` (else the context-free `[]` defaults to
+                                            // int — wrong for a `[bool]`/`[Stmt]` boxed-element field).
+                                            self.cur_line = value.line
+                                            let esid = self.field_elem_code(sid, fname)
+                                            if esid >= 0 && self.struct_array_inline(esid) {
+                                                self.emit(OP_NEW_STRUCT_ARRAY)
+                                                self.emit_idx(0)
+                                                self.emit_idx(esid)
+                                            } else {
+                                                self.emit(OP_NEW_ARRAY)
+                                                self.emit_idx(0)
+                                                self.emit(self.field_arr_kind(sid, fname))
+                                            }
+                                        } else {
+                                            self.gen_consume(value.value, value.line)   // field takes the value
+                                        }
                                         self.emit(OP_SET_FIELD)
                                         self.emit_idx(self.struct_field_index(sid, fname))
                                     }
