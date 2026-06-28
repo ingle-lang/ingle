@@ -451,25 +451,37 @@ struct CgcGen {
     // (0 = i64 for the int subset).
     fn emit_binary(mut self, op: lx.Tk, l: ps.Expr, r: ps.Expr) -> string {
         let bid = ps.binop_id(op)
+        // The two operands are emitted into LOCALS first, in source (left-to-right) order. Each emit_
+        // bumps the shared `next_var`, and we must NOT depend on the C compiler's UNSPECIFIED operand
+        // evaluation order — gcc evaluates a `+`/call's operands right-to-left where clang and the VM go
+        // left-to-right, which would otherwise SWAP the retain-temp v-numbers (a VM/native divergence the
+        // ccdiff differential caught on Linux gcc). Sequencing them as statements forces the order. OFI-166.
         // short-circuit && / || — a truthy test, not an em_ call (binop_id 12 && / 13 ||)
         if bid == 12 || bid == 13 {
             var c = "&&"
             if bid == 13 {
                 c = "||"
             }
-            return "INT_VAL((em_truthy({self.emit_expr(l)}) {c} em_truthy({self.emit_expr(r)})) ? 1 : 0)"
+            let lc = self.emit_expr(l)
+            let rc = self.emit_expr(r)
+            return "INT_VAL((em_truthy({lc}) {c} em_truthy({rc})) ? 1 : 0)"
         }
         let cf = binop_cfn(bid)
         let ctx = binop_wants_ctx(bid)
+        var opl = ""
+        var opr = ""
+        if ctx {
+            opl = self.emit_concat_operand(l)
+            opr = self.emit_concat_operand(r)
+        } else {
+            opl = self.emit_expr(l)
+            opr = self.emit_expr(r)
+        }
         var s = "{cf}("
         if ctx {
             s = s + "&g_em, "
         }
-        if ctx {
-            s = s + self.emit_concat_operand(l) + ", " + self.emit_concat_operand(r)
-        } else {
-            s = s + self.emit_expr(l) + ", " + self.emit_expr(r)
-        }
+        s = s + opl + ", " + opr
         if binop_has_nk(bid) {
             s = s + ", 0"                                // num_kind 0 (i64) for the int subset
         }

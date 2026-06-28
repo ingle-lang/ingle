@@ -19,7 +19,7 @@ jobs:
     name: Linux x86_64 (gcc)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # The CORE build is dependency-free. build-essential = gcc + make; time = /usr/bin/time, used
       # by crucible's RSS leak oracle; libcurl is the only system lib the networking build needs.
@@ -81,10 +81,14 @@ jobs:
     name: macOS arm64 (clang)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # On macOS raylib IS packaged (Homebrew), so the flagship needs no source build.
+      # HOMEBREW_NO_REQUIRE_TAP_TRUST silences the runner's tap-trust prompt (a pre-installed third-party
+      # tap like aws/tap would otherwise make brew warn and, in a future release, refuse to proceed).
       - name: Install build dependencies
+        env:
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
         run: brew install pkg-config raylib freetype curl || true
 
       - name: Build (dev)
