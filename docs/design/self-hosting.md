@@ -5,11 +5,11 @@
 > `parser.em`, `checker.em`, `codegen.em` — compile their OWN source byte-identically to stage-0 on both
 > the VM and native backends** (the self-hosted compiler reproduces itself). The **lexer** and **parser**
 > are also byte-identical over the whole corpus; the **checker** reaches stage-0's accept/reject verdict on
-> **527/541 files with zero false-rejects (14 not-yet-rejected)** — and its M3b **ownership dataflow engine**
+> **530/541 files with zero false-rejects (11 not-yet-rejected)** — and its M3b **ownership dataflow engine**
 > (use-after-move + the `Ptr` must-consume leak scan, dual OR/AND merges) has now SHIPPED; the **bytecode
 > backend** is byte-identical across 36 gated fixtures plus the compiler's own ~6000 lines. The whole
 > pipeline is gated by `make selfhost` (**1139 checks, 0 failures**) and folded into `make verify`. The
-> remaining work is **checker completeness** (the 14 not-yet-rejected invalid files; it never false-rejects,
+> remaining work is **checker completeness** (the 11 not-yet-rejected invalid files; it never false-rejects,
 > so it already compiles every valid program including itself) and **packaging a standalone self-hosted
 > driver**. Self-hosting is earned one differential-green stage at a time, never by a big-bang rewrite, and
 > only as far as it actually improves the language and toolchain.
@@ -311,8 +311,8 @@ rebuilt without itself is a trap; keeping stage 0 is what avoids it.
   (Karl's call). The long pole. **Now gated as Stage 3 of `make selfhost`** (`check_dump.em` driver): the
   verdict (ACCEPT/REJECT) is diffed against the `emberc --emit=bytecode` oracle over the corpus. The gate
   **reports** the verdict-match rate but **hard-fails on any false-reject** — the safety invariant (a false
-  rejection is a real bug; a missed rejection is just unfinished work). **Status: 527/541 verdict-match, 0
-  false-rejects, 14 not-yet-rejected** (VM == native; the semantics of each check were mapped from
+  rejection is a real bug; a missed rejection is just unfinished work). **Status: 530/541 verdict-match, 0
+  false-rejects, 11 not-yet-rejected** (VM == native; the semantics of each check were mapped from
   `src/check.c` by recon workflows, implemented correct-by-construction, then adversarial workflows
   generated valid programs to hunt false-rejects — they found and fixed 7 the corpus didn't exercise, e.g.
   a bare `Option`/`Result` match and sized-field arithmetic). **The M3b ownership DATAFLOW engine — deferred
@@ -361,10 +361,16 @@ rebuilt without itself is a trap; keeping stage 0 is what avoids it.
   "no"}` — `sf_tparam` substitution), and `generic_variant_type` (a `let x: Option<int> = Some("s")` payload
   is checked against the annotation's type argument). The parser gained an `is_copy` flag on `GenericParam`
   (tracked separately so `ast_print` stays byte-identical). Every step was differential-gated, so the
-  pervasive `Box<Expr>`/`Option<X>` usage in the compiler stayed 0-false-reject. **Remaining (14, each its
+  pervasive `Box<Expr>`/`Option<X>` usage in the compiler stayed 0-false-reject. A further sub-campaign
+  (2026-06-28) closed **newtype-value modelling** — a newtype value now carries a distinct `NEWTYPE_BASE`
+  band (was erased to `TY_INFER`), making it a distinct nominal type: arithmetic on it is rejected (it isn't
+  numeric — `newtype_arith`), it is assignable only to the same newtype (`newtype_mismatch`), and it is not
+  iterable (`newtype_not_iterable`); the inherited behaviours (compare/order/show/`Hash`-`Eq` Map keys) stay
+  lenient by recursing to the base. The ripple from making newtypes concrete was caught + fixed gate-driven
+  (0 false-rejects); refinement types ride along (they parse as newtypes). **Remaining (11, each its
   own modelling layer the erased — `TY_INFER` — checker lacks, with real false-reject risk):**
   *borrow/escape analysis* (`borrow_conflict`, `escape_borrow`, `slice_escape`,
-  `slice_frozen`); *concrete newtype-value modelling* (`newtype_arith`/`mismatch`/`not_iterable`); and a
+  `slice_frozen`); and a
   parse-time *literal-range* check (a front-end change, not the checker). A further cluster is **blocked on
   the parser AST**, which currently omits the flags they need (`parser.em` header): rc/resource flags
   (`rc_*`, `resource_*`), refinement predicates (`refinement_self_cycle`), and named-arg names
@@ -514,7 +520,7 @@ bytecode VM and the native backend: **all four modules — `selfhost/lexer.em`, 
 --emit=bytecode MODULE` == the self-hosted lexer→parser→codegen run on MODULE, on every function of every
 module). The whole self-hosted toolchain is gated in `make selfhost` at **1139/0**, folded into `make
 verify`. The lexer + parser are also byte-identical over the WHOLE corpus on both backends, the checker
-reaches stage-0's verdict on **527/541 files with zero false-rejects (14 not-yet-rejected)**, and the bytecode backend is byte-identical
+reaches stage-0's verdict on **530/541 files with zero false-rejects (11 not-yet-rejected)**, and the bytecode backend is byte-identical
 across 36 gated fixtures (scalars, control flow, strings, every struct representation, generic-struct
 monomorphization, match-binding payload classification, array element kinds, wrapping & float/sized
 arithmetic, interpolation render kinds, unary ops, methods, the move/drop discipline, multi-module diamonds).
@@ -581,7 +587,7 @@ Ranked next moves:
    field/call hole renders right; then port `selfhost/codegen.em` + `selfhost/checker.em` toward the VM
    fixed point.
 The VM fixed point is reached and the M3b ownership dataflow has shipped, so the frontier is now
-**checker completeness** (the 14 not-yet-rejected files) and the **standalone bootstrap**. Ranked:
+**checker completeness** (the 11 not-yet-rejected files) and the **standalone bootstrap**. Ranked:
 
 0d. **M3 — the use-site expected-type + arity + Show batch — LANDED (2026-06-28).** Rather than thread an
    `expected` type through all of `check_expr` (invasive, and a fixed-point risk), the corpus's
@@ -599,14 +605,19 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    The parser gained an `is_copy` flag on `GenericParam` (tracked separately so `ast_print` stays
    byte-identical). Closes `generic_bound`, `copy_struct`, `bound_unsatisfied`, `unbounded_method`,
    `generic_field`, `generic_variant_type`.
-1. **M3 — borrow/escape analysis** (`borrow_conflict`, `escape_borrow`, `slice_escape`, `slice_frozen`) and
-   **concrete newtype-value modelling** (`newtype_arith`/`mismatch`/`not_iterable`) — each its own modelling
-   layer the erased checker doesn't have yet (the recommended next sub-campaigns).
-2. **M3 — parser-AST extension, then the flag-dependent checks.** The `ast_print` AST deliberately omits
-   rc/resource modifiers, refinement predicates, and named-arg names (`parser.em` header). Surface those
-   flags (without changing `--emit=ast`, to keep M2 green — the `is_copy` flag added for the generic cluster
-   is the template), then add the rc-immutability, resource-drop, refinement-cycle, and named-construction
-   checks (`rc_*`, `resource_*`, `refinement_self_cycle`, `enum_named`).
+0f. **M3 — newtype-value modelling — LANDED (2026-06-28).** A newtype value carries a distinct `NEWTYPE_BASE`
+   band (`newtype_base` records each base); a newtype is a distinct nominal type — arithmetic rejected
+   (`newtype_arith`), assignable only to the same newtype (`newtype_mismatch`), not iterable
+   (`newtype_not_iterable`) — while inherited compare/order/show/`Hash`-`Eq` stay lenient by recursing to
+   the base. Refinement types ride along. 0 false-rejects (the concrete-band ripple was caught gate-driven).
+1. **M3 — parser-AST extension, then the flag-dependent checks (recommended next, the biggest cluster).** The
+   `ast_print` AST deliberately omits rc/resource modifiers, refinement predicates, and named-arg names
+   (`parser.em` header). Surface those flags (without changing `--emit=ast`, to keep M2 green — the `is_copy`
+   flag added for the generic cluster is the template), then add the rc-immutability, resource-drop,
+   refinement-cycle, and named-construction checks (`rc_bad_field`, `rc_field_mutation`,
+   `resource_clone_match`, `resource_noop_drop`, `refinement_self_cycle`, `enum_named`).
+2. **M3 — borrow/escape analysis** (`borrow_conflict`, `escape_borrow`, `slice_escape`, `slice_frozen`) — the
+   hardest remaining: slice/borrow lifetime tracking the erased checker has no model for.
 3. **M3 — the front-end + parity tail**: a parse-time literal-range check (`int_literal_range`, a
    lexer/parser change, not the checker). Then **M3c** — exact
    message + position parity over the error files (prerequisite: extend the parser AST to carry `line:col`;
