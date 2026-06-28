@@ -136,7 +136,8 @@ struct Checker {
     sm_arity: [int]            // ...declared param count (self excluded)
     sm_pstart: [int]           // ...start index into sm_ptype
     sm_ptype: [int]            // every method param SemType, concatenated (method arg-type check)
-    sm_mutself: [bool]         // ...does the method take `mut self` / `move self` (a mutable receiver)?
+    sm_mutself: [bool]         // ...does the method take `mut self` (a mutable receiver)?
+    sm_moveself: [bool]        // ...does the method take `move self` (the call CONSUMES the receiver)?
     sm_ret: [int]              // ...the method's return SemType (TY_UNIT for a void method; TY_INFER if unmodelled)
     ev_enum: [int]             // enum-variant table: owning enum index (parallel to `enums`)
     ev_name: [string]          // ...variant name
@@ -317,7 +318,36 @@ struct Checker {
         if t == TY_ARRAY || t == TY_PTR {
             return true
         }
-        return t >= STRUCT_BASE && t < ENUM_BASE && self.locals[slot].is_var
+        if t >= STRUCT_BASE && t < ENUM_BASE {
+            if self.locals[slot].is_var {
+                return true              // a `var`/mutated struct is BOXED
+            }
+            return self.struct_has_string_field(t - STRUCT_BASE)   // a `let` struct is boxed iff a KNOWN
+                                                                   // refcounted field; a nested-struct field
+                                                                   // is TY_INFER → lenient (multi-slot copy)
+        }
+        return false
+    }
+
+
+    // struct_has_string_field reports whether struct index `sid` has a field of a KNOWN refcounted type (a
+    // string) — which forces the struct BOXED (a move value). Other non-scalar fields (arrays, nested
+    // structs, enums) are TY_INFER in the lenient checker, so they don't force boxing here (a recursively
+    // all-scalar struct stays a multi-slot COPY — no false-reject on `nested_struct_multislot`).
+    fn struct_has_string_field(self, sid: int) -> bool {
+        var i = 0
+        loop {
+            if i >= self.sf_owner.len() {
+                break
+            }
+            if self.sf_owner[i] == sid {
+                if self.sf_type[i] == TY_STRING {
+                    return true
+                }
+            }
+            i = i + 1
+        }
+        return false
     }
 
 
@@ -676,6 +706,7 @@ struct Checker {
                         self.sm_name.append(methods[mi].name)
                         self.sm_pstart.append(self.sm_ptype.len())
                         var mself = false
+                        var msmove = false
                         var ac = 0
                         var mp = 0
                         loop {
@@ -686,12 +717,15 @@ struct Checker {
                                 self.sm_ptype.append(self.param_type(methods[mi].params[mp]))
                                 ac = ac + 1
                             } else if methods[mi].params[mp].qual == 1 {
-                                mself = true                          // `mut self` (NOT `move self`=2, which consumes)
+                                mself = true                          // `mut self`
+                            } else if methods[mi].params[mp].qual == 2 {
+                                msmove = true                         // `move self` — the call consumes the receiver
                             }
                             mp = mp + 1
                         }
                         self.sm_arity.append(ac)
                         self.sm_mutself.append(mself)
+                        self.sm_moveself.append(msmove)
                         if methods[mi].ret.len() > 0 {
                             self.sm_ret.append(self.annotation_type(methods[mi].ret[0]))
                         } else {
@@ -1155,11 +1189,16 @@ struct Checker {
                     }
                 }
                 var has_wild = false
+                // Move dataflow: each arm is checked from the SAME pre-match state; the moved-sets of the
+                // REACHABLE arms are OR'd into `acc`, which becomes the post-match state.
+                let pre = clone_bools(self.local_moved)
+                var acc = clone_bools(self.local_moved)
                 var ci = 0
                 loop {
                     if ci >= cases.len() {
                         break
                     }
+                    self.local_moved = clone_bools(pre)      // each arm starts fresh (no cross-poison)
                     if known {
                         if cases[ci].pattern.wildcard {
                             has_wild = true
@@ -1201,8 +1240,23 @@ struct Checker {
                     }
                     self.truncate_locals(saved)
                     self.scope_depth = self.scope_depth - 1
+                    if block_returns(cases[ci].body) == false {   // a diverging arm doesn't reach the join
+                        var mi = 0
+                        loop {
+                            if mi >= acc.len() {
+                                break
+                            }
+                            if mi < self.local_moved.len() {
+                                if self.local_moved[mi] {
+                                    acc[mi] = true
+                                }
+                            }
+                            mi = mi + 1
+                        }
+                    }
                     ci = ci + 1
                 }
+                self.local_moved = acc                       // post-match: OR of the reachable arms
                 // Every variant must be covered (a wildcard covers the rest).
                 if known && has_wild == false {
                     var vj = 0
@@ -1395,6 +1449,10 @@ struct Checker {
                                         self.error("cannot call a 'mut self' method on an immutable binding; declare it 'var' (or take 'mut')")
                                     }
                                 }
+                            }
+                            // a `move self` method CONSUMES the receiver — a later use is a use-after-move.
+                            if mr >= 0 && self.sm_moveself[mr] {
+                                self.consume_move(object.value, 0)
                             }
                             if mr >= 0 {
                                 if args.len() != self.sm_arity[mr] {
@@ -1984,6 +2042,7 @@ fn check(src: string) -> bool {
     var sm_pstart: [int] = []
     var sm_ptype: [int] = []
     var sm_mutself: [bool] = []
+    var sm_moveself: [bool] = []
     var sm_ret: [int] = []
     var ev_enum: [int] = []
     var ev_name: [string] = []
@@ -1996,7 +2055,7 @@ fn check(src: string) -> bool {
     var tparams: [string] = []
     var locals: [Local] = []
     var diags: [string] = []
-    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, newtypes: newtypes, sf_owner: sf_owner, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, locals: locals, local_moved: [], scope_depth: 0, diags: diags }
+    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, newtypes: newtypes, sf_owner: sf_owner, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_moveself: sm_moveself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, locals: locals, local_moved: [], scope_depth: 0, diags: diags }
     c.register(decls)                    // pass 1: NAMES (so forward references resolve)
     c.register_types(decls)              // pass 1b: signatures, fields, variants (needs names registered)
     c.check_all(decls)                   // pass 2: bodies
