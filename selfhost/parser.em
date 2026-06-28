@@ -112,7 +112,8 @@ struct Case {
 struct GenericParam {
     name: string
     bounds: [string]
-}
+    is_copy: bool                                   // a `Copy` bound — tracked separately (NOT in `bounds`, so
+}                                                   // ast_print stays byte-identical: stage-0 omits Copy too)
 
 
 struct Field {
@@ -1161,11 +1162,14 @@ struct Parser {
             }
             let name = self.advance().text
             var bounds: [string] = []
+            var is_copy = false
             if self.at(TAG_COLON) {
                 let _ = self.advance()
                 loop {
                     let b = self.advance().text
-                    if b != "Copy" {
+                    if b == "Copy" {
+                        is_copy = true             // tracked separately so ast_print omits it (matches stage-0)
+                    } else {
                         bounds.append(b)
                     }
                     if self.at(TAG_PLUS) {
@@ -1175,7 +1179,7 @@ struct Parser {
                     }
                 }
             }
-            gs.append(GenericParam{ name: name, bounds: bounds })
+            gs.append(GenericParam{ name: name, bounds: bounds, is_copy: is_copy })
             if self.at(TAG_COMMA) {
                 let _ = self.advance()
             } else {

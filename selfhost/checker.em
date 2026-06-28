@@ -152,7 +152,11 @@ struct Checker {
     fn_pstart: [int]           // ...start index into fn_ptype for this fn's params
     fn_ptype: [int]            // every free-fn param SemType, concatenated (arg-type check)
     fn_pqual: [int]            // ...and each param's qualifier (0 none / 1 mut / 2 move), parallel to fn_ptype
+    fn_ptparam: [int]          // ...if a param's type is a BARE generic type-param `T`, that param's index; else -1
     fn_extern: [bool]          // ...is this entry an `extern "c"` fn (no bytecode slot — cannot be spawned)?
+    fg_name: [string]          // free-fn generic-bound table: the function name (one row per param-bound)
+    fg_param: [int]            // ...the generic-parameter index within that function
+    fg_bound: [string]         // ...one bound name (an interface, or "Copy") on that param
     struct_garity: [int]       // ...generic type-parameter count per struct (parallel to `structs`; 0 for a newtype)
     sg_struct: [int]           // struct generic-bound table: struct id (one row per param-bound)
     sg_param: [int]            // ...the generic-parameter index within that struct
@@ -742,8 +746,35 @@ struct Checker {
                         if f.params[p].is_self == false {
                             self.fn_ptype.append(self.param_type(f.params[p]))
                             self.fn_pqual.append(f.params[p].qual)
+                            // ...and, when the param's type is a BARE generic type-param `T`, which one (so a
+                            // call can bind T to the argument's type and check T's bounds at the call site).
+                            self.fn_ptparam.append(tparam_index_of(f.generics, f.params[p]))
                         }
                         p = p + 1
+                    }
+                    // record this fn's generic-parameter bounds (one row per param-bound), keyed by name —
+                    // a `Copy` bound (tracked on the GenericParam, not in `bounds`) becomes a "Copy" row.
+                    var gi = 0
+                    loop {
+                        if gi >= f.generics.len() {
+                            break
+                        }
+                        if f.generics[gi].is_copy {
+                            self.fg_name.append(f.name)
+                            self.fg_param.append(gi)
+                            self.fg_bound.append("Copy")
+                        }
+                        var bi = 0
+                        loop {
+                            if bi >= f.generics[gi].bounds.len() {
+                                break
+                            }
+                            self.fg_name.append(f.name)
+                            self.fg_param.append(gi)
+                            self.fg_bound.append(f.generics[gi].bounds[bi])
+                            bi = bi + 1
+                        }
+                        gi = gi + 1
                     }
                 }
                 case DExtern(abi, fns) {
@@ -764,6 +795,7 @@ struct Checker {
                                 let q = fns[e].params[ep].qual
                                 self.fn_ptype.append(pt)
                                 self.fn_pqual.append(q)
+                                self.fn_ptparam.append(0 - 1)   // externs aren't generic (keep parallel to fn_ptype)
                                 // A C call passes args BY VALUE: a qualified struct param would skip the leaf-
                                 // flattening the boundary needs. Two qualifiers ARE meaningful — `mut` on a buffer
                                 // ([T]) the C fn writes in place, and `move` on a `Ptr` handle it takes ownership
@@ -1136,6 +1168,32 @@ struct Checker {
             return bound == "Hash" || bound == "Eq"
         }
         return false
+    }
+
+
+    // check_tparam_bounds verifies that an argument bound to free function `fname`'s generic type-parameter
+    // `g` (via a bare-`T` value parameter) satisfies every bound on `g`: a `Copy` bound rejects a move type
+    // (struct/array), an interface bound rejects a type that doesn't satisfy it (check.c:3321/3353). An
+    // unmodelled (TY_INFER) argument is lenient throughout, so only a CONCRETE bad argument is rejected.
+    fn check_tparam_bounds(mut self, fname: string, g: int, argty: int) {
+        var i = 0
+        loop {
+            if i >= self.fg_name.len() {
+                break
+            }
+            if self.fg_name[i] == fname && self.fg_param[i] == g {
+                if self.fg_bound[i] == "Copy" {
+                    if self.is_move_type(argty) {
+                        self.error("type argument is not Copy — only scalars, strings, and enums satisfy a 'Copy' bound (not a struct or array)")
+                    }
+                } else {
+                    if self.type_satisfies_bound(argty, self.fg_bound[i]) == false {
+                        self.error("type argument does not satisfy the generic bound")
+                    }
+                }
+            }
+            i = i + 1
+        }
     }
 
 
@@ -1871,6 +1929,12 @@ struct Checker {
                                         if self.fn_pqual[self.fn_pstart[fi] + a] == 2 {
                                             self.consume_move(args[a], 0)
                                         }
+                                        // If this parameter is a bare generic type-param `T`, the argument binds
+                                        // T — so its type must satisfy T's bounds (Copy / an interface).
+                                        let g = self.fn_ptparam[self.fn_pstart[fi] + a]
+                                        if g >= 0 {
+                                            self.check_tparam_bounds(name, g, argtypes[a])
+                                        }
                                         a = a + 1
                                     }
                                 }
@@ -2468,6 +2532,38 @@ fn gp_names(gs: [ps.GenericParam]) -> [string] {
 }
 
 
+// tparam_index_of returns the generic-parameter index a value parameter's type refers to when that type is
+// a BARE type-param `T` (so a call can bind T to the argument's type and check T's bounds), or -1 otherwise.
+// Only a bare unqualified `TyName` matching a declared generic name qualifies — `[T]`, `Box<T>`, a concrete
+// type, etc. return -1 (those need full unification, which the synthesize-only checker does not do).
+fn tparam_index_of(generics: [ps.GenericParam], p: ps.Param) -> int {
+    if p.ty.len() != 1 {
+        return 0 - 1
+    }
+    match p.ty[0] {
+        case TyName(qual, name) {
+            if qual != "" {
+                return 0 - 1
+            }
+            var i = 0
+            loop {
+                if i >= generics.len() {
+                    break
+                }
+                if generics[i].name == name {
+                    return i
+                }
+                i = i + 1
+            }
+            return 0 - 1
+        }
+        case _ {
+            return 0 - 1
+        }
+    }
+}
+
+
 // gp_names2 = the names of two generic-parameter lists concatenated (a method sees its struct's params too).
 fn gp_names2(outer: [ps.GenericParam], inner: [ps.GenericParam]) -> [string] {
     var out = gp_names(outer)
@@ -2616,7 +2712,11 @@ fn check(src: string) -> bool {
     var fn_pstart: [int] = []
     var fn_ptype: [int] = []
     var fn_pqual: [int] = []
+    var fn_ptparam: [int] = []
     var fn_extern: [bool] = []
+    var fg_name: [string] = []
+    var fg_param: [int] = []
+    var fg_bound: [string] = []
     var struct_garity: [int] = []
     var sg_struct: [int] = []
     var sg_param: [int] = []
@@ -2646,7 +2746,7 @@ fn check(src: string) -> bool {
     var tparams: [string] = []
     var locals: [Local] = []
     var diags: [string] = []
-    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_ret: fn_ret, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, fn_extern: fn_extern, struct_garity: struct_garity, sg_struct: sg_struct, sg_param: sg_param, sg_bound: sg_bound, simpl_struct: simpl_struct, simpl_iface: simpl_iface, newtypes: newtypes, sf_owner: sf_owner, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_moveself: sm_moveself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, nursery_depth: 0, locals: locals, local_moved: [], local_consumed: [], loop_break_consumed: [], loop_saw_break: false, scope_depth: 0, diags: diags }
+    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_ret: fn_ret, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, fn_ptparam: fn_ptparam, fn_extern: fn_extern, fg_name: fg_name, fg_param: fg_param, fg_bound: fg_bound, struct_garity: struct_garity, sg_struct: sg_struct, sg_param: sg_param, sg_bound: sg_bound, simpl_struct: simpl_struct, simpl_iface: simpl_iface, newtypes: newtypes, sf_owner: sf_owner, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_moveself: sm_moveself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, nursery_depth: 0, locals: locals, local_moved: [], local_consumed: [], loop_break_consumed: [], loop_saw_break: false, scope_depth: 0, diags: diags }
     c.register(decls)                    // pass 1: NAMES (so forward references resolve)
     c.register_types(decls)              // pass 1b: signatures, fields, variants (needs names registered)
     c.check_all(decls)                   // pass 2: bodies
