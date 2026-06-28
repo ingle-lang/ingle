@@ -154,6 +154,11 @@ struct Checker {
     fn_pqual: [int]            // ...and each param's qualifier (0 none / 1 mut / 2 move), parallel to fn_ptype
     fn_extern: [bool]          // ...is this entry an `extern "c"` fn (no bytecode slot — cannot be spawned)?
     struct_garity: [int]       // ...generic type-parameter count per struct (parallel to `structs`; 0 for a newtype)
+    sg_struct: [int]           // struct generic-bound table: struct id (one row per param-bound)
+    sg_param: [int]            // ...the generic-parameter index within that struct
+    sg_bound: [string]         // ...one bound name (an interface, or "Copy") on that param
+    simpl_struct: [int]        // struct-implements table: struct id
+    simpl_iface: [string]      // ...one interface name the struct declares it `implements`
     newtypes: [string]         // newtype names (a newtype value must stay lenient, NOT resolve to a struct)
     sf_owner: [int]            // struct-field table: owning struct index (parallel to `structs`)
     sf_name: [string]          // ...field name
@@ -775,6 +780,35 @@ struct Checker {
                 case DStruct(name, generics, impls, fields, methods) {
                     let sid = index_of(self.structs, name)
                     self.tparams = gp_names(generics)        // the struct's own type-params shadow types
+                    // Record this struct's generic-parameter bounds (one row per param-bound) and its
+                    // `implements` list — consulted when a construction `Box<X>{…}` checks each type argument
+                    // against the parameter's bound (a Copy bound, or an interface like Hash/Eq).
+                    var gpi = 0
+                    loop {
+                        if gpi >= generics.len() {
+                            break
+                        }
+                        var gbi = 0
+                        loop {
+                            if gbi >= generics[gpi].bounds.len() {
+                                break
+                            }
+                            self.sg_struct.append(sid)
+                            self.sg_param.append(gpi)
+                            self.sg_bound.append(generics[gpi].bounds[gbi])
+                            gbi = gbi + 1
+                        }
+                        gpi = gpi + 1
+                    }
+                    var sii = 0
+                    loop {
+                        if sii >= impls.len() {
+                            break
+                        }
+                        self.simpl_struct.append(sid)
+                        self.simpl_iface.append(impls[sii])
+                        sii = sii + 1
+                    }
                     // every name in `implements` must be a declared interface (or the prelude's built-in
                     // keyable interfaces Hash/Eq, which need no declaration).
                     var ii = 0
@@ -1067,6 +1101,63 @@ struct Checker {
             return self.method_row(pt - STRUCT_BASE, "show") >= 0
         }
         return false
+    }
+
+
+    // struct_implements reports whether struct `sid` declares it `implements` interface `iface`.
+    fn struct_implements(self, sid: int, iface: string) -> bool {
+        var i = 0
+        loop {
+            if i >= self.simpl_struct.len() {
+                break
+            }
+            if self.simpl_struct[i] == sid && self.simpl_iface[i] == iface {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+
+    // type_satisfies_bound reports whether a CONCRETE type argument `t` satisfies a generic `bound` (an
+    // interface name). A struct satisfies it by `implements`; an integer/bool/string satisfies the built-in
+    // keyable interfaces Hash/Eq (the only bounds builtins provide). Everything unmodelled (TY_INFER —
+    // type-params, newtypes, imports, generic instances) stays LENIENT (true: we can't disprove it).
+    // Mirrors check.c:type_satisfies_bound. ("Copy" is handled separately — see the struct-lit check.)
+    fn type_satisfies_bound(self, t: int, bound: string) -> bool {
+        if t == TY_INFER || t == TY_ERROR {
+            return true
+        }
+        if t >= STRUCT_BASE && t < ENUM_BASE {
+            return self.struct_implements(t - STRUCT_BASE, bound)
+        }
+        if is_integer_ty(t) || t == TY_BOOL || t == TY_STRING {
+            return bound == "Hash" || bound == "Eq"
+        }
+        return false
+    }
+
+
+    // ty_arg_types resolves a `Name<A, B, …>` annotation's type arguments to their SemTypes (empty for a
+    // bare `Name`). Used to check a struct-literal's `<…>` arguments against the struct's generic bounds.
+    fn ty_arg_types(self, t: ps.Ty) -> [int] {
+        var out: [int] = []
+        match t {
+            case TyGeneric(qual, name, args) {
+                var i = 0
+                loop {
+                    if i >= args.len() {
+                        break
+                    }
+                    out.append(self.annotation_type(args[i]))
+                    i = i + 1
+                }
+            }
+            case _ {
+            }
+        }
+        return out
     }
 
 
@@ -1924,6 +2015,27 @@ struct Checker {
                     if ty_arg_count(ty.value) != self.struct_garity[si] {
                         self.error("wrong number of type arguments for this struct")
                     }
+                    // Each type argument must satisfy its parameter's INTERFACE bound (Hash/Eq/…) — checked at
+                    // the construction site, where the arguments are concrete (check.c:5183). A struct arg
+                    // satisfies by `implements`; a scalar/string by the built-in keyable interfaces; anything
+                    // unmodelled (TY_INFER) stays lenient. (A `Copy` bound is skipped here — stage-0 only
+                    // enforces it alongside a witness-bearing interface bound; no corpus target needs it.)
+                    let argtys = self.ty_arg_types(ty.value)
+                    var bi = 0
+                    loop {
+                        if bi >= self.sg_struct.len() {
+                            break
+                        }
+                        if self.sg_struct[bi] == si && self.sg_bound[bi] != "Copy" {
+                            let g = self.sg_param[bi]
+                            if g < argtys.len() {
+                                if self.type_satisfies_bound(argtys[g], self.sg_bound[bi]) == false {
+                                    self.error("a type argument does not satisfy the struct's generic bound (it must implement Hash / Eq)")
+                                }
+                            }
+                        }
+                        bi = bi + 1
+                    }
                 }
                 // Each provided field must name a declared field, with an assignable value.
                 var i = 0
@@ -2506,6 +2618,11 @@ fn check(src: string) -> bool {
     var fn_pqual: [int] = []
     var fn_extern: [bool] = []
     var struct_garity: [int] = []
+    var sg_struct: [int] = []
+    var sg_param: [int] = []
+    var sg_bound: [string] = []
+    var simpl_struct: [int] = []
+    var simpl_iface: [string] = []
     var newtypes: [string] = []
     var sf_owner: [int] = []
     var sf_name: [string] = []
@@ -2529,7 +2646,7 @@ fn check(src: string) -> bool {
     var tparams: [string] = []
     var locals: [Local] = []
     var diags: [string] = []
-    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_ret: fn_ret, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, fn_extern: fn_extern, struct_garity: struct_garity, newtypes: newtypes, sf_owner: sf_owner, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_moveself: sm_moveself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, nursery_depth: 0, locals: locals, local_moved: [], local_consumed: [], loop_break_consumed: [], loop_saw_break: false, scope_depth: 0, diags: diags }
+    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_ret: fn_ret, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, fn_extern: fn_extern, struct_garity: struct_garity, sg_struct: sg_struct, sg_param: sg_param, sg_bound: sg_bound, simpl_struct: simpl_struct, simpl_iface: simpl_iface, newtypes: newtypes, sf_owner: sf_owner, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_moveself: sm_moveself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, nursery_depth: 0, locals: locals, local_moved: [], local_consumed: [], loop_break_consumed: [], loop_saw_break: false, scope_depth: 0, diags: diags }
     c.register(decls)                    // pass 1: NAMES (so forward references resolve)
     c.register_types(decls)              // pass 1b: signatures, fields, variants (needs names registered)
     c.check_all(decls)                   // pass 2: bodies
