@@ -258,7 +258,11 @@ struct Checker {
             case EIdent(name) {
                 let slot = self.local_slot(name)
                 if slot >= 0 {
-                    if self.locals[slot].owned && self.local_moved[slot] == false && self.is_boxed_move(slot) {
+                    if self.locals[slot].owned == false && self.locals[slot].ty == TY_PTR {
+                        // OFI-049: a BORROWED Ptr (a plain `f: Ptr` param) may not be closed or transferred —
+                        // the caller still owns the handle; this would double-close / strand them.
+                        self.error("cannot close or transfer a borrowed 'Ptr'; take it by 'move' to gain ownership (declare the parameter 'move f: Ptr', not 'f' or 'mut f')")
+                    } else if self.locals[slot].owned && self.local_moved[slot] == false && self.is_boxed_move(slot) {
                         self.local_moved[slot] = true
                     }
                 }
@@ -1450,6 +1454,20 @@ struct Checker {
                 }
                 match callee.value {
                     case EIdent(name) {
+                        // OFI-049: a Ptr cannot be an enum payload (`Some(f)`) — a handle flowing through an
+                        // erased generic enum would escape linearity checking.
+                        if index_of(self.variants, name) >= 0 {
+                            var pa = 0
+                            loop {
+                                if pa >= argtypes.len() {
+                                    break
+                                }
+                                if argtypes[pa] == TY_PTR {
+                                    self.error("a 'Ptr' is a linear FFI handle and cannot be an enum payload")
+                                }
+                                pa = pa + 1
+                            }
+                        }
                         // assert(cond): the condition must be a bool (when its type is concretely known).
                         if name == "assert" && args.len() >= 1 {
                             if argtypes[0] != TY_INFER && argtypes[0] != TY_ERROR && argtypes[0] != TY_BOOL {
