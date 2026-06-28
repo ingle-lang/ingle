@@ -123,6 +123,7 @@ struct Checker {
     sm_arity: [int]            // ...declared param count (self excluded)
     sm_pstart: [int]           // ...start index into sm_ptype
     sm_ptype: [int]            // every method param SemType, concatenated (method arg-type check)
+    sm_mutself: [bool]         // ...does the method take `mut self` / `move self` (a mutable receiver)?
     ev_enum: [int]             // enum-variant table: owning enum index (parallel to `enums`)
     ev_name: [string]          // ...variant name
     ev_arity: [int]            // ...payload field count
@@ -433,6 +434,18 @@ struct Checker {
                 case DStruct(name, generics, impls, fields, methods) {
                     let sid = index_of(self.structs, name)
                     self.tparams = gp_names(generics)        // the struct's own type-params shadow types
+                    // every name in `implements` must be a declared interface (or the prelude's built-in
+                    // keyable interfaces Hash/Eq, which need no declaration).
+                    var ii = 0
+                    loop {
+                        if ii >= impls.len() {
+                            break
+                        }
+                        if index_of(self.ifaces, impls[ii]) < 0 && impls[ii] != "Hash" && impls[ii] != "Eq" {
+                            self.error("unknown interface in 'implements'")
+                        }
+                        ii = ii + 1
+                    }
                     // A `resource struct` (which owns a Ptr handle and frees it in `drop`) is the ONE place
                     // a Ptr field is allowed. The self-host parser drops the `resource` keyword, but only a
                     // resource struct defines a `drop` method — so that is the sound proxy for the exception.
@@ -470,6 +483,7 @@ struct Checker {
                         self.sm_owner.append(sid)
                         self.sm_name.append(methods[mi].name)
                         self.sm_pstart.append(self.sm_ptype.len())
+                        var mself = false
                         var ac = 0
                         var mp = 0
                         loop {
@@ -479,10 +493,13 @@ struct Checker {
                             if methods[mi].params[mp].is_self == false {
                                 self.sm_ptype.append(self.param_type(methods[mi].params[mp]))
                                 ac = ac + 1
+                            } else if methods[mi].params[mp].qual == 1 {
+                                mself = true                          // `mut self` (NOT `move self`=2, which consumes)
                             }
                             mp = mp + 1
                         }
                         self.sm_arity.append(ac)
+                        self.sm_mutself.append(mself)
                         mi = mi + 1
                     }
                 }
@@ -533,6 +550,11 @@ struct Checker {
                 case DLet(is_var, name, ty, value) {
                     var empty: [string] = []
                     self.tparams = empty
+                    if is_var {
+                        self.error("a top-level 'var' is not supported; a module-level binding must be an immutable 'let' constant")
+                    } else if is_const_literal(value.value) == false {
+                        self.error("a top-level constant must be a literal value (int, float, bool, or string)")
+                    }
                     let vt = self.check_expr(value.value)
                     if ty.len() > 0 {
                         let bt = self.annotation_type(ty[0])
@@ -1120,6 +1142,16 @@ struct Checker {
                             if mr < 0 && mname != "clone" {
                                 self.error("no such method on this struct")   // `clone` is a built-in deep copy
                             }
+                            // a `mut self` method needs a MUTABLE receiver: an immutable `let`/borrowed root
+                            // can't be mutated through it.
+                            if mr >= 0 && self.sm_mutself[mr] {
+                                let rroot = assign_root_ident(object.value)
+                                if rroot.len() == 1 {
+                                    if rroot[0] != "self" && self.resolve_local(rroot[0]) && self.local_is_var(rroot[0]) == false {
+                                        self.error("cannot call a 'mut self' method on an immutable binding; declare it 'var' (or take 'mut')")
+                                    }
+                                }
+                            }
                             if mr >= 0 {
                                 if args.len() != self.sm_arity[mr] {
                                     self.error("wrong number of arguments to method")
@@ -1233,7 +1265,12 @@ struct Checker {
                 return STRUCT_BASE + si
             }
             case ETry(operand) {
-                self.check_expr(operand.value)
+                let ot = self.check_expr(operand.value)
+                // `?` unwraps a Result/Option (both lenient TY_INFER here). A CONCRETE operand type can't be
+                // one, so it is an error; an unmodelled (TY_INFER) operand stays lenient.
+                if ot != TY_INFER && ot != TY_ERROR {
+                    self.error("'?' requires a Result or Option value")
+                }
                 return TY_INFER
             }
             case ERange(lo, hi) {
@@ -1278,6 +1315,46 @@ struct Checker {
 
 // is_int_literal / is_float_literal report whether an expression is a bare numeric literal — the operands
 // stage-0 lets adapt to the other side's width in arithmetic.
+// is_const_literal reports whether an expression is a compile-time constant a top-level `let` may hold: an
+// int/float/bool/string literal, or a unary-minus of an int/float literal (a negative constant). Mirrors
+// src/check.c:is_const_literal.
+fn is_const_literal(e: ps.Expr) -> bool {
+    match e {
+        case EInt(v) {
+            return true
+        }
+        case EFloat(v) {
+            return true
+        }
+        case EBool(v) {
+            return true
+        }
+        case EStr(parts) {
+            return true
+        }
+        case EUnary(op, operand) {
+            if ps.unop_id(op) == 1 {
+                match operand.value {
+                    case EInt(v) {
+                        return true
+                    }
+                    case EFloat(v) {
+                        return true
+                    }
+                    case _ {
+                        return false
+                    }
+                }
+            }
+            return false
+        }
+        case _ {
+            return false
+        }
+    }
+}
+
+
 fn is_int_literal(e: ps.Expr) -> bool {
     match e {
         case EInt(v) {
@@ -1567,6 +1644,7 @@ fn check(src: string) -> bool {
     var sm_arity: [int] = []
     var sm_pstart: [int] = []
     var sm_ptype: [int] = []
+    var sm_mutself: [bool] = []
     var ev_enum: [int] = []
     var ev_name: [string] = []
     var ev_arity: [int] = []
@@ -1574,7 +1652,7 @@ fn check(src: string) -> bool {
     var tparams: [string] = []
     var locals: [Local] = []
     var diags: [string] = []
-    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, newtypes: newtypes, sf_owner: sf_owner, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, locals: locals, scope_depth: 0, diags: diags }
+    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, newtypes: newtypes, sf_owner: sf_owner, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, locals: locals, scope_depth: 0, diags: diags }
     c.register(decls)                    // pass 1: NAMES (so forward references resolve)
     c.register_types(decls)              // pass 1b: signatures, fields, variants (needs names registered)
     c.check_all(decls)                   // pass 2: bodies
