@@ -267,6 +267,27 @@ struct Checker {
     }
 
 
+    // check_loop_backedge reports an OUTER local (index < loop_base) that was NOT moved before the loop but
+    // IS moved at the body's end on a path that reaches the back-edge — it would be moved AGAIN next
+    // iteration (OFI-074). Only runs when the body can reach the back-edge (does not always exit the loop).
+    fn check_loop_backedge(mut self, pre: [bool], loop_base: int) {
+        var i = 0
+        loop {
+            if i >= loop_base {
+                break
+            }
+            if i < self.local_moved.len() {
+                if pre[i] == false {
+                    if self.local_moved[i] {
+                        self.error("value moved inside a loop body (it would be moved again on the next iteration)")
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+
+
     // merge_moved ORs another moved-snapshot into the current state (the OR-merge: moved on ANY path).
     fn merge_moved(mut self, other: [bool]) {
         var i = 0
@@ -1063,6 +1084,7 @@ struct Checker {
                 if index_var != "" {
                     self.declare(index_var, TY_INFER, false, false, false)
                 }
+                let pre = clone_bools(self.local_moved)
                 var i = 0
                 loop {
                     if i >= body.len() {
@@ -1071,13 +1093,23 @@ struct Checker {
                     self.check_stmt(body[i])
                     i = i + 1
                 }
+                if block_exits_loop(body) == false {     // a move reaching the back-edge would recur (OFI-074)
+                    self.check_loop_backedge(pre, saved)
+                }
+                self.local_moved = clone_bools(pre)
                 self.truncate_locals(saved)
                 self.loop_depth = self.loop_depth - 1
                 self.scope_depth = self.scope_depth - 1
             }
             case SLoop(body) {
                 self.loop_depth = self.loop_depth + 1
+                let pre = clone_bools(self.local_moved)
+                let loop_base = self.locals.len()
                 self.check_block(body)
+                if block_exits_loop(body) == false {     // the body can reach the back-edge
+                    self.check_loop_backedge(pre, loop_base)
+                }
+                self.local_moved = clone_bools(pre)      // loop-internal moves don't persist out (lenient)
                 self.loop_depth = self.loop_depth - 1
             }
             case SBreak(line) {
@@ -1334,6 +1366,10 @@ struct Checker {
                                                     self.error("cannot pass an immutable binding to a 'mut' parameter; declare it 'var' (or pass by 'move' to transfer ownership)")
                                                 }
                                             }
+                                        }
+                                        // A `move` parameter (qual 2) CONSUMES its argument — transfers ownership.
+                                        if self.fn_pqual[self.fn_pstart[fi] + a] == 2 {
+                                            self.consume_move(args[a], 0)
                                         }
                                         a = a + 1
                                     }
@@ -1638,6 +1674,49 @@ fn clone_bools(xs: [bool]) -> [bool] {
         i = i + 1
     }
     return out
+}
+
+
+// block_exits_loop / stmt_exits_loop report whether a statement (sequence) ALWAYS leaves the enclosing loop
+// on every path — via `return` or a `break` that targets THIS loop. A body that always exits never reaches
+// the back-edge, so a move inside it can't recur (OFI-074). `continue` and fall-through reach the back-edge,
+// so they are NOT exits. A nested loop/for is opaque here (its `break` targets the inner loop).
+fn block_exits_loop(body: [ps.Stmt]) -> bool {
+    var i = 0
+    loop {
+        if i >= body.len() {
+            break
+        }
+        if stmt_exits_loop(body[i]) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+
+fn stmt_exits_loop(s: ps.Stmt) -> bool {
+    match s {
+        case SReturn(value, line) {
+            return true
+        }
+        case SBreak(line) {
+            return true
+        }
+        case SBlock(body) {
+            return block_exits_loop(body)
+        }
+        case SIf(cond, then_blk, els) {
+            if els.len() == 0 {
+                return false
+            }
+            return block_exits_loop(then_blk) && stmt_exits_loop(els[0])
+        }
+        case _ {
+            return false
+        }
+    }
 }
 
 
