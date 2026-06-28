@@ -1052,6 +1052,24 @@ struct Checker {
     }
 
 
+    // hole_showable reports whether a value of SemType `pt` can be interpolated (`"{x}"`). Directly showable:
+    // a number, bool, or string (and TY_INFER/ERROR stay lenient — incl. newtypes, which render via their
+    // base, and interface values). A concrete STRUCT renders only via a `show` method (the Show contract,
+    // detected structurally). An enum / array / Ptr / unit is NOT showable. Mirrors check.c:show_renders.
+    fn hole_showable(self, pt: int) -> bool {
+        if pt == TY_INFER || pt == TY_ERROR {
+            return true
+        }
+        if pt == TY_BOOL || pt == TY_STRING || is_numeric(pt) {
+            return true
+        }
+        if pt >= STRUCT_BASE && pt < ENUM_BASE {
+            return self.method_row(pt - STRUCT_BASE, "show") >= 0
+        }
+        return false
+    }
+
+
     // fn_index_of returns the parallel-array index of a top-level free function `name` (into
     // fn_arity/fn_pstart), or -1 if `name` is not one (a method, builtin, constructor, closure, unknown).
     fn fn_index_of(self, name: string) -> int {
@@ -1616,7 +1634,14 @@ struct Checker {
                         break
                     }
                     if parts[i].hole.len() == 1 {
-                        self.check_expr(parts[i].hole[0])
+                        let pt = self.check_expr(parts[i].hole[0])
+                        // OFI-139: an interpolation hole must be directly showable (numeric / bool / string)
+                        // OR provide the Show contract (`fn show(self) -> string`, a struct method). A concrete
+                        // struct-without-show / enum / array / Ptr can't render. Newtypes are TY_INFER here →
+                        // lenient (stage-0 renders them via their base type).
+                        if self.hole_showable(pt) == false {
+                            self.error("this value can't be interpolated directly: give its type a 'fn show(self) -> string' method, or interpolate a number/string/bool")
+                        }
                     }
                     i = i + 1
                 }
