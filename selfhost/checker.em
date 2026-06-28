@@ -106,6 +106,7 @@ struct Local {
     ty: int                    // the binding's SemType (TY_INFER when not yet inferable)
     is_var: bool               // true for `var`/`mut`/`move`; false for `let` and borrowed bindings
     owned: bool                // owns its value (a local, or a `move` param) vs borrows it (a plain param)
+    mvparam: bool              // a `move`-qualified parameter — movable by the qualifier regardless of type
 }
 
 
@@ -165,7 +166,7 @@ struct Checker {
     // declare also enforces no-redeclaration-in-the-same-scope: a binding whose name already exists at the
     // current depth is an error (stage-0 treats a function's params and its body top level as one scope;
     // nested blocks open deeper scopes where shadowing IS allowed). `_` is the discard name, never a redecl.
-    fn declare(mut self, name: string, ty: int, is_var: bool, owned: bool) {
+    fn declare(mut self, name: string, ty: int, is_var: bool, owned: bool, mvparam: bool) {
         if name != "_" {
             var i = self.locals.len() - 1
             loop {
@@ -182,7 +183,7 @@ struct Checker {
                 i = i - 1
             }
         }
-        self.locals.append(Local{ name: name, depth: self.scope_depth, ty: ty, is_var: is_var, owned: owned })
+        self.locals.append(Local{ name: name, depth: self.scope_depth, ty: ty, is_var: is_var, owned: owned, mvparam: mvparam })
         self.local_moved.append(false)
     }
 
@@ -288,6 +289,9 @@ struct Checker {
     // moved — check.c:2627), and without recursive all-scalar analysis we can't tell it from a boxed one, so
     // we never mark it (no false-reject; a boxed-let-struct move is simply not yet caught).
     fn is_boxed_move(self, slot: int) -> bool {
+        if self.locals[slot].mvparam {
+            return true                  // a `move` param is movable by the qualifier (any type, incl. generic T)
+        }
         let t = self.locals[slot].ty
         if t == TY_ARRAY || t == TY_PTR {
             return true
@@ -868,7 +872,7 @@ struct Checker {
                 self.self_is_var = f.params[p].qual != 0    // `mut self` / `move self` receiver is mutable
             } else {
                 // a `mut`/`move` parameter is a mutable binding; a plain (borrow) parameter is not.
-                self.declare(f.params[p].name, self.param_type(f.params[p]), f.params[p].qual != 0, f.params[p].qual == 2)
+                self.declare(f.params[p].name, self.param_type(f.params[p]), f.params[p].qual != 0, f.params[p].qual == 2, f.params[p].qual == 2)
             }
             p = p + 1
         }
@@ -924,7 +928,7 @@ struct Checker {
             if i >= n {
                 break
             }
-            kept.append(Local{ name: self.locals[i].name, depth: self.locals[i].depth, ty: self.locals[i].ty, is_var: self.locals[i].is_var, owned: self.locals[i].owned })
+            kept.append(Local{ name: self.locals[i].name, depth: self.locals[i].depth, ty: self.locals[i].ty, is_var: self.locals[i].is_var, owned: self.locals[i].owned, mvparam: self.locals[i].mvparam })
             keptm.append(self.local_moved[i])           // a move on an OUTER local persists past an inner scope
             i = i + 1
         }
@@ -974,9 +978,9 @@ struct Checker {
                     if assignable(vt, bt, is_int_literal(value.value), is_float_literal(value.value)) == false {
                         self.error("binding annotation does not match the value's type")
                     }
-                    self.declare(name, bt, is_var, true)     // an annotated binding carries its declared type
+                    self.declare(name, bt, is_var, true, false)     // an annotated binding carries its declared type
                 } else {
-                    self.declare(name, vt, is_var, true)     // ...otherwise infer it from the initialiser
+                    self.declare(name, vt, is_var, true, false)     // ...otherwise infer it from the initialiser
                 }
             }
             case SReturn(value, line) {
@@ -1055,9 +1059,9 @@ struct Checker {
                 self.scope_depth = self.scope_depth + 1
                 self.loop_depth = self.loop_depth + 1
                 let saved = self.locals.len()
-                self.declare(vname, TY_INFER, false, false)        // a for-loop binding is an immutable borrow
+                self.declare(vname, TY_INFER, false, false, false)        // a for-loop binding is an immutable borrow
                 if index_var != "" {
-                    self.declare(index_var, TY_INFER, false, false)
+                    self.declare(index_var, TY_INFER, false, false, false)
                 }
                 var i = 0
                 loop {
@@ -1152,7 +1156,7 @@ struct Checker {
                         if bi >= cases[ci].pattern.bindings.len() {
                             break
                         }
-                        self.declare(cases[ci].pattern.bindings[bi], TY_INFER, false, false)   // a match binding is a borrow
+                        self.declare(cases[ci].pattern.bindings[bi], TY_INFER, false, false, false)   // a match binding is a borrow
                         bi = bi + 1
                     }
                     var si = 0
