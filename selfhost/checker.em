@@ -1219,6 +1219,33 @@ struct Checker {
                     }
                     self.declare(name, bt, is_var, true, false)     // an annotated binding carries its declared type
                 } else {
+                    // No annotation → the initialiser must be self-inferring. stage-0 threads an EXPECTED type
+                    // down (`let c: Channel<T> = …`); without one, two forms have no inferable type: a bare
+                    // `None` (Option<T> — T unknown; ALWAYS un-inferable bare, verified vs stage-0) and a
+                    // `channel(N)` call (Channel<T>). channel is gated on `vt == TY_INFER` (a concrete-returning
+                    // shadow would infer); None is unconditional (stage-0 rejects it for every enum).
+                    match value.value {
+                        case EIdent(n) {
+                            if n == "None" {
+                                self.error("cannot infer the type of 'None' here; add a type annotation")
+                            }
+                        }
+                        case ECall(callee, cargs) {
+                            if vt == TY_INFER {
+                                match callee.value {
+                                    case EIdent(cn) {
+                                        if cn == "channel" {
+                                            self.error("cannot infer the channel's element type; annotate it (e.g. let c: Channel<int> = channel(N))")
+                                        }
+                                    }
+                                    case _ {
+                                    }
+                                }
+                            }
+                        }
+                        case _ {
+                        }
+                    }
                     self.declare(name, vt, is_var, true, false)     // ...otherwise infer it from the initialiser
                 }
             }
@@ -1911,6 +1938,11 @@ struct Checker {
                 // one, so it is an error; an unmodelled (TY_INFER) operand stays lenient.
                 if ot != TY_INFER && ot != TY_ERROR {
                     self.error("'?' requires a Result or Option value")
+                } else if self.current_return != TY_INFER && self.current_return != TY_ERROR {
+                    // `?` is a hidden early return of the Err/None, so the enclosing function must ITSELF
+                    // return a Result/Option (which resolve to TY_INFER). A concrete return type — incl. a
+                    // plain `int`/struct or an absent return type (TY_UNIT) — can't propagate (check.c:5364).
+                    self.error("'?' can only be used in a function that returns a Result or Option")
                 }
                 return TY_INFER
             }
