@@ -308,5 +308,47 @@ if [ -f "$CGSRC" ]; then
     fail=$((fail + cgfail))
 fi
 
+# ---- Stage 5: the UNIFIED self-hosted compiler (selfhost/emberc.em) --------------------------------
+# The whole pipeline (lex → parse → CHECK → codegen) as ONE program, compiled to a native self-built
+# compiler BINARY. We gate two properties: (1) it reproduces every self-hosted module's bytecode
+# byte-identically to stage-0 (the fixed point through one driver), and (2) it REJECTS an ill-typed
+# program with exit 65 while ACCEPTING a valid one. This is the first standalone-bootstrap milestone.
+EMBERCSRC="$ROOT/selfhost/emberc.em"
+if [ -f "$EMBERCSRC" ] && [ "$HAVE_CC" -eq 1 ]; then
+    selfbin="${TMPDIR:-/tmp}/emberc_self_$$"
+    if (cd "$ROOT" && "$BIN" -o "$selfbin" selfhost/emberc.em >/dev/null 2>&1); then
+        ubpass=0
+        ubfail=0
+        for m in selfhost/lexer.em selfhost/parser.em selfhost/checker.em selfhost/codegen.em; do
+            oracle=$(cd "$ROOT" && "$BIN" --emit=bytecode "$m" 2>/dev/null)
+            actual=$(cd "$ROOT" && "$selfbin" "$m" 2>/dev/null)
+            if [ "$oracle" = "$actual" ]; then
+                ubpass=$((ubpass + 1))
+            else
+                ubfail=$((ubfail + 1))
+                echo "FAIL    unified emberc-self differs from stage-0 on $m"
+            fi
+        done
+        # the check gate: an ill-typed program must be REJECTED (exit 65), a valid one ACCEPTED (exit 0)
+        if (cd "$ROOT" && "$selfbin" tests/run/error_newtype_arith.em >/dev/null 2>&1); then
+            ubfail=$((ubfail + 1)); echo "FAIL    unified emberc-self accepted an ill-typed program"
+        else
+            ubpass=$((ubpass + 1))
+        fi
+        if (cd "$ROOT" && "$selfbin" examples/01_hello.em >/dev/null 2>&1); then
+            ubpass=$((ubpass + 1))
+        else
+            ubfail=$((ubfail + 1)); echo "FAIL    unified emberc-self rejected a valid program"
+        fi
+        echo "selfhost unified: emberc-self reproduces $ubpass checks (4 modules + check gate), $ubfail failed"
+        pass=$((pass + ubpass))
+        fail=$((fail + ubfail))
+    else
+        echo "FAIL    selfhost/emberc.em (native compile failed)"
+        fail=$((fail + 1))
+    fi
+    rm -f "$selfbin"
+fi
+
 echo "selfhost: passed $pass, failed $fail"
 [ "$fail" -eq 0 ]

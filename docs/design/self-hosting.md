@@ -10,9 +10,15 @@
 > backend** is byte-identical across 36 gated fixtures plus the compiler's own ~6000 lines. The whole
 > pipeline is gated by `make selfhost` (**1139 checks, 0 failures**) and folded into `make verify`. The
 > remaining work is **checker completeness** (the 7 not-yet-rejected invalid files; it never false-rejects,
-> so it already compiles every valid program including itself) and **packaging a standalone self-hosted
-> driver**. Self-hosting is earned one differential-green stage at a time, never by a big-bang rewrite, and
-> only as far as it actually improves the language and toolchain.
+> so it already compiles every valid program including itself) and finishing the **standalone bootstrap**.
+> **The first bootstrap milestone has LANDED:** `selfhost/emberc.em` is the UNIFIED self-hosted compiler —
+> the whole pipeline (lex → parse → **check** → codegen) as ONE program, compiled to a native self-built
+> compiler **binary** (`emberc -o emberc-self selfhost/emberc.em`). It rejects an ill-typed program with
+> exit 65, emits valid programs' bytecode byte-identically to stage-0, and **reproduces all four of its own
+> modules byte-identically** — gated as Stage 5 of `make selfhost` (**1147/0**). The remaining bootstrap
+> step is making the emitted bytecode *runnable* (a serialization format + a stage-0 loader, or an M5
+> C-emit backend). Self-hosting is earned one differential-green stage at a time, never by a big-bang
+> rewrite, and only as far as it actually improves the language and toolchain.
 >
 > **Findings so far** (the dogfood paying off — every one filed as an OFI and most fixed):
 > - The central "can the language hold a compiler?" risk is **retired** — recursive ASTs (`Box`+`[]`),
@@ -630,9 +636,13 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    ECall` change), plus a parse-time literal-range check (`int_literal_range`, a lexer/parser change). Then
    **M3c** — exact message + position parity over the error files (prerequisite: extend the parser AST to
    carry `line:col`; adding positions won't change `ast_print`, so M2 stays green).
-3. **The standalone bootstrap.** A self-hosted driver that LINKS the front end + codegen into a runnable
-   binary (emitting object code / a runnable chunk), replacing the differential `--emit=run` path — turning
-   the proven fixed point into an actually self-built `emberc`.
+3. **The standalone bootstrap — STARTED.** **Step 1 LANDED:** `selfhost/emberc.em`, the UNIFIED driver
+   (lex → parse → check → codegen as one program), compiled to a native self-built compiler binary that
+   rejects ill-typed programs (exit 65), emits valid bytecode byte-identical to stage-0, and reproduces all
+   four of its own modules (gated, Stage 5 of `make selfhost`). **Step 2 (next):** make the emitted bytecode
+   *runnable* — the structural choice is (a) a bytecode serialization format + a stage-0 `--run-bytecode`
+   loader, or (b) an M5 C-emit backend in the self-hosted codegen → a clang-built binary. (a) is the lighter
+   path and closes the loop (self-hosted-compile a program, then run it).
 4. **M4 deferred-low — nested-inline struct flattening.** The `UNBOX_STRUCT` path for a `let ln =
    Line{a:P, b:P}` of recursively-all-scalar nested value structs; only ~3 corpus files need it (most real
    structs have a string/array/enum field → boxed), so it stays low priority.
