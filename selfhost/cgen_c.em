@@ -1975,18 +1975,77 @@ struct CgcGen {
     }
 
 
-    // emit_str renders a string literal. A single literal run (no interpolation) is an interned, cached
-    // `em_str` via a function-local static, retained on read (cgen_c.c). Interpolation (holes) is deferred.
+    // emit_cached_str renders a literal string run as an interned, function-local `static` em_str, retained
+    // on read (so the caller can consume it) — the cgen_c.c cached-string-literal form.
+    fn emit_cached_str(self, text: string) -> string {
+        let bytes = c_escape(text)
+        let blen = text.bytes().len()
+        return "(\{ static Value _li; static char _ls; if (!_ls) \{ _ls = 1; _li = em_str(&g_em, \"{bytes}\", {blen}); \} if (IS_OBJ(_li)) OBJ_RETAIN(AS_OBJ(_li)); _li; \})"
+    }
+
+
+    // hole_is_string_temp reports whether an interpolation hole is ALREADY a fresh OWNING-TEMP string (a
+    // string-returning call, a string concat, or a nested interpolation) — such a hole is concatenated
+    // DIRECTLY (em_add consumes the temp), skipping em_to_string. A string BINDING / param / field read (a
+    // borrow) and any non-string value go through em_to_string.
+    fn hole_is_string_temp(self, e: ps.Expr) -> bool {
+        if self.is_string_expr(e) == false {
+            return false
+        }
+        match e {
+            case ECall(callee, args) {
+                return true
+            }
+            case EStr(parts) {
+                return true
+            }
+            case EBinary(op, l, r) {
+                return true                          // is_string_expr already confirmed a string `+` concat
+            }
+            case _ {
+                return false
+            }
+        }
+    }
+
+
+    // emit_str_part renders one part of a string: a HOLE `{expr}` → `em_to_string(&g_em, <expr>, 0)` (a fresh
+    // owned string; the hole value is BORROWED) — unless the hole is already an owning-temp string, then it is
+    // concatenated directly. A literal text run → the cached-static string. Fields read inline (parts[i].*) —
+    // passing an array-element field to a fn would be a partial move.
+    fn emit_str_part(mut self, parts: [ps.StrPart], i: int) -> string {
+        if parts[i].hole.len() == 1 {
+            if self.hole_is_string_temp(parts[i].hole[0]) {
+                return self.emit_expr(parts[i].hole[0])
+            }
+            return "em_to_string(&g_em, {self.emit_expr(parts[i].hole[0])}, 0)"
+        }
+        return self.emit_cached_str(parts[i].text)
+    }
+
+
+    // emit_str renders a string. A single literal run (no interpolation) is an interned cached em_str; an
+    // interpolated string `"a{x}b"` LEFT-FOLDS em_add (string concat) over its parts — a literal run is the
+    // cached string, a hole is em_to_string of its value (each part an owned temp em_add consumes). Parts are
+    // emitted in source order (a sequential loop — the OFI-166 discipline).
     fn emit_str(mut self, parts: [ps.StrPart]) -> string {
-        if parts.len() == 1 && parts[0].hole.len() == 0 {
-            let bytes = c_escape(parts[0].text)
-            let blen = parts[0].text.bytes().len()
-            return "(\{ static Value _li; static char _ls; if (!_ls) \{ _ls = 1; _li = em_str(&g_em, \"{bytes}\", {blen}); \} if (IS_OBJ(_li)) OBJ_RETAIN(AS_OBJ(_li)); _li; \})"
-        }
         if parts.len() == 0 {
-            return "(\{ static Value _li; static char _ls; if (!_ls) \{ _ls = 1; _li = em_str(&g_em, \"\", 0); \} if (IS_OBJ(_li)) OBJ_RETAIN(AS_OBJ(_li)); _li; \})"
+            return self.emit_cached_str("")
         }
-        return "INT_VAL(0)"            // interpolation (holes) — deferred to the interp increment
+        if parts.len() == 1 && parts[0].hole.len() == 0 {
+            return self.emit_cached_str(parts[0].text)
+        }
+        var acc = self.emit_str_part(parts, 0)
+        var i = 1
+        loop {
+            if i >= parts.len() {
+                break
+            }
+            let p = self.emit_str_part(parts, i)
+            acc = "em_add(&g_em, {acc}, {p}, 0)"
+            i = i + 1
+        }
+        return acc
     }
 
 
