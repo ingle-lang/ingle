@@ -696,9 +696,16 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    value/boxed split is threaded through struct_sid_any + struct_sid_of (value, gated on is_value) /
    boxed_sid_of. Deferred: an owned-field READ escaping a case/return (em_field_owned), nested boxed structs,
    and enum fields. **With enums+match (M5f) + arrays (M5d) + boxed structs (M5e.2) all done, the LEXER is now
-   the target for the first full module to self-compile via cgen_c.em** — remaining gaps for it are string
-   interpolation (206 sites) and whatever builtins it uses. Then generics (Option/Result monomorphization,
-   arrays-of-structs). Orthogonal follow-up: float-literal emission needs a `%.17g` builtin
+   the target for the first full module to self-compile via cgen_c.em.** Dogfooding the real lexer through
+   cgen_c.em surfaced **M5g** (done, fixture `conv_eq.em`): (1) the string `==`/`!=` BORROW rule — `+`
+   CONSUMES its operands (move) but `==`/`!=` only COMPARE, so an owned operand (a string param compared
+   against many keyword literals — the lexer's hot path) is RETAINED not moved; (2) numeric CONVERSIONS
+   `int(x)` / `i32(x)` / `u8(x)` / `f64(x)` → `em_conv(x, <kind>)`, with `let a = i32(n)` binding a sized C
+   scalar. Remaining lexer gaps (each a small increment, differential-scoped): string methods (`.bytes()` /
+   `.chars()` / `.split()` returning owned arrays), native builtins via `em_native(<id>, …)` (byte_slice, …),
+   `em_struct_array` for struct-element arrays, owned struct-field moves into calls, and string interpolation
+   (206 sites). Then generics (Option/Result monomorphization, arrays-of-structs). Orthogonal follow-up:
+   float-literal emission needs a `%.17g` builtin
    (Ember interpolation is `%g`, so `FLOAT_VAL` can't be produced from a bare `{f}`). OFI-166 (the C
    operand-eval-order discipline — sequence side-effecting subexpressions into ordered statements; gcc
    evaluates a binop/call's operands right-to-left where clang/the VM go left-to-right) is observed

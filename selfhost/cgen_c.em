@@ -1486,8 +1486,11 @@ struct CgcGen {
         var opl = ""
         var opr = ""
         if ctx {
-            opl = self.emit_concat_operand(l)
-            opr = self.emit_concat_operand(r)
+            // `+` (bid 1) CONSUMES its operands (an owned operand is moved in); `==` / `!=` (10/11) only
+            // COMPARE (borrow), so an owned operand is retained, not moved — it is read again later.
+            let consuming = bid == 1
+            opl = self.emit_concat_operand(l, consuming)
+            opr = self.emit_concat_operand(r, consuming)
         } else {
             opl = self.emit_expr(l)
             opr = self.emit_expr(r)
@@ -1532,11 +1535,14 @@ struct CgcGen {
     }
 
 
-    fn emit_concat_operand(mut self, e: ps.Expr) -> string {
+    fn emit_concat_operand(mut self, e: ps.Expr, consuming: bool) -> string {
         match e {
             case EIdent(name) {
                 if self.lookup_drop(name) {
-                    return self.move_binding(name)   // owned → move
+                    if consuming {
+                        return self.move_binding(name)   // `+` consumes → move the owned binding out
+                    }
+                    return self.retain_dance(e)          // `==`/`!=` only compare → retain (still used later)
                 }
                 return self.retain_dance(e)
             }
@@ -1617,6 +1623,10 @@ struct CgcGen {
     fn emit_call(mut self, callee: ps.Expr, args: [ps.Expr]) -> string {
         match callee {
             case EIdent(name) {
+                let ck = numeric_typename_kind(name)
+                if ck >= 0 && args.len() == 1 {
+                    return "em_conv({self.emit_expr(args[0])}, {ck})"   // a numeric-width conversion `int(x)`
+                }
                 if self.en.is_variant(name) {
                     return self.emit_enum_ctor(name, args)   // an enum-variant construction `Circle(4)`
                 }
@@ -1784,6 +1794,10 @@ struct CgcGen {
             case ECall(callee, args) {
                 match callee.value {
                     case EIdent(name) {
+                        let ck = numeric_typename_kind(name)
+                        if ck >= 0 {
+                            return ck                     // a numeric conversion `let a = i32(n)` → a sized scalar
+                        }
                         let fi = self.fn_index(name)
                         if fi >= 0 {
                             return self.fn_ret_kind[fi]
@@ -2078,7 +2092,7 @@ struct CgcGen {
                     let r = self.fresh_var()
                     var rv = "INT_VAL(0)"
                     if value.len() > 0 {
-                        rv = self.emit_concat_operand(value[0].value)
+                        rv = self.emit_concat_operand(value[0].value, true)
                     }
                     println("{self.ind()}\{ Value v{r} = {rv};")
                     self.indent = self.indent + 1
@@ -2140,7 +2154,7 @@ struct CgcGen {
                         }
                     }
                     if done == false {
-                        println("{self.ind()}Value v{id} = {self.emit_concat_operand(value.value)};")
+                        println("{self.ind()}Value v{id} = {self.emit_concat_operand(value.value, true)};")
                     }
                     self.push(name, "v{id}", 0 - 1, false, owned, arr, elem_sk)
                     if bsid >= 0 {
@@ -2448,6 +2462,43 @@ fn is_string_ty(ty: ps.Ty) -> bool {
             return false
         }
     }
+}
+
+
+// numeric_typename_kind returns the em_conv target-kind for a numeric type-name used as a CONVERSION call
+// (`int(x)`, `i32(x)`, `u8(x)`, `f64(x)`), or -1 if `name` is not a numeric typename (mirrors codegen.em).
+fn numeric_typename_kind(name: string) -> int {
+    if name == "int" || name == "i64" {
+        return 0
+    }
+    if name == "i8" {
+        return 1
+    }
+    if name == "i16" {
+        return 2
+    }
+    if name == "i32" {
+        return 3
+    }
+    if name == "u8" {
+        return 4
+    }
+    if name == "u16" {
+        return 5
+    }
+    if name == "u32" {
+        return 6
+    }
+    if name == "u64" {
+        return 7
+    }
+    if name == "f32" {
+        return 8
+    }
+    if name == "f64" {
+        return 9
+    }
+    return 0 - 1
 }
 
 
