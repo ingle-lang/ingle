@@ -703,12 +703,16 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    `int(x)` / `i32(x)` / `u8(x)` / `f64(x)` → `em_conv(x, <kind>)`, with `let a = i32(n)` binding a sized C
    scalar. **M5h — built-in STRING methods (done, fixture `string_methods.em`):** `s.len()` → em_str_len
    (no ctx), `s.bytes()` → em_str_bytes (a fresh owned [u8], so `let bs = s.bytes()` is a dropped array local
-   of element kind u8), `s.chars()`/`s.split(sep)` → [string]. Remaining lexer gaps (each a small, differential-
-   scoped increment): native builtins via `em_native(<id>, …)` (byte_slice, … — needs a builtin name→id
-   table), `em_struct_array` for struct-element arrays, owned struct-field moves into calls
-   (`f(own_into_slot(&g_em, em_enum_field(…)))`), and string interpolation (206 sites). Then generics
-   (Option/Result monomorphization, arrays-of-structs). Orthogonal follow-up:
-   float-literal emission needs a `%.17g` builtin
+   of element kind u8), `s.chars()`/`s.split(sep)` → [string]. **M5i (done, fixture `boxed_builtins.em`)**
+   knocked out four more: `em_struct_array` for empty struct-element arrays; owned string/enum struct-field
+   MOVES into calls (`f(own_into_slot(&g_em, em_enum_field(…)))`; a scalar field is a borrow); native runtime
+   builtins via `em_native(&g_em, <id>, <argc>, (Value[]){…})` (a name→id table, byte_slice=22, string/array-
+   returning results tracked as owned); and `let x = s.field` of a SCALAR field typing as a C scalar
+   (int64_t), plus a BOXED struct literal passed to a call being an owning-temp dropped after (drop_mask
+   hoisting). **Remaining lexer tail** (each a specific ownership interaction): a struct-array-ELEMENT read
+   `ts[i]` passed to a call (em_index clones → drop after), owned-local liveness in a few spots, and string
+   interpolation (206 sites). Then generics (Option/Result monomorphization, arrays-of-structs). Orthogonal
+   follow-up: float-literal emission needs a `%.17g` builtin
    (Ember interpolation is `%g`, so `FLOAT_VAL` can't be produced from a bare `{f}`). OFI-166 (the C
    operand-eval-order discipline — sequence side-effecting subexpressions into ordered statements; gcc
    evaluates a binop/call's operands right-to-left where clang/the VM go left-to-right) is observed

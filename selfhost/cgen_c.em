@@ -515,6 +515,29 @@ struct StructTab {
     }
 
 
+    // field_is_refcounted reports whether field `fname` of struct `sid` is a REFCOUNTED single Value — a
+    // string or an enum (a boxed, non-array, non-struct field) — so passing it to a call MOVES it in
+    // (own_into_slot), like a string/enum binding. A scalar / array / struct field is passed as-is.
+    fn field_is_refcounted(self, sid: int, fname: string) -> bool {
+        let flat = self.field_flat(sid, fname)
+        if flat < 0 {
+            return false
+        }
+        return self.f_scalar[flat] == false && self.f_array[flat] == false && self.f_struct[flat] < 0
+    }
+
+
+    // field_scalar_kind returns the C width-kind of a SCALAR field `fname` of struct `sid` (so `let x =
+    // s.field` types as a C scalar), or -1 for a non-scalar field.
+    fn field_scalar_kind(self, sid: int, fname: string) -> int {
+        let flat = self.field_flat(sid, fname)
+        if flat < 0 || self.f_scalar[flat] == false {
+            return 0 - 1
+        }
+        return aek_to_scalar_kind(self.f_aek[flat])
+    }
+
+
     // field_elem returns the ELEMENT scalar kind of array field `fname` of struct `sid` (or -1).
     fn field_elem(self, sid: int, fname: string) -> int {
         let flat = self.field_flat(sid, fname)
@@ -652,6 +675,46 @@ fn ty_struct_sid(t: ps.Ty, names: [string]) -> int {
             return 0 - 1
         }
     }
+}
+
+
+// aek_to_scalar_kind maps an ArrayElemKind byte (i8..f64) to its C width-kind (0 i64 … 9 f64), or -1 for a
+// non-scalar (boxed) kind. The inverse of the scalar side of array_elem_kind_ty. (bool → i64 kind 0.)
+fn aek_to_scalar_kind(aek: int) -> int {
+    if aek == 4 {
+        return 0                       // i64 / int
+    }
+    if aek == 1 {
+        return 1                       // i8
+    }
+    if aek == 2 {
+        return 2                       // i16
+    }
+    if aek == 3 {
+        return 3                       // i32
+    }
+    if aek == 5 {
+        return 4                       // u8
+    }
+    if aek == 6 {
+        return 5                       // u16
+    }
+    if aek == 7 {
+        return 6                       // u32
+    }
+    if aek == 8 {
+        return 7                       // u64
+    }
+    if aek == 9 {
+        return 8                       // f32
+    }
+    if aek == 10 {
+        return 9                       // f64
+    }
+    if aek == 11 {
+        return 0                       // bool — stored as an i64 scalar
+    }
+    return 0 - 1                        // AEK_BOXED / inline-struct — not a scalar
 }
 
 
@@ -1596,6 +1659,15 @@ struct CgcGen {
                     return "own_into_slot(&g_em, {self.lookup_cname(name)})"
                 }
             }
+            case EGet(object, name) {
+                // A REFCOUNTED (string / enum) struct field read passed to a call is MOVED in (own_into_slot
+                // retains the field for the callee's consume; the struct keeps its own reference). A scalar /
+                // array / struct field is passed as-is (a borrow).
+                let sid = self.struct_sid_any(object.value)
+                if sid >= 0 && self.st.field_is_refcounted(sid, name) {
+                    return "own_into_slot(&g_em, {self.emit_expr(e)})"
+                }
+            }
             case _ {
             }
         }
@@ -1610,6 +1682,12 @@ struct CgcGen {
         match e {
             case EArray(elems, lines) {
                 return true
+            }
+            case EStructLit(ty, fields) {
+                // a BOXED struct literal passed by borrow is a fresh owned heap temp → caller drops it after
+                // the call (a value struct has no heap, so it is NOT an owning temp).
+                let sid = ty_struct_sid(ty.value, self.st.names)
+                return sid >= 0 && self.st.is_value(sid) == false
             }
             case _ {
                 return false
@@ -1629,6 +1707,27 @@ struct CgcGen {
                 }
                 if self.en.is_variant(name) {
                     return self.emit_enum_ctor(name, args)   // an enum-variant construction `Circle(4)`
+                }
+                let nid = native_id_for_name(name)
+                if is_em_native_id(nid) {
+                    // a native runtime builtin (byte_slice, read_file, math, …) → em_native(&g_em, <id>, <argc>,
+                    // (Value[]){ args }); its args are read as BORROWS. (print/println keep em_print/em_println.)
+                    if args.len() == 0 {
+                        return "em_native(&g_em, {nid}, 0, 0)"
+                    }
+                    var s = "em_native(&g_em, {nid}, {args.len()}, (Value[])\{ "
+                    var i = 0
+                    loop {
+                        if i >= args.len() {
+                            break
+                        }
+                        if i > 0 {
+                            s = s + ", "
+                        }
+                        s = s + self.emit_expr(args[i])
+                        i = i + 1
+                    }
+                    return s + " \})"
                 }
                 let fi = self.fn_index(name)
                 if fi >= 0 {
@@ -1849,6 +1948,15 @@ struct CgcGen {
                 // `arr[i]` of a scalar-element array is that element's scalar kind (a boxed element → -1).
                 return self.index_elem_kind(object.value)
             }
+            case EGet(object, name) {
+                // `let x = s.field` of a SCALAR struct field types as that field's C scalar (a boxed / array /
+                // struct field → -1, a Value binding); a struct-array field's `.len()` is handled via ECall.
+                let sid = self.struct_sid_any(object.value)
+                if sid >= 0 {
+                    return self.st.field_scalar_kind(sid, name)
+                }
+                return 0 - 1
+            }
             case EIdent(name) {
                 return self.lookup_kind(name)
             }
@@ -1974,6 +2082,9 @@ struct CgcGen {
                         if fi >= 0 {
                             return self.fn_ret_str[fi]
                         }
+                        if native_ret_kind(name) == 0 - 3 {
+                            return true                  // a string-returning native builtin (byte_slice, read_file, …)
+                        }
                     }
                     case _ {
                     }
@@ -2008,6 +2119,9 @@ struct CgcGen {
                         let fi = self.fn_index(name)
                         if fi >= 0 {
                             return self.fn_ret_array[fi]
+                        }
+                        if native_ret_kind(name) == 0 - 2 {
+                            return true                  // an array-returning native builtin (args)
                         }
                     }
                     case EGet(object, mname) {
@@ -2176,8 +2290,15 @@ struct CgcGen {
                     match value.value {
                         case EArray(elems, lines) {
                             if elems.len() == 0 && ty.len() > 0 {
-                                let ek = array_elem_kind_ty(elem_ty_of(ty[0]))
-                                println("{self.ind()}Value v{id} = em_array(&g_em, 0, {ek});")
+                                // An empty array of STRUCTS is em_struct_array(&g_em, <sid>, 0) (the element
+                                // struct's inline layout); any other empty array is em_array(&g_em, 0, <kind>).
+                                let esid = ty_struct_sid(elem_ty_of(ty[0]), self.st.names)
+                                if esid >= 0 {
+                                    println("{self.ind()}Value v{id} = em_struct_array(&g_em, {esid}, 0);")
+                                } else {
+                                    let ek = array_elem_kind_ty(elem_ty_of(ty[0]))
+                                    println("{self.ind()}Value v{id} = em_array(&g_em, 0, {ek});")
+                                }
                                 done = true
                             }
                         }
@@ -2493,6 +2614,99 @@ fn is_string_ty(ty: ps.Ty) -> bool {
             return false
         }
     }
+}
+
+
+// native_id_for_name maps a built-in free-function name to its NATIVE_* id (the em_native dispatcher operand),
+// mirroring codegen.em / src/builtin.c. Returns -1 for a non-builtin. Core (default-build) builtins only.
+fn native_id_for_name(name: string) -> int {
+    if name == "print" {
+        return 0
+    }
+    if name == "println" {
+        return 1
+    }
+    if name == "read_line" {
+        return 2
+    }
+    if name == "read_file" {
+        return 3
+    }
+    if name == "write_file" {
+        return 4
+    }
+    if name == "char_code" {
+        return 5
+    }
+    if name == "from_char_code" {
+        return 6
+    }
+    if name == "parse_float" {
+        return 7
+    }
+    if name == "sqrt" {
+        return 8
+    }
+    if name == "pow" {
+        return 9
+    }
+    if name == "abs" {
+        return 10
+    }
+    if name == "floor" {
+        return 11
+    }
+    if name == "ceil" {
+        return 12
+    }
+    if name == "round" {
+        return 13
+    }
+    if name == "random" {
+        return 14
+    }
+    if name == "hash" {
+        return 15
+    }
+    if name == "concat" {
+        return 16
+    }
+    if name == "args" {
+        return 17
+    }
+    if name == "env" {
+        return 18
+    }
+    if name == "exit" {
+        return 19
+    }
+    if name == "byte_slice" {
+        return 22
+    }
+    return 0 - 1
+}
+
+
+// is_em_native_id reports whether a native id goes through the em_native dispatcher (the READ_LINE..EXIT band
+// plus byte_slice; print/println keep their own em_print/em_println path, and 20/21 are witness-only).
+fn is_em_native_id(nid: int) -> bool {
+    return (nid >= 2 && nid <= 19) || nid == 22
+}
+
+
+// native_ret_kind classifies a native builtin's OWNED return: -3 a string, -2 an array, -1 scalar/unit
+// (not droppable), -4 = not a builtin. Drives owned-binding tracking for `let x = byte_slice(…)`.
+fn native_ret_kind(name: string) -> int {
+    if name == "read_line" || name == "read_file" || name == "env" || name == "from_char_code" || name == "byte_slice" || name == "concat" {
+        return 0 - 3
+    }
+    if name == "args" {
+        return 0 - 2
+    }
+    if native_id_for_name(name) >= 0 {
+        return 0 - 1
+    }
+    return 0 - 4
 }
 
 
