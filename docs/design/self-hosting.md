@@ -724,13 +724,21 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    is_enum_expr wasn't tracking as owned; once fixed, the whole lexer module is byte-identical. This is the
    FIRST full self-hosted module to self-compile through the native C-emit backend — the first real native-
    bootstrap step. It is now a permanent gate in `make selfhost` ("whole MODULES self-C-emit byte-identical").
-   Next targets, in order: the **parser** (`selfhost/parser.em` — more of the same surface + string
-   interpolation), then the **checker** and **codegen**, then the unified **emberc.em** — at which point the
-   self-built native compiler can rebuild itself. Known remaining features those will need: `arr[i].field`
-   DIRECTLY (temp element → materialise-retain-drop), an empty struct-array as a struct FIELD value
-   (em_struct_array), `.len()` on a call-result string (temp-receiver drop), string interpolation (206 sites),
-   and generics (Option/Result monomorphization, arrays-of-structs). Orthogonal follow-up: float-literal
-   emission needs a `%.17g` builtin
+   Next targets, in order: the **parser** (`selfhost/parser.em`), then the **checker** and **codegen**, then
+   the unified **emberc.em** — at which point the self-built native compiler can rebuild itself. **M5l (done,
+   fixture `generics.em`) added GENERIC-STRUCT MONOMORPHIZATION** — the biggest remaining language feature and
+   the first thing the parser needs (its whole AST is `Box<Expr>` / `Box<Ty>` / `Box<Stmt>`): a generic struct
+   gets one runtime sid per distinct instantiation used, numbered after the declared structs and collected in
+   stage-0's order by an InstColl pre-order walk of every body (registering each `Box<X>{…}` the first time
+   seen); each instance's C type ALIASES the base (`typedef em_s<base> em_s<inst>;`) with the base's metadata
+   (for a BOXED type arg — all the compiler uses); construction is `em_struct(&g_em, <inst>, <fcount>, …)`;
+   `box.value` and a `Box<X>`-returning call/param resolve via base_of / sid_of_ty. With generics in, **the
+   parser's struct preamble is now byte-identical** — what remains is a tail of body-level ownership
+   distinctions (own_into_slot vs retain-dance on specific moves, match-payload liveness). Known features
+   still to add: `arr[i].field` DIRECTLY (temp element → materialise-retain-drop), an empty struct-array as a
+   struct FIELD value (em_struct_array), `.len()` on a call-result string (temp-receiver drop), string
+   interpolation (206 sites), a SCALAR generic type arg (Box<int> — packed, deferred; unused by the compiler),
+   and Option/Result generic ENUMs. Orthogonal follow-up: float-literal emission needs a `%.17g` builtin
    (Ember interpolation is `%g`, so `FLOAT_VAL` can't be produced from a bare `{f}`). OFI-166 (the C
    operand-eval-order discipline — sequence side-effecting subexpressions into ordered statements; gcc
    evaluates a binop/call's operands right-to-left where clang/the VM go left-to-right) is observed

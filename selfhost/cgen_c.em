@@ -437,6 +437,287 @@ fn fn_param_list(f: ps.FnDecl, has_self: bool, stab: StructTab, owner_sid: int) 
 }
 
 
+// ---- generic-struct monomorphization (mirrors codegen.em's InstColl / build_struct_instances) ----------
+// A generic struct `Box<T>` gets one runtime struct id PER distinct instantiation used (`Box<Ty>`,
+// `Box<Expr>`, …). The instances are numbered AFTER the declared structs (id = declared_count + index) and
+// collected in stage-0's order: a PRE-ORDER walk of every body in declaration order, registering each
+// generic `Box<X>{…}` construction the first time it is seen. Each instance's C type ALIASES the generic
+// base (`typedef em_s<base> em_s<inst>;`) and its metadata equals the base's (T is erased to a boxed Value).
+
+// ty_key renders a type as its monomorphization key: `Box<Ty>`, `[Expr]`, a bare `Foo`, or `fn` (mirrors
+// codegen.em:ty_key). Used to dedup generic instances and to look up an instance's runtime id.
+fn ty_key(ty: ps.Ty) -> string {
+    match ty {
+        case TyName(qual, name) {
+            return name
+        }
+        case TyGeneric(qual, name, args) {
+            var s = name + "<"
+            var i = 0
+            loop {
+                if i >= args.len() {
+                    break
+                }
+                if i > 0 {
+                    s = s + ","
+                }
+                s = s + ty_key(args[i])
+                i = i + 1
+            }
+            return s + ">"
+        }
+        case _ {
+            return "fn"
+        }
+    }
+}
+
+
+// ty_base_name returns the (unqualified) base name of a generic type `Box<…>` → `Box`, or "" if not generic.
+fn ty_base_name(ty: ps.Ty) -> string {
+    match ty {
+        case TyGeneric(qual, name, args) {
+            return name
+        }
+        case _ {
+            return ""
+        }
+    }
+}
+
+
+// base_name_of_key returns the generic base name of an instance key: `Box<Ty>` → `Box` (the prefix before `<`).
+fn base_name_of_key(key: string) -> string {
+    let bs = key.bytes()
+    var i = 0
+    loop {
+        if i >= bs.len() {
+            break
+        }
+        if int(bs[i]) == 60 {                     // '<'
+            return byte_slice(key, 0, i)
+        }
+        i = i + 1
+    }
+    return key
+}
+
+
+// InstColl walks every body PRE-ORDER, registering a generic-struct instantiation `Box<X>{…}` the first time
+// its struct literal is seen (before its field values — matching check.c). `snames` = declared struct names,
+// so a generic ENUM (Option<int>) is skipped. Mirrors codegen.em:InstColl exactly for byte-identical order.
+struct InstColl {
+    keys: [string]
+    snames: [string]
+
+
+    fn register(mut self, ty: ps.Ty) {
+        match ty {
+            case TyGeneric(qual, name, args) {
+                if index_of_str(self.snames, name) >= 0 {
+                    let k = ty_key(ty)
+                    if index_of_str(self.keys, k) < 0 {
+                        self.keys.append(k)
+                    }
+                }
+            }
+            case _ {
+            }
+        }
+    }
+
+
+    fn walk_expr(mut self, e: ps.Expr) {
+        match e {
+            case EStructLit(ty, fields) {
+                self.register(ty.value)
+                var i = 0
+                loop {
+                    if i >= fields.len() {
+                        break
+                    }
+                    self.walk_expr(fields[i].value)
+                    i = i + 1
+                }
+            }
+            case ECall(callee, args) {
+                self.walk_expr(callee.value)
+                var i = 0
+                loop {
+                    if i >= args.len() {
+                        break
+                    }
+                    self.walk_expr(args[i])
+                    i = i + 1
+                }
+            }
+            case EBinary(op, l, r) {
+                self.walk_expr(l.value)
+                self.walk_expr(r.value)
+            }
+            case EGet(object, name) {
+                self.walk_expr(object.value)
+            }
+            case EIndex(object, index) {
+                self.walk_expr(object.value)
+                self.walk_expr(index.value)
+            }
+            case EArray(elems, lines) {
+                var i = 0
+                loop {
+                    if i >= elems.len() {
+                        break
+                    }
+                    self.walk_expr(elems[i])
+                    i = i + 1
+                }
+            }
+            case EStr(parts) {
+                var i = 0
+                loop {
+                    if i >= parts.len() {
+                        break
+                    }
+                    if parts[i].hole.len() > 0 {
+                        self.walk_expr(parts[i].hole[0])
+                    }
+                    i = i + 1
+                }
+            }
+            case ERange(lo, hi) {
+                self.walk_expr(lo.value)
+                self.walk_expr(hi.value)
+            }
+            case _ {
+            }
+        }
+    }
+
+
+    fn walk_body(mut self, body: [ps.Stmt]) {
+        var i = 0
+        loop {
+            if i >= body.len() {
+                break
+            }
+            self.walk_stmt(body[i])
+            i = i + 1
+        }
+    }
+
+
+    fn walk_stmt(mut self, s: ps.Stmt) {
+        match s {
+            case SLet(v, n, ty, value) {
+                self.walk_expr(value.value)
+            }
+            case SReturn(value, line) {
+                if value.len() > 0 {
+                    self.walk_expr(value[0].value)
+                }
+            }
+            case SExpr(expr) {
+                self.walk_expr(expr.value)
+            }
+            case SAssign(target, value) {
+                self.walk_expr(target.value)
+                self.walk_expr(value.value)
+            }
+            case SIf(cond, then_blk, els) {
+                self.walk_expr(cond.value)
+                self.walk_body(then_blk)
+                self.walk_body(els)
+            }
+            case SMatch(value, cases) {
+                self.walk_expr(value.value)
+                var i = 0
+                loop {
+                    if i >= cases.len() {
+                        break
+                    }
+                    self.walk_body(cases[i].body)
+                    i = i + 1
+                }
+            }
+            case SLoop(body) {
+                self.walk_body(body)
+            }
+            case SFor(vn, iv, iter, body) {
+                self.walk_expr(iter.value)
+                self.walk_body(body)
+            }
+            case SBlock(body) {
+                self.walk_body(body)
+            }
+            case _ {
+            }
+        }
+    }
+}
+
+
+// index_of_str returns the index of `s` in `xs` (or -1) — the small helper InstColl / instance lookup need.
+fn index_of_str(xs: [string], s: string) -> int {
+    var i = 0
+    loop {
+        if i >= xs.len() {
+            break
+        }
+        if xs[i] == s {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+
+// build_struct_instances returns the generic-struct INSTANCE keys in stage-0's monomorphization order — each
+// instance's runtime struct id is `declared_struct_count + its index here` (appended after the declared
+// structs, which include the generic base `Box<T>` itself).
+fn build_struct_instances(decls: [ps.Decl], snames: [string]) -> [string] {
+    var c = InstColl { keys: [], snames: snames }
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.has_body {
+                    c.walk_body(f.body)
+                }
+            }
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        c.walk_body(methods[mi].body)
+                    }
+                    mi = mi + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    var out: [string] = []                             // clone (can't move a value out of a struct field)
+    var k = 0
+    loop {
+        if k >= c.keys.len() {
+            break
+        }
+        out.append(c.keys[k])
+        k = k + 1
+    }
+    return out
+}
+
+
 // ---- the struct table (mirrors src/cgen_c.c's StructLayout, computed from the AST — the self-hosted
 // backend has no checker, so it classifies every declared struct itself, like codegen.em's build_structs).
 // A struct is a VALUE-TYPE (a real C `em_s<sid>`, value semantics, no drop) iff it is recursively all-scalar
@@ -452,6 +733,7 @@ struct StructTab {
     f_struct: [int]            // flat field -> nested struct sid (or -1); the metadata `fst`
     f_array: [bool]            // flat field -> is it an array `[T]`? (so `s.field.len()` / `s.field[i]` resolve)
     f_elem: [int]              // ...for an array field: its ELEMENT scalar kind (so `s.field[i]` is a scalar), else -1
+    inst_keys: [string]        // generic-struct INSTANCE keys (`Box<Ty>`, …); instance sid = names.len() + index
 
 
     fn sid_of(self, name: string) -> int {
@@ -469,7 +751,59 @@ struct StructTab {
     }
 
 
-    fn field_count(self, sid: int) -> int {
+    // struct_count is the TOTAL number of runtime structs (declared + generic instances) — the em_structs[] size.
+    fn struct_count(self) -> int {
+        return self.names.len() + self.inst_keys.len()
+    }
+
+
+    // base_of maps a runtime struct sid to the sid whose FIELD table it uses: a declared struct is itself; a
+    // generic INSTANCE (sid >= names.len()) resolves to its generic base (e.g. Box<Ty> → Box), whose fields it
+    // shares (T erased to a boxed Value). A monomorphized instance has the base's field layout.
+    fn base_of(self, sid: int) -> int {
+        if sid < self.names.len() {
+            return sid
+        }
+        let key = self.inst_keys[sid - self.names.len()]
+        return self.sid_of(base_name_of_key(key))
+    }
+
+
+    // inst_sid_of returns the runtime struct sid of a generic instance KEY (`Box<Ty>`), or -1 if not an instance.
+    fn inst_sid_of(self, key: string) -> int {
+        let idx = index_of_str(self.inst_keys, key)
+        if idx < 0 {
+            return 0 - 1
+        }
+        return self.names.len() + idx
+    }
+
+
+    // sid_of_ty resolves a TYPE to its runtime struct sid — a declared struct name, or a generic instance
+    // `Box<Ty>` (via its collected instance key), or -1.
+    fn sid_of_ty(self, ty: ps.Ty) -> int {
+        match ty {
+            case TyName(qual, name) {
+                if qual != "" {
+                    return 0 - 1
+                }
+                return self.sid_of(name)
+            }
+            case TyGeneric(qual, name, args) {
+                if qual != "" {
+                    return 0 - 1
+                }
+                return self.inst_sid_of(ty_key(ty))
+            }
+            case _ {
+                return 0 - 1
+            }
+        }
+    }
+
+
+    fn field_count(self, sid0: int) -> int {
+        let sid = self.base_of(sid0)
         var n = 0
         var i = 0
         loop {
@@ -486,7 +820,8 @@ struct StructTab {
 
 
     // flat_index returns the flat-table index of struct `sid`'s `idx`-th (declared-order) field, or -1.
-    fn flat_index(self, sid: int, idx: int) -> int {
+    fn flat_index(self, sid0: int, idx: int) -> int {
+        let sid = self.base_of(sid0)
         var seen = 0
         var i = 0
         loop {
@@ -549,7 +884,8 @@ struct StructTab {
 
 
     // field_flat returns the flat-table index of field `fname` within struct `sid` (or -1).
-    fn field_flat(self, sid: int, fname: string) -> int {
+    fn field_flat(self, sid0: int, fname: string) -> int {
+        let sid = self.base_of(sid0)
         var i = 0
         loop {
             if i >= self.f_owner.len() {
@@ -565,7 +901,8 @@ struct StructTab {
 
 
     // field_index returns the DECLARED-order index of field `fname` within struct `sid` (or -1).
-    fn field_index(self, sid: int, fname: string) -> int {
+    fn field_index(self, sid0: int, fname: string) -> int {
+        let sid = self.base_of(sid0)
         var idx = 0
         var i = 0
         loop {
@@ -622,6 +959,16 @@ struct StructTab {
             return 12
         }
         return self.f_aek[flat]
+    }
+
+
+    // fst_of is the metadata `field_struct` of flat field `flat`: the nested struct sid ONLY for an inline
+    // VALUE-struct field, else -1 (a BOXED-struct field is a Value pointer, not laid out inline).
+    fn fst_of(self, flat: int) -> int {
+        if self.f_struct[flat] >= 0 && self.is_value(self.f_struct[flat]) {
+            return self.f_struct[flat]
+        }
+        return 0 - 1
     }
 
 
@@ -822,7 +1169,8 @@ fn build_struct_tab(decls: [ps.Decl]) -> StructTab {
         }
         j = j + 1
     }
-    return StructTab { names: names, kinds: kinds, f_owner: fo, f_name: fnm, f_aek: fa, f_scalar: fsc, f_struct: fsd, f_array: far, f_elem: fel }
+    let insts = build_struct_instances(decls, names)
+    return StructTab { names: names, kinds: kinds, f_owner: fo, f_name: fnm, f_aek: fa, f_scalar: fsc, f_struct: fsd, f_array: far, f_elem: fel, inst_keys: insts }
 }
 
 
@@ -937,7 +1285,7 @@ fn build_fn_ret_structs(decls: [ps.Decl], stab: StructTab) -> [int] {
 // fn_ret_struct_id is the struct sid (value OR boxed) `f` returns, or -1 if it does not return a struct.
 fn fn_ret_struct_id(f: ps.FnDecl, stab: StructTab) -> int {
     if f.ret.len() > 0 {
-        return ty_struct_sid(f.ret[0], stab.names)
+        return stab.sid_of_ty(f.ret[0])
     }
     return 0 - 1
 }
@@ -1354,7 +1702,7 @@ struct CgcGen {
     fn struct_sid_any(self, e: ps.Expr) -> int {
         match e {
             case EStructLit(ty, fields) {
-                return ty_struct_sid(ty.value, self.st.names)
+                return self.st.sid_of_ty(ty.value)
             }
             case EIdent(name) {
                 return self.lookup_struct(name)
@@ -1451,7 +1799,7 @@ struct CgcGen {
     // `((em_s<sid>){ f0, f1, … })` in DECLARED field order (fields emitted left-to-right — OFI-166).
     // A boxed struct (em_struct) is a later increment (M5e.2).
     fn emit_struct_lit(mut self, ty: ps.Ty, fields: [ps.SLitField]) -> string {
-        let sid = ty_struct_sid(ty, self.st.names)
+        let sid = self.st.sid_of_ty(ty)
         if sid < 0 {
             return "INT_VAL(0)"
         }
@@ -2878,7 +3226,7 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: Stru
                     ek = ty_scalar_kind(elem_ty_of(f.params[p].ty[0]))   // its element scalar kind, so `a[i]` is a scalar
                     pesid = ty_struct_sid(elem_ty_of(f.params[p].ty[0]), st.names)   // a `[Struct]` param: `a[i]` is a boxed struct
                 }
-                psid = ty_struct_sid(f.params[p].ty[0], st.names)   // value OR boxed struct sid this param carries
+                psid = st.sid_of_ty(f.params[p].ty[0])   // value OR boxed struct sid this param carries (incl. a generic instance)
             }
             g.push(f.params[p].name, "a{ai}", pk, false, owned, is_arr, ek)
             if psid >= 0 {
@@ -3089,41 +3437,47 @@ fn emit_struct_preamble(tab: StructTab) {
     if n == 0 {
         return
     }
-    // (1) typedefs — EVERY struct gets a `typedef struct {…} em_s<sid>;` (a value struct IS this C type; a
-    // boxed struct's typedef mirrors its field count for the em_box/unbox_struct bridge). A nested value-
-    // struct field is an inline `em_s<m> f<i>`; a scalar or boxed field is a `Value f<i>`. Flat structs
-    // reference no other struct, so sid order is already topological for M5e.1/.2 (nesting adds ordering).
+    let total_structs = tab.struct_count()             // declared + generic instances
+    // (1) typedefs — a DECLARED struct gets a full `typedef struct {…} em_s<sid>;`; a generic INSTANCE aliases
+    // its base (`typedef em_s<base> em_s<sid>;` — T is erased, so it shares the base layout). Instances follow
+    // the declared structs in sid order. A nested value-struct field is `em_s<m> f<i>`, else `Value f<i>`.
     var sid = 0
     loop {
-        if sid >= n {
+        if sid >= total_structs {
             break
         }
-        println("typedef struct \{")
-        let fc = tab.field_count(sid)
-        var f = 0
-        loop {
-            if f >= fc {
-                break
+        if sid >= n {
+            println("typedef em_s{tab.base_of(sid)} em_s{sid};")
+            println("")
+        } else {
+            println("typedef struct \{")
+            let fc = tab.field_count(sid)
+            var f = 0
+            loop {
+                if f >= fc {
+                    break
+                }
+                let flat = tab.flat_index(sid, f)
+                if tab.f_struct[flat] >= 0 && tab.is_value(tab.f_struct[flat]) {
+                    println("    em_s{tab.f_struct[flat]} f{f};")
+                } else {
+                    println("    Value f{f};")
+                }
+                f = f + 1
             }
-            let flat = tab.flat_index(sid, f)
-            if tab.f_struct[flat] >= 0 && tab.is_value(tab.f_struct[flat]) {
-                println("    em_s{tab.f_struct[flat]} f{f};")
-            } else {
-                println("    Value f{f};")
+            if fc == 0 {
+                println("    Value _unit;")           // C forbids an empty struct
             }
-            f = f + 1
+            println("\} em_s{sid};")
+            println("")
         }
-        if fc == 0 {
-            println("    Value _unit;")           // C forbids an empty struct
-        }
-        println("\} em_s{sid};")
-        println("")
         sid = sid + 1
     }
-    // (2) packed-layout metadata arrays (offset / kind / field_struct), for EVERY struct in sid order.
+    // (2) packed-layout metadata arrays (offset / kind / field_struct), for EVERY struct (an instance's
+    // fields resolve through base_of to the generic base's layout).
     var s2 = 0
     loop {
-        if s2 >= n {
+        if s2 >= total_structs {
             break
         }
         let fc = tab.field_count(s2)
@@ -3144,7 +3498,7 @@ fn emit_struct_preamble(tab: StructTab) {
             }
             offs = offs + "{off}"
             knds = knds + "{tab.field_aek(flat)}"
-            fsts = fsts + "{tab.f_struct[flat]}"
+            fsts = fsts + "{tab.fst_of(flat)}"
             off = off + tab.field_size(flat)
             f = f + 1
         }
@@ -3153,22 +3507,23 @@ fn emit_struct_preamble(tab: StructTab) {
         println("static int em_s{s2}_fst[] = \{{fsts}\};")
         s2 = s2 + 1
     }
-    // (3) the StructType table (one row per struct, sid order). drop_fn is -1 until a generated drop is wired
-    // (boxed owned-field structs, a later increment); is_rc / is_resource follow the declared `kind`.
-    println("static const StructType em_structs[{n}] = \{")
+    // (3) the StructType table (one row per struct, sid order). drop_fn is -1 until a generated drop is wired;
+    // is_rc / is_resource follow the declared `kind` (an instance inherits its base's kind).
+    println("static const StructType em_structs[{total_structs}] = \{")
     var s3 = 0
     loop {
-        if s3 >= n {
+        if s3 >= total_structs {
             break
         }
         let fc = tab.field_count(s3)
         let total = tab.total_size(s3)
+        let kind = tab.kinds[tab.base_of(s3)]
         var is_rc = 0
-        if tab.kinds[s3] == 1 {
+        if kind == 1 {
             is_rc = 1
         }
         var is_res = 0
-        if tab.kinds[s3] == 2 {
+        if kind == 2 {
             is_res = 1
         }
         println("    \{ .field_count = {fc}, .total_size = {total}, .is_rc = {is_rc}, .is_resource = {is_res}, .drop_fn = -1, .offset = em_s{s3}_off, .kind = em_s{s3}_knd, .field_struct = em_s{s3}_fst \},")
@@ -3320,7 +3675,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
     println("    em_argc = argc - 1; em_argv = argv + 1;")
     if stab.names.len() > 0 {
         println("    g_em.structs = em_structs;")
-        println("    g_em.struct_count = {stab.names.len()};")
+        println("    g_em.struct_count = {stab.struct_count()};")
     } else {
         println("    g_em.structs = 0;")
         println("    g_em.struct_count = 0;")
