@@ -994,6 +994,7 @@ struct CgcGen {
     sc_drop: [bool]            // ...is this binding an OWNED heap value (a string/array local) dropped at exit?
     sc_array: [bool]           // ...is this binding an ARRAY? (passed to a call by BORROW, not moved like a string)
     sc_elem_kind: [int]        // ...for an array binding: its ELEMENT scalar width-kind (so `arr[i]` is a scalar), else -1
+    sc_elem_struct: [int]      // ...for a STRUCT-array binding: its element struct sid (so `arr[i]` / `arr[i].f` resolve), else -1
     sc_struct: [int]           // ...for a VALUE-STRUCT binding: its struct sid (so `p.f` / storage type resolve), else -1
     indent: int                // current C indentation depth (1 = the function-body level, 4 spaces each)
     st: StructTab              // the declared-struct table (value/boxed classification + field resolution)
@@ -1022,6 +1023,7 @@ struct CgcGen {
         self.sc_drop.append(drop)
         self.sc_array.append(is_arr)
         self.sc_elem_kind.append(elem_kind)
+        self.sc_elem_struct.append(0 - 1)     // default: not a struct-array binding (set_last_elem_struct overrides)
         self.sc_struct.append(0 - 1)          // default: not a struct binding (set_last_struct overrides)
     }
 
@@ -1030,6 +1032,13 @@ struct CgcGen {
     // so `p.field` reads and the binding's C storage type resolve. Called right after push for a struct let.
     fn set_last_struct(mut self, sid: int) {
         self.sc_struct[self.sc_struct.len() - 1] = sid
+    }
+
+
+    // set_last_elem_struct records the ELEMENT struct sid of the most-recently pushed STRUCT-array binding,
+    // so `arr[i]` types as a boxed struct and `arr[i].field` resolves. Called right after push.
+    fn set_last_elem_struct(mut self, sid: int) {
+        self.sc_elem_struct[self.sc_elem_struct.len() - 1] = sid
     }
 
 
@@ -1042,6 +1051,22 @@ struct CgcGen {
             }
             if self.sc_name[i] == name {
                 return self.sc_struct[i]
+            }
+            i = i - 1
+        }
+        return 0 - 1
+    }
+
+
+    // lookup_elem_struct returns the ELEMENT struct sid of struct-array binding `name` (-1 if none).
+    fn lookup_elem_struct(self, name: string) -> int {
+        var i = self.sc_name.len() - 1
+        loop {
+            if i < 0 {
+                break
+            }
+            if self.sc_name[i] == name {
+                return self.sc_elem_struct[i]
             }
             i = i - 1
         }
@@ -1138,6 +1163,7 @@ struct CgcGen {
         var nd: [bool] = []
         var na: [bool] = []
         var ne: [int] = []
+        var nes: [int] = []
         var ns: [int] = []
         var i = 0
         loop {
@@ -1151,9 +1177,11 @@ struct CgcGen {
             nd.append(self.sc_drop[i])
             na.append(self.sc_array[i])
             ne.append(self.sc_elem_kind[i])
+            nes.append(self.sc_elem_struct[i])
             ns.append(self.sc_struct[i])
             i = i + 1
         }
+        self.sc_elem_struct = nes
         self.sc_name = nn
         self.sc_cname = nc
         self.sc_kind = nk
@@ -1330,6 +1358,17 @@ struct CgcGen {
             }
             case EIdent(name) {
                 return self.lookup_struct(name)
+            }
+            case EIndex(object, index) {
+                // an element read of a STRUCT array `arr[i]` → the array's element struct sid (a boxed clone).
+                match object.value {
+                    case EIdent(aname) {
+                        return self.lookup_elem_struct(aname)
+                    }
+                    case _ {
+                    }
+                }
+                return 0 - 1
             }
             case ECall(callee, args) {
                 match callee.value {
@@ -2312,6 +2351,12 @@ struct CgcGen {
                     if bsid >= 0 {
                         self.set_last_struct(bsid)          // track the boxed-struct sid so `c.field` resolves
                     }
+                    if arr && ty.len() > 0 {
+                        let esid = ty_struct_sid(elem_ty_of(ty[0]), self.st.names)
+                        if esid >= 0 {
+                            self.set_last_elem_struct(esid)   // a `[Struct]` array: `ts[i]` types as a boxed struct
+                        }
+                    }
                 }
             }
             case SIf(cond, then_blk, els) {
@@ -2775,7 +2820,7 @@ fn is_enum_ty(ty: ps.Ty, en: EnumTab) -> bool {
 
 
 fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_ret_kind: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_struct: [int], fn_ret_enum: [bool]) {
-    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_struct: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum }
+    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_struct: [], sc_struct: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum }
     var ai = 0
     if has_self {
         g.push("self", "a0", 0 - 1, false, false, false, 0 - 1)
@@ -2797,18 +2842,23 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: Stru
             var is_arr = false
             var ek = 0 - 1
             var psid = 0 - 1
+            var pesid = 0 - 1
             if f.params[p].ty.len() > 0 {
                 pk = ty_scalar_kind(f.params[p].ty[0])
                 owned = is_string_ty(f.params[p].ty[0]) || is_enum_ty(f.params[p].ty[0], en)   // string / enum param is OWNED
                 is_arr = is_array_ty(f.params[p].ty[0])   // an array param is a BORROW (not dropped at exit)
                 if is_arr {
                     ek = ty_scalar_kind(elem_ty_of(f.params[p].ty[0]))   // its element scalar kind, so `a[i]` is a scalar
+                    pesid = ty_struct_sid(elem_ty_of(f.params[p].ty[0]), st.names)   // a `[Struct]` param: `a[i]` is a boxed struct
                 }
                 psid = ty_struct_sid(f.params[p].ty[0], st.names)   // value OR boxed struct sid this param carries
             }
             g.push(f.params[p].name, "a{ai}", pk, false, owned, is_arr, ek)
             if psid >= 0 {
                 g.set_last_struct(psid)           // value param → read via aN.fM; boxed param → a borrowed Value
+            }
+            if pesid >= 0 {
+                g.set_last_elem_struct(pesid)     // struct-array param → `a[i]` types as a boxed struct
             }
             ai = ai + 1
         }

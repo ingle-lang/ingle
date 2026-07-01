@@ -709,10 +709,14 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    builtins via `em_native(&g_em, <id>, <argc>, (Value[]){…})` (a name→id table, byte_slice=22, string/array-
    returning results tracked as owned); and `let x = s.field` of a SCALAR field typing as a C scalar
    (int64_t), plus a BOXED struct literal passed to a call being an owning-temp dropped after (drop_mask
-   hoisting). **Remaining lexer tail** (each a specific ownership interaction): a struct-array-ELEMENT read
-   `ts[i]` passed to a call (em_index clones → drop after), owned-local liveness in a few spots, and string
-   interpolation (206 sites). Then generics (Option/Result monomorphization, arrays-of-structs). Orthogonal
-   follow-up: float-literal emission needs a `%.17g` builtin
+   hoisting). **M5j (done, fixture `struct_array_elem.em`)** closed the big one: STRUCT-ARRAY-ELEMENT
+   typing — `let e = arr[i]` on a `[Struct]` array retains the em_index clone into an OWNED boxed-struct local
+   (dropped at scope exit), and `e.field` resolves as an em_enum_field read (element struct sid tracked per
+   binding via sc_elem_struct, from the `[Struct]` annotation on a param / `var xs: [Struct] = []`). **Remaining
+   lexer tail** (each a specific ownership text distinction): `arr[i].field` DIRECTLY (a temp element needs a
+   materialise-retain-drop wrapper), a string-field consumed by `+` (own_into_slot vs the borrow retain-dance),
+   one owned-string-local's liveness, and string interpolation (206 sites). Then generics (Option/Result
+   monomorphization, arrays-of-structs). Orthogonal follow-up: float-literal emission needs a `%.17g` builtin
    (Ember interpolation is `%g`, so `FLOAT_VAL` can't be produced from a bare `{f}`). OFI-166 (the C
    operand-eval-order discipline — sequence side-effecting subexpressions into ordered statements; gcc
    evaluates a binop/call's operands right-to-left where clang/the VM go left-to-right) is observed
