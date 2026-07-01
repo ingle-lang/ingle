@@ -333,6 +333,7 @@ help:
 	@echo "  Graphics & net (opt-in, default build stays dependency-free)"
 	@echo "    make graphics         graphics build (raylib)    make net / net-graphics  (libcurl)"
 	@echo "    make db               database build (vendored SQLite)   make test-db   std/sqlite suite"
+	@echo "    make kernel           bare-metal aarch64 image   make test-kernel  QEMU UART smoke test"
 	@echo "  Docs & site"
 	@echo "    make docs             regenerate the /guide site + llms-full.txt from THE_EMBER_BOOK.md"
 	@echo ""
@@ -391,11 +392,12 @@ db: $(SQLITE_OBJ) | build
 test-db: db
 	@tests/run-db.sh
 
-# Bare-metal kernel image (OFI-167 / kernel milestone 1). Uses the DEFAULT emberc to emit C from the
-# heap-free Ember program, then cross-compiles it + the freestanding shim against the boot stub and
-# linker script into a flat aarch64 ELF for QEMU `virt`. Opt-in (LLVM cross toolchain + qemu).
+# Bare-metal kernel image (OFI-167 / kernel milestone 1). Uses the DEFAULT emberc with
+# `--emit=c --freestanding` (bare entry, no stdio/argv; main's int result = the exit code), then
+# cross-compiles the C + the freestanding shim against the boot stub and linker script into a flat
+# aarch64 ELF for QEMU `virt`. Opt-in (LLVM cross toolchain + qemu).
 kernel: $(BIN)
-	$(BIN) --emit=c kernel/hello.em > kernel/hello.c
+	$(BIN) --emit=c --freestanding kernel/hello.em > kernel/hello.c
 	$(KERNEL_CC) $(KERNEL_CC_FLAGS) -c kernel/boot.S -o kernel/boot.o
 	$(KERNEL_CC) $(KERNEL_CC_FLAGS) -Ikernel -c kernel/hello.c -o kernel/hello.o
 	$(KERNEL_CC) $(KERNEL_CC_FLAGS) -Ikernel -c kernel/rt.c -o kernel/rt.o

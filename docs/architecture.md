@@ -1728,3 +1728,35 @@ So the registry stays the canonical, VM-runnable, fully-marshalled path for host
 bare-metal and any freestanding C. MMIO **intrinsics** (volatile load/store, no C shim at all) remain the
 eventual endgame that retires even the direct-extern shim for hardware access. First used by kernel
 milestone 1 (`make test-kernel`); see [docs/design/kernel-freestanding.md](https://github.com/kmcnally5/ember-lang/blob/main/docs/design/kernel-freestanding.md).
+
+
+## Decision: `--freestanding` is an emit-mode flag on `--emit=c`, not a separate backend
+
+The bare-metal target (the kernel campaign) reuses the whole AST→C machinery unchanged; the delta is the
+**entry contract** and **which runtime constructs are admissible**. So freestanding is a flag that shapes
+`cgen_c_program`'s output, threaded as a parameter (like the emitted entry it controls), not a fork of the
+backend. The decisions, in the order they were contested:
+
+- **The entry returns Ember main's int result, and the boot stub forwards it as the machine exit code.**
+  `int main(void)` — no argc/argv (nothing provides them), no stdio result-echo (output is whatever the
+  program wrote through its direct externs), no exit heap sweep (the heap-free subset never allocates).
+  Returning the result costs nothing and buys a real differential hook: the QEMU smoke test asserts on an
+  exit code *computed by Ember arithmetic on bare metal* (`hello.em` returns its loop counter → qemu exits
+  3). Verification-over-print is the project's whole ethos; the exit code is the cheapest computed channel.
+- **Hosted-only constructs are rejected at EMIT time, not link time, when the emitter knows.**
+  `spawn`/`nursery` (pthreads; a kernel is its own scheduler) and hosted-REGISTRY extern calls (`em_ffi` +
+  the in-tree registry need libc) get clear errors naming the construct/function. Everything the emitter
+  can't cheaply know (a builtin that lowers to an unshimmed `em_*`) still fails honestly at link time by
+  symbol name — that boundary moves inward as the heap-free subset gets mapped, a later milestone.
+- **The `#include "ember_rt.h"` stays; the freestanding header shadows it via `-I`.** The alternative —
+  inlining the Value/EmberRt types into the emitted C — would create TWO definitions of the ABI (the
+  inline preamble and the shim's header) that could drift into a miscompile. One include resolved per
+  build is how C swaps runtimes (newlib vs glibc); the flag's job was to stop the entry *referencing*
+  hosted symbols, which is what let the shim shrink to its true contract (`em_add`/`em_eq_op`/
+  `em_truthy`/`em_panic` + the program's direct externs + `memcpy`/`memset`).
+- **`--freestanding` pairs with `--emit=c` only** — `-o` links the hosted runtime by construction, and
+  every other emit mode runs on the hosted VM, so any other combination is a usage error (exit 64), not a
+  silently-ignored flag.
+
+Default `--emit=c` output is byte-identical with the flag absent — required, because the self-hosting
+reproduction fixed point diffs that output; `make selfhost` (1213/0) gates it.

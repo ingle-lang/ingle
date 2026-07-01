@@ -141,10 +141,33 @@ surface the heap-free subset references) · `kernel/boot.S` (aarch64 `_start`: p
 FP/SIMD, set sp, call `main`, semihosting `SYS_EXIT`) · `kernel/kernel.ld` (load at `0x4008_0000`) ·
 `tests/run/error_direct_extern_vm.em` (the VM-rejection golden).
 
+### Milestone 1b — `--freestanding` emit mode ✅ (2026-07-01, same day)
+
+`emberc --emit=c --freestanding` is now a first-class emit mode (`src/main.c` + `src/cgen_c.c`):
+
+- **A bare `int main(void)` entry** — no argc/argv, no `printf` result-echo, no exit heap sweep — that
+  **returns Ember main's int result as the exit code**. `boot.S` forwards it through the semihosting exit
+  block, so the QEMU exit code is a value **computed by Ember on bare metal**: `hello.em` returns its loop
+  counter and `make test-kernel` asserts `qemu exit == 3`. The verification loop closes over a computed
+  value, not just printed text.
+- **Emit-time rejection of hosted-only constructs** with clear messages instead of late link errors:
+  `spawn`/`nursery` (needs pthreads — a kernel IS its own scheduler) and **hosted-registry extern calls**
+  (`sin`, `fopen`, … dispatch via `em_ffi` + the in-tree registry, which needs libc; only direct externs
+  reach bare metal). Both are regression-checked by `tests/run-kernel.sh`. Everything else outside the
+  heap-free subset still fails honestly at link time by symbol name.
+- **Flag hygiene:** `--freestanding` pairs with `--emit=c` only; with `-o` (which links the hosted
+  runtime) or any other emit mode it's a usage error (exit 64).
+- **The include-shadow stays deliberately.** The emitted C still says `#include "ember_rt.h"`, resolved to
+  `kernel/ember_rt.h` via `-Ikernel` — ONE definition of the ABI per build, no drift between an inline
+  preamble and the shim (this is how C swaps runtimes; newlib vs glibc do the same). What changed is that
+  the freestanding entry no longer *references* hosted symbols, so the shim shrank to its true contract:
+  `Value` + `EmberRt` + `em_add`/`em_eq_op`/`em_truthy`/`em_panic` + `uart_putc` + `memcpy`/`memset`.
+  The `printf` stub, `em_argc`/`em_argv`, `rt_free_objects`, and the string-echo machinery are GONE.
+- Default `--emit=c` output is **byte-unchanged** (the self-hosting reproduction fixed point holds:
+  1213/0), and the golden suite is 428/0.
+
 ### Next increments (post-hello)
 
-- A **`--freestanding` emit mode** in `cgen_c`/`main.c` so the C-emit path targets bare metal directly
-  (strip the `ember_rt.h` include, emit the entry contract) instead of shadowing the header by `-Ikernel`.
 - Map the **heap-free subset** precisely, then a **tiny freestanding runtime** (a bump allocator over a
   `.bss` arena, no stdio) to unlock strings/arrays/structs on bare metal.
 - An **exception vector table** (so a fault is diagnosable, not a silent hang), then MMIO/asm intrinsics

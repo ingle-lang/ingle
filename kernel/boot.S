@@ -29,10 +29,14 @@ _start:
     bl      main
 
     // main returned — on bare metal there is no OS to go back to. Request a clean shutdown via ARM
-    // semihosting SYS_EXIT (QEMU `-semihosting`) with an explicit exit code 0, so the run terminates
-    // deterministically. x1 points at a {reason, exit_code} block. If semihosting is off the hlt is
-    // ignored and we fall through to the hang loop.
-    ldr     x1, =semi_exit_block    // {ADP_Stopped_ApplicationExit, 0}
+    // semihosting SYS_EXIT (QEMU `-semihosting`), forwarding main's return value (w0) as the exit
+    // code: the freestanding entry returns Ember main's int result, so the host-visible exit code
+    // is COMPUTED BY EMBER on bare metal — a differential hook the smoke test asserts on. x1 points
+    // at a writable {reason, exit_code} block. If semihosting is off the hlt is ignored and we fall
+    // through to the hang loop.
+    ldr     x1, =semi_exit_block
+    sxtw    x0, w0                  // main's int return, widened
+    str     x0, [x1, #8]            // block.exit_code = Ember main's result
     mov     x0, #0x18               // SYS_EXIT
     hlt     #0xf000
 
@@ -40,11 +44,11 @@ hang:
     wfe
     b       hang
 
-.section .rodata
+.section .data
 .align 3
 semi_exit_block:
     .quad 0x20026                   // ADP_Stopped_ApplicationExit
-    .quad 0                         // exit code reported to the host
+    .quad 0                         // exit code, patched from main's return above
 
 .section .bss, "aw", @nobits
 .align 16

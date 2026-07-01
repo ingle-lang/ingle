@@ -49,5 +49,8 @@ fn main() -> int {
     }
     putc(10)   // \n
 
-    return 0
+    // Return the loop counter: the freestanding entry surfaces main's int result as the exit
+    // code and the boot stub forwards it via semihosting, so the QEMU exit code (3) is a value
+    // COMPUTED BY EMBER on bare metal — the smoke test asserts on it.
+    return i
 }

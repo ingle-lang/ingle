@@ -25,9 +25,18 @@
 // codegen_program and to carry the later milestones.
 // `out_concurrency` (may be NULL) is set to 1 if the program uses spawn/nursery, so the driver
 // links the parallel runtime (-DEMBER_PARALLEL -lpthread); 0 otherwise.
+//
+// `freestanding` (the kernel/bare-metal target, docs/design/kernel-freestanding.md): emit a
+// FREESTANDING entry — `int main(void)`, no argc/argv, no printf result-echo, no exit heap sweep —
+// returning Ember main's int result as the process exit code (the boot stub forwards it, so QEMU's
+// exit code is computed by Ember). Hosted-only constructs are rejected at emit time with a clear
+// error rather than a late link failure: spawn/nursery (needs pthreads) and hosted-REGISTRY extern
+// calls (dispatched via em_ffi/the in-tree registry — only direct externs, OFI-167, reach bare
+// metal). Everything else the heap-free subset doesn't cover still fails honestly at link time by
+// symbol name. 0 = the hosted entry (the default; byte-identical to before the flag existed).
 int cgen_c_program(const Program *ast, const ModuleSet *modules,
                    const MonoPlan *plan, const StructLayout *layouts,
                    int layout_count, FILE *out, const char *source_name,
-                   int *out_concurrency);
+                   int *out_concurrency, int freestanding);
 
 #endif // EMBER_CGEN_C_H

@@ -1,25 +1,22 @@
 //
-// rt.c — the freestanding runtime shim for the bare-metal spike (OFI-167 / kernel milestone 1).
+// rt.c — the freestanding runtime shim for the bare-metal target (kernel milestone 1 / OFI-167;
+// see docs/design/kernel-freestanding.md).
 //
-// The heap-free subset of emberc's `--emit=c` output needs only: an output primitive, integer
-// arithmetic, equality, truthiness, a panic, and a no-op object-sweep. All are implemented here with
-// NO libc and NO heap. `uart_putc` is the one hardware primitive — it writes a byte to the QEMU
-// `virt` board's PL011 UART data register (0x0900_0000), which under `-nographic` is wired to the
-// terminal. Everything else is pure integer work on the tagged Value.
+// The heap-free subset of `emberc --emit=c --freestanding` output needs only: an output primitive,
+// integer arithmetic, equality, truthiness, and a panic. All are implemented here with NO libc and
+// NO heap. `uart_putc` is the one hardware primitive — it writes a byte to the QEMU `virt` board's
+// PL011 UART data register (0x0900_0000), which under `-nographic` is wired to the terminal.
+// Everything else is pure integer work on the tagged Value.
 //
 #include "ember_rt.h"
 
 #define PL011_DR ((volatile uint32_t *)0x09000000u)   // PL011 UART data register (QEMU `virt`)
 
 
-// The single MMIO primitive Ember calls via `extern "c"`: emit one byte to the UART.
+// The single MMIO primitive Ember calls via a direct `extern "c"` (OFI-167): emit one UART byte.
 void uart_putc(int32_t c) {
     *PL011_DR = (uint32_t)c;
 }
-
-
-int    em_argc = 0;      // set by the emitted main from argc/argv; unused on bare metal
-char **em_argv = 0;
 
 
 // Integer add. The heap-free subset only adds i64 loop counters, so `kind` (the declared width) is
@@ -56,21 +53,6 @@ void em_panic(const char *msg) {
     uart_putc((int32_t)'\n');
     for (;;) {
     }
-}
-
-
-// No heap on bare metal -> nothing to reclaim.
-void rt_free_objects(EmberRt *ctx) {
-    (void)ctx;
-}
-
-
-// The emitted `main` echoes its integer result with printf; the real program output is the uart_putc
-// stream, so a no-op printf keeps the heap-free subset self-contained. (A proper freestanding printf
-// routed to the UART is a later increment.) With `-nostdlib` this definition satisfies the reference.
-int printf(const char *fmt, ...) {
-    (void)fmt;
-    return 0;
 }
 
 

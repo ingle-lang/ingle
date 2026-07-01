@@ -572,7 +572,7 @@ static int emit_run(const TokenList *tokens, const char *name) {
 // reads it directly — so it can't reuse compile_program (which frees the arena).
 // Returns 1 on error.
 static int emit_c(const TokenList *tokens, const char *name, FILE *out,
-                  int *out_concurrency) {
+                  int *out_concurrency, int freestanding) {
     Arena arena;
     arena_init(&arena, 0);
 
@@ -588,7 +588,7 @@ static int emit_c(const TokenList *tokens, const char *name, FILE *out,
     }
     if (!error) {
         error = cgen_c_program(&program, &set, &plan, layouts, layout_count, out, name,
-                               out_concurrency);
+                               out_concurrency, freestanding);
     }
 
     mono_plan_free(&plan);
@@ -617,7 +617,7 @@ static int compile_native(const TokenList *tokens, const char *name,
         return 1;
     }
     int concurrent = 0;
-    int error = emit_c(tokens, name, cf, &concurrent);
+    int error = emit_c(tokens, name, cf, &concurrent, 0);   // -o links the HOSTED runtime
     fclose(cf);
     if (error) {
         return 1;   // keep cpath so the failing C can be inspected
@@ -940,6 +940,8 @@ int main(int argc, char **argv) {
                 "  emberc --help                   show this help\n\n"
                 "flags:\n"
                 "  --release                       elide debug-only contract checks\n"
+                "  --freestanding                  with --emit=c: bare-metal C (freestanding entry,\n"
+                "                                  no stdio/argv; see docs/design/kernel-freestanding.md)\n"
                 "  --diagnostics=json              structured (LLM-friendly) error output\n\n"
                 "Building Ember itself? Run `make help` for the build / test / install commands.\n",
                 EMBER_VERSION);
@@ -951,6 +953,7 @@ int main(int argc, char **argv) {
     const char *path = NULL;
     const char *out_path = NULL;   // `-o <bin>`: compile to a native binary (native backend)
     int release = 0;
+    int freestanding = 0;   // bare-metal C emit (only meaningful with --emit=c)
     int   prog_argc = 0;        // the Ember PROGRAM's args: everything after the source file
     char **prog_argv = NULL;
     for (int i = 1; i < argc; i++) {
@@ -963,6 +966,8 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--release") == 0) {
             release = 1;                  // elide debug-only contract checks (§5e)
+        } else if (strcmp(argv[i], "--freestanding") == 0) {
+            freestanding = 1;             // bare-metal C emit (docs/design/kernel-freestanding.md)
         } else if (strcmp(argv[i], "--diagnostics=json") == 0) {
             diag_set_json(1);             // structured errors for an LLM author
         } else if (strncmp(argv[i], "--faults=", 9) == 0) {
@@ -1006,6 +1011,15 @@ int main(int argc, char **argv) {
     // Whole-compilation build profile: release elides contract checks (codegen.h).
     codegen_release_profile = release;
 
+    // --freestanding shapes the EMITTED C only, so it pairs with --emit=c alone: `-o` links the
+    // hosted runtime (a freestanding program is cross-compiled by the user's own toolchain), and
+    // every other emit mode runs on the hosted VM. Reject the combinations honestly.
+    if (freestanding && (out_path != NULL || strcmp(emit, "c") != 0)) {
+        fprintf(stderr, "emberc: --freestanding applies to --emit=c only (cross-compile the "
+                        "emitted C against a freestanding runtime; `-o` links the hosted one)\n");
+        return 64;
+    }
+
     char *source = read_file(path);
     if (source == NULL) {
         return 66;
@@ -1020,7 +1034,7 @@ int main(int argc, char **argv) {
         int error = compile_native(&tokens, path, out_path, argv[0]);
         rc = (tokens.had_error || error) ? 65 : 0;
     } else if (strcmp(emit, "c") == 0) {
-        int error = emit_c(&tokens, path, stdout, NULL);
+        int error = emit_c(&tokens, path, stdout, NULL, freestanding);
         rc = (tokens.had_error || error) ? 65 : 0;
     } else if (strcmp(emit, "tokens") == 0) {
         emit_tokens(&tokens);
