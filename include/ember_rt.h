@@ -24,10 +24,14 @@
 #include "value.h"
 #include "program.h"   // StructType (the struct-layout table EmberRt carries)
 
+#include <stdint.h>
+#ifdef EMBER_FREESTANDING
+#include "em_platform.h"   // bare metal: the libc subset the runtime uses, no OS/libc (kernel target)
+#else
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
 #include <string.h>
+#endif
 
 // ---- Object runtime model (shared by the VM and generated C; M2a) ----------
 // The reference-count primitive and the recycle-pool size, authored ONCE here so

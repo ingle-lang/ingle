@@ -1,56 +1,30 @@
-// kernel/hello.em — Ember's first bare-metal spike (kernel-freestanding milestone 1).
+// kernel/hello.em — Ember on bare metal (kernel milestones 1–2; docs/design/kernel-freestanding.md).
 //
-// A heap-free `main` that boots on QEMU `aarch64 virt` and prints to the PL011 UART, with
-// NO libc and NO heap. The only output path is `uart_putc`, an `extern "c"` function whose C
-// body (in the freestanding shim `rt.c`) writes bytes to the UART data register at 0x0900_0000.
-//
-// Everything here stays in the heap-free subset: scalar `i32`/`int`, a counted loop, and
-// `extern "c"` scalar calls. No strings, arrays, or boxed values — those need the allocator,
-// which bare metal does not have yet. The message is emitted byte-by-byte on purpose.
-extern "c" {
-    fn uart_putc(c: i32)
-}
-
-
-// Emit one ASCII byte to the UART. A thin wrapper so `main` reads as a sequence of characters.
-fn putc(c: i32) {
-    uart_putc(c)
-}
-
-
+// A freestanding Ember program that boots on QEMU `aarch64 virt` with NO OS and NO libc. Milestone 1
+// proved the scalar subset (heap-free, output via a direct `extern "c"` to the UART); milestone 2
+// links the REAL Ember runtime compiled `-DEMBER_FREESTANDING` over a bump allocator, so HEAP-BACKED
+// values work too: arrays, strings, string interpolation, and `println` (its output funnels through
+// the platform's fwrite -> the PL011 UART). `main`'s int result is the process exit code.
 fn main() -> int {
-    // "Hello from Ember!\n" — hardcoded bytes (no string type yet, to stay 100% heap-free).
-    putc(72)   // H
-    putc(101)  // e
-    putc(108)  // l
-    putc(108)  // l
-    putc(111)  // o
-    putc(32)   // (space)
-    putc(102)  // f
-    putc(114)  // r
-    putc(111)  // o
-    putc(109)  // m
-    putc(32)   // (space)
-    putc(69)   // E
-    putc(109)  // m
-    putc(98)   // b
-    putc(101)  // e
-    putc(114)  // r
-    putc(33)   // !
-    putc(10)   // \n
+    // Arrays allocate on the freestanding bump arena; the loop sums them.
+    var xs: [int] = []
+    xs.append(10)
+    xs.append(20)
+    xs.append(12)
 
-    // A counted loop — exercises the integer runtime path (em_add / em_eq_op / em_truthy) on
-    // bare metal, proving arithmetic works with no OS underneath. Prints three dots.
+    var sum = 0
     var i = 0
     loop {
-        if i == 3 { break }
-        putc(46)   // .
+        if i == xs.len() { break }
+        sum = sum + xs[i]
         i = i + 1
     }
-    putc(10)   // \n
 
-    // Return the loop counter: the freestanding entry surfaces main's int result as the exit
-    // code and the boot stub forwards it via semihosting, so the QEMU exit code (3) is a value
-    // COMPUTED BY EMBER on bare metal — the smoke test asserts on it.
-    return i
+    // Strings + interpolation + println — the runtime's heap + print path, on bare metal.
+    println("Hello from Ember — running on bare metal with a heap!")
+    println("sum of [10, 20, 12] = {sum}")
+
+    // The freestanding entry surfaces this as the exit code; the boot stub forwards it via
+    // semihosting, so QEMU exits 42 — a value computed by Ember, with aggregates, on bare metal.
+    return sum
 }

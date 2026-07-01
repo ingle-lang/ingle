@@ -1760,3 +1760,37 @@ backend. The decisions, in the order they were contested:
 
 Default `--emit=c` output is byte-identical with the flag absent — required, because the self-hosting
 reproduction fixed point diffs that output; `make selfhost` (1213/0) gates it.
+
+
+## Decision: bare metal runs the REAL runtime.c compiled `-DEMBER_FREESTANDING`, not a second runtime
+
+Unlocking heap-backed values (arrays, strings, structs, enums) on bare metal meant giving the target an
+allocator + the runtime that uses it. The choice was: hand-write a second, freestanding runtime, or
+compile the canonical `src/runtime.c` for the freestanding target. A probe settled it — a hand-written
+aggregate shim would have to reproduce `StructType`, `ObjArray`, `ObjStruct`, `make_string`,
+`alloc_array`, `em_array_append`, `em_index`, `drop_value`, and dozens more, all of which would **drift**
+from the real implementations the VM and hosted-native backends are diffed against. So: **one runtime,
+compiled two ways.** The M1 hand-shim (a scalar-only `kernel/rt.c` + a shadow `ember_rt.h`) was always
+scaffolding to discover the delta; it is now deleted.
+
+The mechanism — a compile define `EMBER_FREESTANDING` and a thin platform layer:
+
+- **`include/em_platform.h`** declares the exact libc subset `runtime.c` uses (allocator, mem/str, a
+  printf family, `exit`/`abort`); `ember_rt.h` includes it under the define instead of `<stdio.h>`/
+  `<stdlib.h>`/`<string.h>`, so every TU sees one set of declarations. The definitions live in the
+  target's platform TU (`kernel/platform.c`): a **bump allocator** over a fixed `.bss` arena (size-
+  prefixed for `realloc`; `free` is a no-op — a batch/kernel allocation model), byte-wise mem/str, a
+  minimal printf routed to the console (the UART), and halt-on-termination.
+- **`runtime.c` is guarded, never forked.** Every freestanding difference is an `#ifdef
+  EMBER_FREESTANDING` at the point of divergence: the hosted-only builtins (stdin/file I/O, `strtod`,
+  libm, PRNG, `getenv`, the wall clock) fall through to the runtime's existing "unsupported builtin"
+  panic, and `em_ffi` (the registry FFI — bare metal reaches C only through direct externs) compiles
+  out. The hosted build defines nothing, so it is byte-for-byte unchanged — enforced by the same
+  `make selfhost` reproduction fixed point (1213/0) that guards the C emitter.
+- **The MMU is a hard requirement, not an optimisation.** With it off, all data accesses are Device
+  memory, which faults on the unaligned accesses the erased-`Value` runtime makes constantly (packed
+  fields, 16-byte `ldp`/`stp`). `mmu_init` installs a flat identity map (RAM = Normal cacheable, MMIO =
+  Device) before `main`. This is the counterpart to the FP/SIMD-enable decision (kernel M1): the runtime's
+  representation choices (16-byte SIMD-copied `Value`, packed layouts) dictate specific CPU bring-up.
+
+See [docs/design/kernel-freestanding.md](https://github.com/kmcnally5/ember-lang/blob/main/docs/design/kernel-freestanding.md) for the milestone log.

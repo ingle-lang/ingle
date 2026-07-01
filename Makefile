@@ -91,6 +91,9 @@ GRAPHICS_FLAGS := -std=c17 -Wall -Wextra -Iinclude -O2 -DNDEBUG -DEMBER_GRAPHICS
 KERNEL_CC       ?= clang
 KERNEL_TARGET   := aarch64-none-elf
 KERNEL_CC_FLAGS := -target $(KERNEL_TARGET) -ffreestanding -nostdlib
+# The freestanding C build reuses the REAL runtime headers/sources (-Iinclude) under
+# -DEMBER_FREESTANDING, so bare metal runs the CANONICAL runtime, not a fork (no drift).
+KERNEL_FS_FLAGS := -DEMBER_FREESTANDING -Iinclude
 KERNEL_LLD      := $(shell command -v ld.lld 2>/dev/null || echo /opt/homebrew/opt/lld/bin/ld.lld)
 KERNEL_ELF      := kernel/kernel.elf
 
@@ -399,10 +402,11 @@ test-db: db
 kernel: $(BIN)
 	$(BIN) --emit=c --freestanding kernel/hello.em > kernel/hello.c
 	$(KERNEL_CC) $(KERNEL_CC_FLAGS) -c kernel/boot.S -o kernel/boot.o
-	$(KERNEL_CC) $(KERNEL_CC_FLAGS) -Ikernel -c kernel/hello.c -o kernel/hello.o
-	$(KERNEL_CC) $(KERNEL_CC_FLAGS) -Ikernel -c kernel/rt.c -o kernel/rt.o
+	$(KERNEL_CC) $(KERNEL_CC_FLAGS) $(KERNEL_FS_FLAGS) -c kernel/hello.c -o kernel/hello.o
+	$(KERNEL_CC) $(KERNEL_CC_FLAGS) $(KERNEL_FS_FLAGS) -c kernel/platform.c -o kernel/platform.o
+	$(KERNEL_CC) $(KERNEL_CC_FLAGS) $(KERNEL_FS_FLAGS) -c src/runtime.c -o kernel/runtime.o
 	$(KERNEL_CC) $(KERNEL_CC_FLAGS) --ld-path=$(KERNEL_LLD) -T kernel/kernel.ld \
-		kernel/boot.o kernel/hello.o kernel/rt.o -o $(KERNEL_ELF)
+		kernel/boot.o kernel/hello.o kernel/runtime.o kernel/platform.o -o $(KERNEL_ELF)
 	@echo "Built $(KERNEL_ELF).  Boot it:  make test-kernel"
 
 # Kernel QEMU smoke test — boots kernel.elf on aarch64 virt and greps the UART output. Kept OUT of

@@ -166,9 +166,44 @@ FP/SIMD, set sp, call `main`, semihosting `SYS_EXIT`) · `kernel/kernel.ld` (loa
 - Default `--emit=c` output is **byte-unchanged** (the self-hosting reproduction fixed point holds:
   1213/0), and the golden suite is 428/0.
 
-### Next increments (post-hello)
+## Milestone 2 — a heap on bare metal: the REAL runtime, freestanding ✅ (2026-07-02)
 
-- Map the **heap-free subset** precisely, then a **tiny freestanding runtime** (a bump allocator over a
-  `.bss` arena, no stdio) to unlock strings/arrays/structs on bare metal.
-- An **exception vector table** (so a fault is diagnosable, not a silent hang), then MMIO/asm intrinsics
-  (volatile load/store — retires the `extern "c"` shim for hardware access), a timer, interrupts.
+`make test-kernel` now boots a program that uses **arrays, strings, string interpolation, and
+`println`** on bare metal:
+
+```
+Hello from Ember — running on bare metal with a heap!
+sum of [10, 20, 12] = 42
+```
+
+exit code **42** (the array sum, computed by Ember). This required moving from the M1 hand-shim to the
+**canonical `src/runtime.c`, compiled `-DEMBER_FREESTANDING`** — so bare metal runs the *same* runtime
+the hosted VM/native backends do, not a fork (no drift; the reason the M1 shim is now deleted).
+
+- **The platform layer** (`include/em_platform.h` + `kernel/platform.c`): the libc subset the runtime is
+  written against, for a target with no libc. A **bump allocator** over a fixed 16 MiB `.bss` arena
+  (size-prefixed blocks so `realloc` works; `free` is a no-op — a batch/kernel model), byte-wise
+  `memcpy`/`memmove`/`memset`/`memcmp`/`strlen`, a **minimal `printf` family** (`snprintf`/`vsnprintf`/
+  `fprintf`/`fwrite`) routed to the UART, and `exit`/`abort` → halt. `ember_rt.h` includes it under
+  `EMBER_FREESTANDING` instead of `<stdio.h>`/`<stdlib.h>`/`<string.h>`.
+- **runtime.c guards** (all `#ifdef EMBER_FREESTANDING`, so the hosted build is byte-identical): the
+  hosted-only builtins fall through to the runtime's own "unsupported builtin" panic — stdin/file I/O,
+  `strtod`, libm `sqrt`/`pow`/…, PRNG, `getenv`, the wall clock, `em_ffi` (the registry FFI; only direct
+  externs reach bare metal). The freestanding-safe builtins stay: array/string ops, `hash`, `concat`,
+  `char_code`, `byte_slice`, `exit`. The double-drop `backtrace` detector was already build-gated.
+- **The MMU is now on** (`kernel/platform.c` `mmu_init`, called from `boot.S`). With the MMU off, every
+  data access is Device memory and **faults on any unaligned access** — which the runtime does
+  constantly (packed fields, 16-byte `Value` `ldp`/`stp`). A minimal flat identity map (one L1 table,
+  1 GiB block descriptors: RAM `0x4000_0000` = Normal cacheable, low 1 GiB = Device for the UART) fixes
+  it and turns on the caches. Diagnosed from a Data Abort with DFSC=0x21 (alignment) under `qemu -d int`.
+
+Gates: `make test` 428/0, `make selfhost` 1213/0 (the reproduction fixed point holds — the runtime
+guards changed no hosted codegen), ASan clean, `make test-kernel` PASS (exit 42, output asserted).
+
+### Next increments
+
+- **Widen the freestanding math/util surface** as needed (soft-float `sqrt`/`floor`/… for graphics-y
+  kernels; a PRNG seeded off a timer) — currently they panic as "unsupported".
+- An **exception vector table** (so a fault is diagnosable, not a silent hang), a **timer + interrupts**
+  (`em_clock` currently returns 0), then MMIO/asm intrinsics (volatile load/store — retires the
+  `extern "c"` shim for hardware access), and the first real driver surface — all in Ember.

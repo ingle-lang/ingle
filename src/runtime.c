@@ -24,11 +24,16 @@
 
 
 #include <stdarg.h>
+#ifdef EMBER_FREESTANDING
+// Bare metal: stdio/stdlib/string come from em_platform.h (via ember_rt.h). math.h (native
+// sqrt/pow) and time.h (em_clock) back hosted-only builtins, guarded out at their use sites below.
+#else
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#endif
 
 
 // register_object threads a freshly allocated object onto the context's private,
@@ -1997,9 +2002,13 @@ Value em_conv(Value v, int nk) {
 // em_clock — clock() → monotonic seconds as a float (OP_CLOCK). Native has no nondet
 // capture/replay, so it reads the real clock directly.
 Value em_clock(void) {
+#ifdef EMBER_FREESTANDING
+    return FLOAT_VAL(0.0);   // no wall clock on bare metal yet (a timer driver is a later milestone)
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return FLOAT_VAL((double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0);
+#endif
 }
 
 
@@ -2042,6 +2051,9 @@ char **em_argv = NULL;
 // covers stdin/file I/O, libm math, char/parse helpers, concat, and args/env/exit.
 Value em_native(EmberRt *ctx, int nid, int argc, const Value *args) {
     switch (nid) {
+#ifndef EMBER_FREESTANDING
+        // Hosted-only builtins — stdin/file I/O, libm, PRNG, env. A freestanding target has no OS
+        // behind them, so they fall through to the `default` panic rather than link against libc.
         case NATIVE_READ_LINE: {
             size_t cap = 128, len = 0;
             char *buf = malloc(cap);
@@ -2107,6 +2119,7 @@ Value em_native(EmberRt *ctx, int nid, int argc, const Value *args) {
             }
             return INT_VAL(0);
         }
+#endif  // !EMBER_FREESTANDING (stdin/file I/O)
         case NATIVE_CHAR_CODE: {
             ObjString *s = argc >= 1 ? AS_STRING(args[0]) : NULL;
             if (s == NULL || s->length == 0) {
@@ -2140,6 +2153,7 @@ Value em_native(EmberRt *ctx, int nid, int argc, const Value *args) {
             if (n > 0) { memcpy(out->chars, s->chars + lo, n); }
             return OBJ_VAL(out);
         }
+#ifndef EMBER_FREESTANDING
         case NATIVE_PARSE_FLOAT: {
             const char *str = argc >= 1 ? AS_CSTRING(args[0]) : "";
             return FLOAT_VAL(strtod(str, NULL));
@@ -2152,6 +2166,7 @@ Value em_native(EmberRt *ctx, int nid, int argc, const Value *args) {
         case NATIVE_ROUND: return FLOAT_VAL(round(AS_FLOAT(args[0])));
         case NATIVE_RANDOM:
             return FLOAT_VAL((double)rand() / ((double)RAND_MAX + 1.0));
+#endif  // !EMBER_FREESTANDING (strtod / libm / PRNG)
         case NATIVE_HASH: {
             ObjString *s = argc >= 1 ? AS_STRING(args[0]) : NULL;
             uint64_t h = 1469598103934665603ULL;   // FNV-1a offset basis
@@ -2192,6 +2207,7 @@ Value em_native(EmberRt *ctx, int nid, int argc, const Value *args) {
             }
             return arr;
         }
+#ifndef EMBER_FREESTANDING
         case NATIVE_ENV: {
             const char *name = argc >= 1 ? AS_CSTRING(args[0]) : "";
             const char *val  = getenv(name);
@@ -2203,6 +2219,7 @@ Value em_native(EmberRt *ctx, int nid, int argc, const Value *args) {
             memcpy(s->chars, val, len);
             return OBJ_VAL(s);
         }
+#endif  // !EMBER_FREESTANDING (getenv)
         case NATIVE_EXIT:
             exit(argc >= 1 ? (int)AS_INT(args[0]) : 0);
         default:
@@ -2220,6 +2237,11 @@ Value em_native(EmberRt *ctx, int nid, int argc, const Value *args) {
 // (the VM's OP_CALL_C). `args` are the call's flattened scalar leaves (one Value per
 // scalar/string/buffer/Ptr argument); the wrapper writes its result leaves to `out`. A scalar
 // return is the single leaf; a struct return (rsid >= 0) is reassembled into a boxed struct.
+//
+// The registry (cextern.c) is hosted-libc machinery; a freestanding build reaches C only through
+// DIRECT externs (OFI-167, emitted as direct calls), never em_ffi, so this is compiled out to keep
+// cextern.c (and its curl/sqlite/libm deps) off the bare-metal link.
+#ifndef EMBER_FREESTANDING
 Value em_ffi(EmberRt *ctx, int idx, int rsid, int argc, const Value *args) {
     Value in[CEXTERN_MAX_LEAVES];
     int n = argc < CEXTERN_MAX_LEAVES ? argc : CEXTERN_MAX_LEAVES;
@@ -2245,3 +2267,4 @@ Value em_ffi(EmberRt *ctx, int idx, int rsid, int argc, const Value *args) {
     }
     return got > 0 ? out[0] : INT_VAL(0);
 }
+#endif  // !EMBER_FREESTANDING (em_ffi / the registry FFI)

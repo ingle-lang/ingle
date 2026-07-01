@@ -1,20 +1,21 @@
 #!/bin/sh
-# tests/run-kernel.sh — QEMU smoke test for the bare-metal kernel target (kernel milestone 1 /
+# tests/run-kernel.sh — QEMU smoke test for the bare-metal kernel target (kernel milestones 1-2;
 # OFI-167; see docs/design/kernel-freestanding.md). Boots kernel/kernel.elf on QEMU `aarch64 virt`
-# and asserts (1) the UART output, (2) the semihosting exit code — which the freestanding entry
-# surfaces from Ember main's int RESULT (hello.em returns its loop counter, 3), so the exit code is
-# a value COMPUTED BY EMBER on bare metal. Also regression-checks the `--freestanding` emit-time
-# guards (spawn and hosted-registry externs are rejected with clear messages, not link errors).
-# Kept OUT of the dependency-free default suite (tests/run.sh) — it needs the LLVM cross toolchain +
-# qemu, like tests/run-graphics.sh / tests/run-db.sh. Invoked by `make test-kernel`, which builds
-# the image first.
+# and asserts (1) the UART output — including a string built + INTERPOLATED by the runtime, proving
+# the freestanding heap (arrays/strings) works — and (2) the semihosting exit code, which the
+# freestanding entry surfaces from Ember main's int RESULT (hello.em sums an array to 42), so it is a
+# value COMPUTED BY EMBER, with aggregates, on bare metal. Also regression-checks the `--freestanding`
+# emit-time guards (spawn and hosted-registry externs are rejected with clear messages, not link
+# errors). Kept OUT of the dependency-free default suite (tests/run.sh) — it needs the LLVM cross
+# toolchain + qemu, like tests/run-graphics.sh / tests/run-db.sh. Invoked by `make test-kernel`.
 set -u
 
 ELF="kernel/kernel.elf"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
 EMBERC="${EMBERC:-build/emberc}"
-EXPECT="Hello from Ember!"
-EXPECT_EXIT=3    # hello.em's main returns its loop counter
+EXPECT="Hello from Ember"
+EXPECT_INTERP="= 42"   # the interpolated array sum — proves heap strings + interpolation + arrays
+EXPECT_EXIT=42         # hello.em sums [10,20,12] and returns it
 
 fail=0
 
@@ -79,15 +80,15 @@ printf '%s\n' "$OUT"
 echo "--- (qemu exit: $RC) ---"
 
 if printf '%s' "$OUT" | grep -q "$EXPECT"; then
-    echo "PASS: UART printed the message"
+    echo "PASS: UART printed the message (println + runtime print path on bare metal)"
 else
     echo "FAIL: expected '$EXPECT' in the UART output"
     fail=1
 fi
-if printf '%s' "$OUT" | grep -q '\.\.\.'; then
-    echo "PASS: counted-loop output present (integer runtime path ran on bare metal)"
+if printf '%s' "$OUT" | grep -q "$EXPECT_INTERP"; then
+    echo "PASS: interpolated array sum present (freestanding heap: arrays + strings + interpolation)"
 else
-    echo "FAIL: expected '...' from the counted loop"
+    echo "FAIL: expected '$EXPECT_INTERP' (the interpolated sum) in the UART output"
     fail=1
 fi
 if [ "$RC" -eq "$EXPECT_EXIT" ]; then

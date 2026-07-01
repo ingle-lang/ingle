@@ -24,6 +24,11 @@ _start:
     ldr     x0, =stack_top          // set up the stack (grows down from stack_top)
     mov     sp, x0
 
+    // Enable the MMU with a flat identity map (kernel milestone 2). With the MMU off, every data
+    // access is Device memory and faults on unaligned access — which the Ember runtime does
+    // constantly. mmu_init (platform.c) maps RAM as Normal cacheable, then turns the MMU on.
+    bl      mmu_init
+
     mov     x0, #0                  // argc = 0
     mov     x1, #0                  // argv = NULL
     bl      main
