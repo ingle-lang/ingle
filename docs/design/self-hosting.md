@@ -656,10 +656,25 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    from an array — `let n = xs.len()`, `let x = xs[i]` — array params as borrows, `for` over a param/local/
    literal with the temp-iterable drop, returning an owned array as a slot-niling move, array `var`
    reassignment as drop-old-then-store, owning-temp array call args dropped after the call, and `.len()` on a
-   temp receiver) — **all byte-identical**. OFI-166 (the C operand-eval-order discipline — sequence side-
-   effecting subexpressions into ordered statements; gcc evaluates a binop/call's operands right-to-left
-   where clang/the VM go left-to-right) is observed throughout, verified on Linux gcc via Docker before each
-   push. Next: structs + methods (the hard middle), then enums/match, then generics/monomorphization.
+   temp receiver) — **all byte-identical**. **M5e is structs + methods (the hard middle)**, split by
+   stage-0's `is_value_struct` foundation: a struct is a VALUE-TYPE (a real C `em_s<sid>`, value semantics,
+   no drop) iff it is recursively all-scalar and not an rc/resource struct, else BOXED (a heap ObjStruct
+   Value, refcounted). The port classifies this itself from the AST (no checker), mirroring codegen.em's
+   `build_structs`. **M5e.1a — value structs (within a function)** is done: the struct table + the typedef
+   preamble + the runtime packed-layout metadata (`em_sN_off/knd/fst[]` + the `em_structs[]` StructType
+   table, offsets a running sum with no alignment padding), construction as a C compound literal
+   `((em_s<sid>){ … })` in declared field order, struct-typed `let` bindings (stored as the C em_s
+   aggregate), scalar field reads `p.f` → `.f<idx>` (in arithmetic and bool conditions), sized-int/bool
+   fields, multiple structs, and NESTED value structs (an inline `em_s<m> f<i>` field, `knd`=AEK_INLINE_
+   STRUCT, read via a C member chain) — all byte-identical (fixture `structs_value.em`). Next M5e steps:
+   **1b** value-struct params/returns/methods (`em_s<sid>` signatures + em_box/unbox_struct in em_invoke),
+   field WRITE, then **M5e.2** BOXED structs (`em_struct` / `em_enum_field` / `em_set_field` + the drop
+   discipline), then bridges/nesting. Orthogonal follow-up: float-literal emission needs a `%.17g` builtin
+   (Ember interpolation is `%g`, so `FLOAT_VAL` can't be produced from a bare `{f}`). OFI-166 (the C
+   operand-eval-order discipline — sequence side-effecting subexpressions into ordered statements; gcc
+   evaluates a binop/call's operands right-to-left where clang/the VM go left-to-right) is observed
+   throughout, verified on Linux gcc via Docker before each push. After structs: enums/match, then
+   generics/monomorphization.
 4. **M4 deferred-low — nested-inline struct flattening.** The `UNBOX_STRUCT` path for a `let ln =
    Line{a:P, b:P}` of recursively-all-scalar nested value structs; only ~3 corpus files need it (most real
    structs have a string/array/enum field → boxed), so it stays low priority.

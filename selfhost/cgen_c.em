@@ -385,6 +385,285 @@ fn fn_param_list(f: ps.FnDecl, has_self: bool) -> string {
 }
 
 
+// ---- the struct table (mirrors src/cgen_c.c's StructLayout, computed from the AST — the self-hosted
+// backend has no checker, so it classifies every declared struct itself, like codegen.em's build_structs).
+// A struct is a VALUE-TYPE (a real C `em_s<sid>`, value semantics, no drop) iff it is recursively all-scalar
+// and not an rc/resource struct; otherwise it is BOXED (an ObjStruct Value). Fields are a flat table keyed
+// by a running index, f_owner mapping each field back to its struct sid (sids are declaration order).
+struct StructTab {
+    names: [string]            // sid -> struct name
+    kinds: [int]               // sid -> 0 plain, 1 rc, 2 resource
+    f_owner: [int]             // flat field -> owning struct sid
+    f_name: [string]           // flat field -> field name (declared order within its struct)
+    f_aek: [int]               // flat field -> its ArrayElemKind byte (the metadata `knd`)
+    f_scalar: [bool]           // flat field -> is it a scalar type? (drives is_value / storage)
+    f_struct: [int]            // flat field -> nested struct sid (or -1); the metadata `fst`
+
+
+    fn sid_of(self, name: string) -> int {
+        var i = 0
+        loop {
+            if i >= self.names.len() {
+                break
+            }
+            if self.names[i] == name {
+                return i
+            }
+            i = i + 1
+        }
+        return 0 - 1
+    }
+
+
+    fn field_count(self, sid: int) -> int {
+        var n = 0
+        var i = 0
+        loop {
+            if i >= self.f_owner.len() {
+                break
+            }
+            if self.f_owner[i] == sid {
+                n = n + 1
+            }
+            i = i + 1
+        }
+        return n
+    }
+
+
+    // flat_index returns the flat-table index of struct `sid`'s `idx`-th (declared-order) field, or -1.
+    fn flat_index(self, sid: int, idx: int) -> int {
+        var seen = 0
+        var i = 0
+        loop {
+            if i >= self.f_owner.len() {
+                break
+            }
+            if self.f_owner[i] == sid {
+                if seen == idx {
+                    return i
+                }
+                seen = seen + 1
+            }
+            i = i + 1
+        }
+        return 0 - 1
+    }
+
+
+    // field_index returns the DECLARED-order index of field `fname` within struct `sid` (or -1).
+    fn field_index(self, sid: int, fname: string) -> int {
+        var idx = 0
+        var i = 0
+        loop {
+            if i >= self.f_owner.len() {
+                break
+            }
+            if self.f_owner[i] == sid {
+                if self.f_name[i] == fname {
+                    return idx
+                }
+                idx = idx + 1
+            }
+            i = i + 1
+        }
+        return 0 - 1
+    }
+
+
+    // is_value reports whether struct `sid` is a VALUE-TYPE (a C em_s struct): recursively all-scalar (only
+    // scalars / nested value structs), and not an rc / resource struct. Mirrors cgen_c.c:is_value_struct.
+    fn is_value(self, sid: int) -> bool {
+        if sid < 0 || sid >= self.names.len() {
+            return false
+        }
+        if self.kinds[sid] != 0 {
+            return false               // an rc / resource struct is BOXED, never a C value-type
+        }
+        var seen = false
+        var i = 0
+        loop {
+            if i >= self.f_owner.len() {
+                break
+            }
+            if self.f_owner[i] == sid {
+                seen = true
+                if self.f_scalar[i] == false {
+                    // a non-scalar field is value-ok ONLY if it is a nested VALUE struct
+                    let nested_value = self.f_struct[i] >= 0 && self.is_value(self.f_struct[i])
+                    if nested_value == false {
+                        return false
+                    }
+                }
+            }
+            i = i + 1
+        }
+        return seen
+    }
+
+
+    // field_aek returns the runtime ArrayElemKind byte of flat field `flat`: a nested VALUE-struct field is
+    // AEK_INLINE_STRUCT (12); everything else keeps its scalar/boxed AEK.
+    fn field_aek(self, flat: int) -> int {
+        if self.f_struct[flat] >= 0 && self.is_value(self.f_struct[flat]) {
+            return 12
+        }
+        return self.f_aek[flat]
+    }
+
+
+    // field_size / total_size compute the PACKED byte size of a field and of a whole struct: a nested value-
+    // struct field occupies its struct's total_size (packed inline), a scalar its size_of_aek.
+    fn field_size(self, flat: int) -> int {
+        if self.f_struct[flat] >= 0 && self.is_value(self.f_struct[flat]) {
+            return self.total_size(self.f_struct[flat])
+        }
+        return size_of_aek(self.f_aek[flat])
+    }
+
+
+    fn total_size(self, sid: int) -> int {
+        var total = 0
+        let fc = self.field_count(sid)
+        var f = 0
+        loop {
+            if f >= fc {
+                break
+            }
+            total = total + self.field_size(self.flat_index(sid, f))
+            f = f + 1
+        }
+        return total
+    }
+}
+
+
+// ty_struct_sid resolves a type annotation to a declared struct's sid (by name), or -1 if it is not a
+// (bare, unqualified) struct type. `names` is the sid-ordered struct-name list.
+fn ty_struct_sid(t: ps.Ty, names: [string]) -> int {
+    match t {
+        case TyName(qual, name) {
+            if qual != "" {
+                return 0 - 1
+            }
+            var i = 0
+            loop {
+                if i >= names.len() {
+                    break
+                }
+                if names[i] == name {
+                    return i
+                }
+                i = i + 1
+            }
+            return 0 - 1
+        }
+        case _ {
+            return 0 - 1
+        }
+    }
+}
+
+
+// size_of_aek is the PACKED byte size of a struct field of ArrayElemKind `aek` (the runtime data buffer;
+// fields are packed with NO alignment padding — offsets are a running sum). A boxed field is pointer-sized.
+fn size_of_aek(aek: int) -> int {
+    if aek == 1 {
+        return 1                       // i8
+    }
+    if aek == 2 {
+        return 2                       // i16
+    }
+    if aek == 3 {
+        return 4                       // i32
+    }
+    if aek == 4 {
+        return 8                       // i64
+    }
+    if aek == 5 {
+        return 1                       // u8
+    }
+    if aek == 6 {
+        return 2                       // u16
+    }
+    if aek == 7 {
+        return 4                       // u32
+    }
+    if aek == 8 {
+        return 8                       // u64
+    }
+    if aek == 9 {
+        return 4                       // f32
+    }
+    if aek == 10 {
+        return 8                       // f64
+    }
+    if aek == 11 {
+        return 1                       // bool
+    }
+    return 8                           // boxed (a Value pointer)
+}
+
+
+// build_struct_tab classifies every declared struct from the AST (names + a flat field table).
+fn build_struct_tab(decls: [ps.Decl]) -> StructTab {
+    // Pass 1: collect struct names + kinds (so a field typed as a later-declared struct still resolves).
+    var names: [string] = []
+    var kinds: [int] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                names.append(name)
+                kinds.append(kind)
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    // Pass 2: the flat field table (classification needs all struct names known).
+    var fo: [int] = []
+    var fnm: [string] = []
+    var fa: [int] = []
+    var fsc: [bool] = []
+    var fsd: [int] = []
+    var sid = 0
+    var j = 0
+    loop {
+        if j >= decls.len() {
+            break
+        }
+        match decls[j] {
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var fi = 0
+                loop {
+                    if fi >= fields.len() {
+                        break
+                    }
+                    let fty = fields[fi].ty
+                    fo.append(sid)
+                    fnm.append(fields[fi].name)
+                    fsd.append(ty_struct_sid(fty, names))
+                    let aek = array_elem_kind_ty(fty)   // 0 for string/array/struct (boxed), 1..11 for a scalar
+                    fa.append(aek)
+                    fsc.append(aek != 0)
+                    fi = fi + 1
+                }
+                sid = sid + 1
+            }
+            case _ {
+            }
+        }
+        j = j + 1
+    }
+    return StructTab { names: names, kinds: kinds, f_owner: fo, f_name: fnm, f_aek: fa, f_scalar: fsc, f_struct: fsd }
+}
+
+
 // ---- the C-emit generator state (mirrors src/cgen_c.c's CgcGen) -------------------------------------
 // next_var is the per-function `v%d` temp counter (retain temps + scalar `let` bindings share it). The
 // scope maps an in-scope binding NAME to its C expression (`a0` for a param, `v3` for a `let`) and its
@@ -400,7 +679,9 @@ struct CgcGen {
     sc_drop: [bool]            // ...is this binding an OWNED heap value (a string/array local) dropped at exit?
     sc_array: [bool]           // ...is this binding an ARRAY? (passed to a call by BORROW, not moved like a string)
     sc_elem_kind: [int]        // ...for an array binding: its ELEMENT scalar width-kind (so `arr[i]` is a scalar), else -1
+    sc_struct: [int]           // ...for a VALUE-STRUCT binding: its struct sid (so `p.f` / storage type resolve), else -1
     indent: int                // current C indentation depth (1 = the function-body level, 4 spaces each)
+    st: StructTab              // the declared-struct table (value/boxed classification + field resolution)
     fn_names: [string]         // every body-bearing fn in em_fn_N order (free fns + `Struct.method`)
     fn_ret_kind: [int]         // ...each fn's return width-kind (for a `let x = f()` scalar binding)
     fn_ret_str: [bool]         // ...does each fn return a string (a `let x = f()` owned binding)?
@@ -423,6 +704,30 @@ struct CgcGen {
         self.sc_drop.append(drop)
         self.sc_array.append(is_arr)
         self.sc_elem_kind.append(elem_kind)
+        self.sc_struct.append(0 - 1)          // default: not a struct binding (set_last_struct overrides)
+    }
+
+
+    // set_last_struct records the struct sid of the most-recently pushed binding (a value-struct local),
+    // so `p.field` reads and the binding's C storage type resolve. Called right after push for a struct let.
+    fn set_last_struct(mut self, sid: int) {
+        self.sc_struct[self.sc_struct.len() - 1] = sid
+    }
+
+
+    // lookup_struct returns the value-struct sid of binding `name` (-1 if not a value-struct binding).
+    fn lookup_struct(self, name: string) -> int {
+        var i = self.sc_name.len() - 1
+        loop {
+            if i < 0 {
+                break
+            }
+            if self.sc_name[i] == name {
+                return self.sc_struct[i]
+            }
+            i = i - 1
+        }
+        return 0 - 1
     }
 
 
@@ -515,6 +820,7 @@ struct CgcGen {
         var nd: [bool] = []
         var na: [bool] = []
         var ne: [int] = []
+        var ns: [int] = []
         var i = 0
         loop {
             if i >= mark {
@@ -527,6 +833,7 @@ struct CgcGen {
             nd.append(self.sc_drop[i])
             na.append(self.sc_array[i])
             ne.append(self.sc_elem_kind[i])
+            ns.append(self.sc_struct[i])
             i = i + 1
         }
         self.sc_name = nn
@@ -536,6 +843,7 @@ struct CgcGen {
         self.sc_drop = nd
         self.sc_array = na
         self.sc_elem_kind = ne
+        self.sc_struct = ns
     }
 
 
@@ -660,10 +968,108 @@ struct CgcGen {
                 let ix = self.emit_expr(index.value)
                 return "em_index(&g_em, {o}, {ix})"
             }
+            case EStructLit(ty, fields) {
+                return self.emit_struct_lit(ty.value, fields)
+            }
+            case EGet(object, name) {
+                // A VALUE-struct field read is a direct C member access `<obj>.f<idx>` (no heap, no ownership).
+                // A boxed-struct field read (em_enum_field) is a later increment (M5e.2).
+                let osid = self.struct_sid_of(object.value)
+                if osid >= 0 {
+                    let fidx = self.st.field_index(osid, name)
+                    if fidx >= 0 {
+                        return "{self.emit_expr(object.value)}.f{fidx}"
+                    }
+                }
+                return "INT_VAL(0)"
+            }
             case _ {
                 return "INT_VAL(0)"
             }
         }
+    }
+
+
+    // struct_sid_of returns the VALUE-struct sid an expression produces (or -1): a struct literal of a value
+    // struct, a value-struct binding, or a nested value-struct field read. Mirrors cgen_c.c:struct_sid_of.
+    fn struct_sid_of(self, e: ps.Expr) -> int {
+        match e {
+            case EStructLit(ty, fields) {
+                let sid = ty_struct_sid(ty.value, self.st.names)
+                if sid >= 0 && self.st.is_value(sid) {
+                    return sid
+                }
+                return 0 - 1
+            }
+            case EIdent(name) {
+                return self.lookup_struct(name)
+            }
+            case EGet(object, name) {
+                let osid = self.struct_sid_of(object.value)
+                if osid >= 0 {
+                    let fidx = self.st.field_index(osid, name)
+                    if fidx >= 0 {
+                        let nsid = self.st.f_struct[self.st.flat_index(osid, fidx)]
+                        if nsid >= 0 && self.st.is_value(nsid) {
+                            return nsid
+                        }
+                    }
+                }
+                return 0 - 1
+            }
+            case _ {
+                return 0 - 1
+            }
+        }
+    }
+
+
+    // slit_index returns the position in a struct literal's field list of declared field `fname` (or -1) —
+    // the literal may list fields in any order, but the compound literal must place them in DECLARED order.
+    fn slit_index(self, fields: [ps.SLitField], fname: string) -> int {
+        var i = 0
+        loop {
+            if i >= fields.len() {
+                break
+            }
+            if fields[i].name == fname {
+                return i
+            }
+            i = i + 1
+        }
+        return 0 - 1
+    }
+
+
+    // emit_struct_lit renders a struct construction. A VALUE struct is a C compound literal
+    // `((em_s<sid>){ f0, f1, … })` in DECLARED field order (fields emitted left-to-right — OFI-166).
+    // A boxed struct (em_struct) is a later increment (M5e.2).
+    fn emit_struct_lit(mut self, ty: ps.Ty, fields: [ps.SLitField]) -> string {
+        let sid = ty_struct_sid(ty, self.st.names)
+        if sid < 0 {
+            return "INT_VAL(0)"
+        }
+        if self.st.is_value(sid) {
+            var s = "((em_s{sid})\{ "
+            let fc = self.st.field_count(sid)
+            var f = 0
+            loop {
+                if f >= fc {
+                    break
+                }
+                if f > 0 {
+                    s = s + ", "
+                }
+                let fname = self.st.f_name[self.st.flat_index(sid, f)]
+                let fpos = self.slit_index(fields, fname)
+                if fpos >= 0 {
+                    s = s + self.emit_expr(fields[fpos].value)
+                }
+                f = f + 1
+            }
+            return s + " \})"
+        }
+        return "INT_VAL(0)"
     }
 
 
@@ -1259,8 +1665,14 @@ struct CgcGen {
                 // unboxed from the Value (`int64_t vN = (int64_t)AS_INT(<rhs>)`); a string binding is an
                 // owned Value (dropped at scope exit). (cgen_c.c:STMT_LET.)
                 let id = self.fresh_var()
+                let ssid = self.struct_sid_of(value.value)
                 let kind = self.scalar_kind_of(value.value)
-                if kind >= 0 {
+                if ssid >= 0 {
+                    // A VALUE-struct binding: stored as the C `em_s<sid>` aggregate (value semantics, no drop).
+                    println("{self.ind()}em_s{ssid} v{id} = {self.emit_expr(value.value)};")
+                    self.push(name, "v{id}", 0 - 1, false, false, false, 0 - 1)
+                    self.set_last_struct(ssid)
+                } else if kind >= 0 {
                     let ct = scalar_ctype(kind)
                     println("{self.ind()}{ct} v{id} = ({ct})AS_INT({self.emit_expr(value.value)});")
                     self.push(name, "v{id}", kind, true, false, false, 0 - 1)        // unboxed C scalar storage
@@ -1532,8 +1944,8 @@ fn is_string_ty(ty: ps.Ty) -> bool {
 }
 
 
-fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, fn_names: [string], fn_ret_kind: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int]) {
-    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], indent: 1, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind }
+fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, st: StructTab, fn_names: [string], fn_ret_kind: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int]) {
+    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_struct: [], indent: 1, st: st, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind }
     var ai = 0
     if has_self {
         g.push("self", "a0", 0 - 1, false, false, false, 0 - 1)
@@ -1699,6 +2111,105 @@ fn main_index(decls: [ps.Decl]) -> int {
 }
 
 
+// emit_struct_preamble emits the C struct block, byte-identical to stage-0: (1) a `typedef struct {…} em_sN;`
+// for every VALUE-type struct (a nested value-struct field is `em_s<m> f<i>`, a scalar is `Value f<i>`);
+// (2) per-struct packed-layout metadata arrays `em_sN_off/knd/fst[]` for EVERY struct (offsets are a running
+// sum of size_of_aek — no alignment padding); (3) the `em_structs[]` StructType table the runtime reads for
+// boxing/field-access/drop. Nothing is emitted when there are no declared structs.
+fn emit_struct_preamble(tab: StructTab) {
+    let n = tab.names.len()
+    if n == 0 {
+        return
+    }
+    // (1) typedefs — VALUE structs only (a boxed struct stays a uniform Value with no C type). Flat structs
+    // reference no other struct, so sid order is already topological for M5e.1 (nesting adds ordering later).
+    var sid = 0
+    loop {
+        if sid >= n {
+            break
+        }
+        if tab.is_value(sid) {
+            println("typedef struct \{")
+            let fc = tab.field_count(sid)
+            var f = 0
+            loop {
+                if f >= fc {
+                    break
+                }
+                let flat = tab.flat_index(sid, f)
+                if tab.f_struct[flat] >= 0 {
+                    println("    em_s{tab.f_struct[flat]} f{f};")
+                } else {
+                    println("    Value f{f};")
+                }
+                f = f + 1
+            }
+            if fc == 0 {
+                println("    Value _unit;")           // C forbids an empty struct
+            }
+            println("\} em_s{sid};")
+            println("")
+        }
+        sid = sid + 1
+    }
+    // (2) packed-layout metadata arrays (offset / kind / field_struct), for EVERY struct in sid order.
+    var s2 = 0
+    loop {
+        if s2 >= n {
+            break
+        }
+        let fc = tab.field_count(s2)
+        var offs = ""
+        var knds = ""
+        var fsts = ""
+        var off = 0
+        var f = 0
+        loop {
+            if f >= fc {
+                break
+            }
+            let flat = tab.flat_index(s2, f)
+            if f > 0 {
+                offs = offs + ", "
+                knds = knds + ", "
+                fsts = fsts + ", "
+            }
+            offs = offs + "{off}"
+            knds = knds + "{tab.field_aek(flat)}"
+            fsts = fsts + "{tab.f_struct[flat]}"
+            off = off + tab.field_size(flat)
+            f = f + 1
+        }
+        println("static int em_s{s2}_off[] = \{{offs}\};")
+        println("static int em_s{s2}_knd[] = \{{knds}\};")
+        println("static int em_s{s2}_fst[] = \{{fsts}\};")
+        s2 = s2 + 1
+    }
+    // (3) the StructType table (one row per struct, sid order). drop_fn is -1 until a generated drop is wired
+    // (boxed owned-field structs, a later increment); is_rc / is_resource follow the declared `kind`.
+    println("static const StructType em_structs[{n}] = \{")
+    var s3 = 0
+    loop {
+        if s3 >= n {
+            break
+        }
+        let fc = tab.field_count(s3)
+        let total = tab.total_size(s3)
+        var is_rc = 0
+        if tab.kinds[s3] == 1 {
+            is_rc = 1
+        }
+        var is_res = 0
+        if tab.kinds[s3] == 2 {
+            is_res = 1
+        }
+        println("    \{ .field_count = {fc}, .total_size = {total}, .is_rc = {is_rc}, .is_resource = {is_res}, .drop_fn = -1, .offset = em_s{s3}_off, .kind = em_s{s3}_knd, .field_struct = em_s{s3}_fst \},")
+        s3 = s3 + 1
+    }
+    println("\};")
+}
+
+
 // emit_program writes the whole C translation unit for the merged module declarations, byte-identical to
 // stage-0 `emberc --emit=c`. It iterates `decls` once per section, keeping a shared em_fn_N counter.
 fn emit_program(decls: [ps.Decl], filename: string) {
@@ -1708,10 +2219,12 @@ fn emit_program(decls: [ps.Decl], filename: string) {
     let fn_ret_str = build_fn_ret_str(decls)
     let fn_ret_array = build_fn_ret_array(decls)
     let fn_ret_elem_kind = build_fn_ret_elem_kinds(decls)
+    let stab = build_struct_tab(decls)
     println("// Generated by `emberc --emit=c` from {filename}. Do not edit.")
     println("// The bytecode VM is the reference semantics; tests/native diffs the two.")
     println("#include \"ember_rt.h\"")
     println("")
+    emit_struct_preamble(stab)                 // struct typedefs + runtime metadata (nothing if no structs)
     println("static EmberRt g_em;")
     println("")
     // forward declarations, in em_fn_N order
@@ -1804,7 +2317,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
         match decls[k] {
             case DFn(f) {
                 if f.has_body {
-                    emit_fn_body(f, b, false, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind)
+                    emit_fn_body(f, b, false, stab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind)
                     b = b + 1
                     if b < total {
                         println("")
@@ -1818,7 +2331,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
                         break
                     }
                     if methods[mi].has_body {
-                        emit_fn_body(methods[mi], b, true, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind)
+                        emit_fn_body(methods[mi], b, true, stab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind)
                         b = b + 1
                         if b < total {
                             println("")
@@ -1837,8 +2350,13 @@ fn emit_program(decls: [ps.Decl], filename: string) {
     let mi = main_index(decls)
     println("int main(int argc, char **argv) \{")
     println("    em_argc = argc - 1; em_argv = argv + 1;")
-    println("    g_em.structs = 0;")
-    println("    g_em.struct_count = 0;")
+    if stab.names.len() > 0 {
+        println("    g_em.structs = em_structs;")
+        println("    g_em.struct_count = {stab.names.len()};")
+    } else {
+        println("    g_em.structs = 0;")
+        println("    g_em.struct_count = 0;")
+    }
     println("    g_em.invoke = em_invoke;")
     println("    Value r = em_fn_{mi}();")
     println("    if (IS_INT(r)) printf(\"=> %lld\\n\", (long long)AS_INT(r));")
