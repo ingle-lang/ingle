@@ -67,6 +67,54 @@ fn ty_scalar_kind(t: ps.Ty) -> int {
 }
 
 
+// render_kind_of_ty maps a type annotation to its interpolation render-kind (check.c int_kind + the bool
+// special-case): 0 int/i64/non-numeric · 1 i8 · 2 i16 · 3 i32 · 4 u8 · 5 u16 · 6 u32 · 7 u64 · 8 f32 ·
+// 9 float(f64) · 10 bool. em_to_string's 3rd arg — how the runtime formats the (untagged) numeric Value.
+fn render_kind_of_ty(t: ps.Ty) -> int {
+    match t {
+        case TyName(qual, name) {
+            if qual != "" {
+                return 0
+            }
+            if name == "bool" {
+                return 10
+            }
+            if name == "f32" {
+                return 8
+            }
+            if name == "float" || name == "f64" {
+                return 9
+            }
+            if name == "i8" {
+                return 1
+            }
+            if name == "i16" {
+                return 2
+            }
+            if name == "i32" {
+                return 3
+            }
+            if name == "u8" {
+                return 4
+            }
+            if name == "u16" {
+                return 5
+            }
+            if name == "u32" {
+                return 6
+            }
+            if name == "u64" {
+                return 7
+            }
+            return 0
+        }
+        case _ {
+            return 0
+        }
+    }
+}
+
+
 // is_array_ty reports whether a type annotation is an array `[T]`.
 fn is_array_ty(t: ps.Ty) -> bool {
     match t {
@@ -733,6 +781,7 @@ struct StructTab {
     f_struct: [int]            // flat field -> nested struct sid (or -1); the metadata `fst`
     f_array: [bool]            // flat field -> is it an array `[T]`? (so `s.field.len()` / `s.field[i]` resolve)
     f_elem: [int]              // ...for an array field: its ELEMENT scalar kind (so `s.field[i]` is a scalar), else -1
+    f_elem_struct: [int]       // ...for a `[Struct]` field: its element struct sid (so `s.field[i]` / `s.field[i].f` resolve), else -1
     inst_keys: [string]        // generic-struct INSTANCE keys (`Box<Ty>`, …); instance sid = names.len() + index
 
 
@@ -784,10 +833,7 @@ struct StructTab {
     fn sid_of_ty(self, ty: ps.Ty) -> int {
         match ty {
             case TyName(qual, name) {
-                if qual != "" {
-                    return 0 - 1
-                }
-                return self.sid_of(name)
+                return self.sid_of(name)   // a module qualifier (`lx.Token`) resolves to the merged bare-name struct
             }
             case TyGeneric(qual, name, args) {
                 if qual != "" {
@@ -921,6 +967,24 @@ struct StructTab {
     }
 
 
+    // field_elem_struct returns the element struct sid of struct `sid0`'s `[Struct]` array field `fname`
+    // (so `s.field[i]` / `s.field[i].f` resolve), or -1 (a scalar-element array / not an array / no field).
+    fn field_elem_struct(self, sid0: int, fname: string) -> int {
+        let sid = self.base_of(sid0)
+        var i = 0
+        loop {
+            if i >= self.f_owner.len() {
+                break
+            }
+            if self.f_owner[i] == sid && self.f_name[i] == fname {
+                return self.f_elem_struct[i]
+            }
+            i = i + 1
+        }
+        return 0 - 1
+    }
+
+
     // is_value reports whether struct `sid` is a VALUE-TYPE (a C em_s struct): recursively all-scalar (only
     // scalars / nested value structs), and not an rc / resource struct. Mirrors cgen_c.c:is_value_struct.
     fn is_value(self, sid: int) -> bool {
@@ -995,6 +1059,47 @@ struct StructTab {
         }
         return total
     }
+
+
+    // is_inline_packable reports whether a struct is stored INLINE-PACKED in an array (its fields laid out
+    // consecutively in the element buffer, no boxed ObjStruct pointer) — mirrors cgen_c.c/check.c
+    // array_inline_struct_id. Such an array's `arr[i]` read MATERIALISES a fresh owned COPY (an owning temp:
+    // its refcounted fields retained), unlike a boxed-pointer array (`arr[i]` is a borrow). Packable iff: a
+    // struct (not rc/resource), every field is a scalar OR a refcounted single Value (string / enum) — NO
+    // array field and NO nested struct field (a nested value-struct = a later stage; a boxed struct = a
+    // unique-owner that can't be shallow-copied) — and the packed size is in (0, 255].
+    fn is_inline_packable(self, sid: int) -> bool {
+        if sid < 0 || sid >= self.names.len() {
+            return false
+        }
+        if self.kinds[sid] != 0 {
+            return false                    // an rc / resource struct is boxed, never inline-packed
+        }
+        let fc = self.field_count(sid)
+        if fc == 0 {
+            return false
+        }
+        var total = 0
+        var f = 0
+        loop {
+            if f >= fc {
+                break
+            }
+            let flat = self.flat_index(sid, f)
+            if self.f_array[flat] {
+                return false                // an array field → a unique-owner boxed field, can't shallow-copy
+            }
+            if self.f_struct[flat] >= 0 {
+                return false                // a nested struct field (value = later stage / boxed = unique-owner)
+            }
+            total = total + self.field_size(flat)
+            f = f + 1
+        }
+        if total <= 0 || total > 255 {
+            return false
+        }
+        return true
+    }
 }
 
 
@@ -1003,9 +1108,8 @@ struct StructTab {
 fn ty_struct_sid(t: ps.Ty, names: [string]) -> int {
     match t {
         case TyName(qual, name) {
-            if qual != "" {
-                return 0 - 1
-            }
+            // The qualifier is a module alias (`lx.Token`); the merged struct table registers each struct by
+            // its BARE name (ast_print drops the qualifier), so match on `name` regardless of `qual`.
             var i = 0
             loop {
                 if i >= names.len() {
@@ -1025,8 +1129,10 @@ fn ty_struct_sid(t: ps.Ty, names: [string]) -> int {
 }
 
 
-// aek_to_scalar_kind maps an ArrayElemKind byte (i8..f64) to its C width-kind (0 i64 … 9 f64), or -1 for a
-// non-scalar (boxed) kind. The inverse of the scalar side of array_elem_kind_ty. (bool → i64 kind 0.)
+// aek_to_scalar_kind maps a NUMERIC ArrayElemKind byte (i8..f64) to its C width-kind (0 i64 … 9 f64) for
+// the unboxed-scalar-binding decision, or -1 for a non-numeric kind. Matches the checker's
+// `is_numeric_type(t) ? int_kind(t) : -1` (check.c) — BOOL is NOT numeric, so a `let x = s.boolField` keeps
+// a Value (INT_VAL), not an unboxed C scalar. The inverse of the numeric side of array_elem_kind_ty.
 fn aek_to_scalar_kind(aek: int) -> int {
     if aek == 4 {
         return 0                       // i64 / int
@@ -1058,10 +1164,7 @@ fn aek_to_scalar_kind(aek: int) -> int {
     if aek == 10 {
         return 9                       // f64
     }
-    if aek == 11 {
-        return 0                       // bool — stored as an i64 scalar
-    }
-    return 0 - 1                        // AEK_BOXED / inline-struct — not a scalar
+    return 0 - 1                        // bool (11, not numeric) / AEK_BOXED / inline-struct — kept as a Value
 }
 
 
@@ -1133,6 +1236,7 @@ fn build_struct_tab(decls: [ps.Decl]) -> StructTab {
     var fsd: [int] = []
     var far: [bool] = []
     var fel: [int] = []
+    var fes: [int] = []
     var sid = 0
     var j = 0
     loop {
@@ -1157,8 +1261,10 @@ fn build_struct_tab(decls: [ps.Decl]) -> StructTab {
                     far.append(is_a)
                     if is_a {
                         fel.append(ty_scalar_kind(elem_ty_of(fty)))
+                        fes.append(ty_struct_sid(elem_ty_of(fty), names))   // `[Struct]` field element sid, so s.field[i].f resolves
                     } else {
                         fel.append(0 - 1)
+                        fes.append(0 - 1)
                     }
                     fi = fi + 1
                 }
@@ -1170,7 +1276,7 @@ fn build_struct_tab(decls: [ps.Decl]) -> StructTab {
         j = j + 1
     }
     let insts = build_struct_instances(decls, names)
-    return StructTab { names: names, kinds: kinds, f_owner: fo, f_name: fnm, f_aek: fa, f_scalar: fsc, f_struct: fsd, f_array: far, f_elem: fel, inst_keys: insts }
+    return StructTab { names: names, kinds: kinds, f_owner: fo, f_name: fnm, f_aek: fa, f_scalar: fsc, f_struct: fsd, f_array: far, f_elem: fel, f_elem_struct: fes, inst_keys: insts }
 }
 
 
@@ -1187,6 +1293,8 @@ struct EnumTab {
     pf_refc: [bool]            // ...is the field a REFCOUNTED single Value (string / enum / struct / generic)?
     pf_array: [bool]           // ...is the payload field an array `[T]`? (so a `case V(xs)` binding is an array)
     pf_elem: [int]             // ...for an array payload field: its ELEMENT scalar kind (so `xs[i]` is a scalar), else -1
+    pf_elem_struct: [int]      // ...for a STRUCT-array payload field `[StrPart]`: its element struct sid (so `xs[i].f` resolves), else -1
+    pf_ty: [ps.Ty]             // ...the payload field's declared type (resolved to a struct sid at the match site via sid_of_ty, so `elem.value` on a `Box<Ty>` payload resolves — generics need the instance table build_enum_tab lacks)
 
 
     // variant_flat returns the flat-table index of variant `name` (-1 if `name` is not a known variant).
@@ -1256,6 +1364,24 @@ struct EnumTab {
     }
 
 
+    // payload_elem_struct returns the element struct sid of a STRUCT-array payload field (or -1).
+    fn payload_elem_struct(self, vname: string, idx: int) -> int {
+        let f = self.payload_flat(vname, idx)
+        if f < 0 {
+            return 0 - 1
+        }
+        return self.pf_elem_struct[f]
+    }
+
+
+    // payload_ty returns the declared type of variant `vname`'s `idx`-th payload field (a unit TyName if
+    // out of range). Resolved to a struct sid at the match site (sid_of_ty handles generic instances).
+    fn payload_ty(self, vname: string, idx: int) -> ps.Ty {
+        let f = self.payload_flat(vname, idx)
+        return self.pf_ty[f]
+    }
+
+
     // payload_elem returns the ELEMENT scalar kind of an array payload field (or -1).
     fn payload_elem(self, vname: string, idx: int) -> int {
         let f = self.payload_flat(vname, idx)
@@ -1267,8 +1393,66 @@ struct EnumTab {
 }
 
 
-// build_enum_tab collects every enum's variants from the AST (enum ids + per-enum variant tags).
-fn build_enum_tab(decls: [ps.Decl]) -> EnumTab {
+// ---- the global-constant table. Module-level `let NAME: int = <literal>` (e.g. the parser's TAG_* token
+// tags) are compile-time constants the stage-0 CHECKER folds inline (native codegen rejects unresolved
+// globals). The self-hosted path has no checker, so we collect the int-literal ones and fold a reference to
+// `INT_VAL(<value>LL)` in emit_expr — matching stage-0's inlined constant. ------------------------------
+struct ConstTab {
+    names: [string]            // const name
+    vals: [int]                // ...its int literal value
+
+
+    // lookup_idx returns the table index of const `name`, or -1 (not a known folded constant).
+    fn lookup_idx(self, name: string) -> int {
+        var i = 0
+        loop {
+            if i >= self.names.len() {
+                break
+            }
+            if self.names[i] == name {
+                return i
+            }
+            i = i + 1
+        }
+        return 0 - 1
+    }
+}
+
+
+// build_const_tab collects module-level `let NAME: int = <int literal>` declarations across all merged
+// modules — the folded compile-time constants (the parser's TAG_* token tags). Non-int-literal lets are
+// skipped (the corpus has none; extend if a global string/expr constant appears).
+fn build_const_tab(decls: [ps.Decl]) -> ConstTab {
+    var names: [string] = []
+    var vals: [int] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DLet(is_var, name, ty, value) {
+                match value.value {
+                    case EInt(v) {
+                        names.append(name)
+                        vals.append(v)
+                    }
+                    case _ {
+                    }
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return ConstTab { names: names, vals: vals }
+}
+
+
+// build_enum_tab collects every enum's variants from the AST (enum ids + per-enum variant tags). `snames`
+// is the declared struct-name list (sid order) so a STRUCT-array payload field's element sid resolves.
+fn build_enum_tab(decls: [ps.Decl], snames: [string]) -> EnumTab {
     var names: [string] = []
     var vo: [int] = []
     var vn: [string] = []
@@ -1278,6 +1462,8 @@ fn build_enum_tab(decls: [ps.Decl]) -> EnumTab {
     var pfr: [bool] = []
     var pfa: [bool] = []
     var pfe: [int] = []
+    var pfs: [int] = []
+    var pft: [ps.Ty] = []
     var i = 0
     loop {
         if i >= decls.len() {
@@ -1304,6 +1490,7 @@ fn build_enum_tab(decls: [ps.Decl]) -> EnumTab {
                         }
                         let fty = variants[vi].fields[fi].ty
                         pfv.append(vflat)
+                        pft.append(variants[vi].fields[fi].ty)
                         let fa = is_array_ty(fty)
                         // a REFCOUNTED single Value = a BOXED (aek 0), non-array field: string / enum / struct
                         // / generic. A scalar (aek 1..11) or an array is not.
@@ -1311,8 +1498,10 @@ fn build_enum_tab(decls: [ps.Decl]) -> EnumTab {
                         pfa.append(fa)
                         if fa {
                             pfe.append(ty_scalar_kind(elem_ty_of(fty)))   // element scalar kind, so `xs[i]` types
+                            pfs.append(ty_struct_sid(elem_ty_of(fty), snames))   // element struct sid, so `xs[i].f` resolves
                         } else {
                             pfe.append(0 - 1)
+                            pfs.append(0 - 1)
                         }
                         fi = fi + 1
                     }
@@ -1324,7 +1513,7 @@ fn build_enum_tab(decls: [ps.Decl]) -> EnumTab {
         }
         i = i + 1
     }
-    return EnumTab { names: names, v_owner: vo, v_name: vn, v_tag: vt, v_arity: va, pf_variant: pfv, pf_refc: pfr, pf_array: pfa, pf_elem: pfe }
+    return EnumTab { names: names, v_owner: vo, v_name: vn, v_tag: vt, v_arity: va, pf_variant: pfv, pf_refc: pfr, pf_array: pfa, pf_elem: pfe, pf_elem_struct: pfs, pf_ty: pft }
 }
 
 
@@ -1429,6 +1618,7 @@ struct CgcGen {
     sc_elem_struct: [int]      // ...for a STRUCT-array binding: its element struct sid (so `arr[i]` / `arr[i].f` resolve), else -1
     sc_refc: [bool]            // ...is this a REFCOUNTED BORROW (a string/enum enum-payload binding)? consuming it → own_into_slot
     sc_struct: [int]           // ...for a VALUE-STRUCT binding: its struct sid (so `p.f` / storage type resolve), else -1
+    sc_render: [int]           // ...its interpolation render-kind (int_kind: 0 int, 8 f32, 9 float, 10 bool, 1..7 sized), for `{x}`
     indent: int                // current C indentation depth (1 = the function-body level, 4 spaces each)
     st: StructTab              // the declared-struct table (value/boxed classification + field resolution)
     en: EnumTab                // the declared-enum table (variant -> enum id / tag / payload arity)
@@ -1439,6 +1629,7 @@ struct CgcGen {
     fn_ret_elem_kind: [int]    // ...for an array-returning fn: its element scalar kind (so `f()[i]` is a scalar), else -1
     fn_ret_struct: [int]       // ...for a value-struct-returning fn: the struct sid (so `let p = f()` is an em_s), else -1
     fn_ret_enum: [bool]        // ...does each fn return an enum (a `let o = f()` OWNED refcounted binding)?
+    consts: ConstTab           // module-level `let NAME: int = <literal>` folded constants (TAG_*), inlined by emit_expr
 
 
     fn fresh_var(mut self) -> int {
@@ -1459,6 +1650,29 @@ struct CgcGen {
         self.sc_elem_struct.append(0 - 1)     // default: not a struct-array binding (set_last_elem_struct overrides)
         self.sc_refc.append(false)            // default: not a refcounted borrow (set_last_refc overrides)
         self.sc_struct.append(0 - 1)          // default: not a struct binding (set_last_struct overrides)
+        self.sc_render.append(0)              // default: int render-kind (set_last_render overrides for float/bool/sized)
+    }
+
+
+    // set_last_render records the interpolation render-kind of the most-recently pushed binding (so a `{x}`
+    // hole on a float/bool/sized-int binding emits em_to_string(…, <kind>) matching the checker's render_kind).
+    fn set_last_render(mut self, k: int) {
+        self.sc_render[self.sc_render.len() - 1] = k
+    }
+
+
+    fn lookup_render(self, name: string) -> int {
+        var i = self.sc_name.len() - 1
+        loop {
+            if i < 0 {
+                break
+            }
+            if self.sc_name[i] == name {
+                return self.sc_render[i]
+            }
+            i = i - 1
+        }
+        return 0
     }
 
 
@@ -1623,6 +1837,7 @@ struct CgcGen {
         var nes: [int] = []
         var nrc: [bool] = []
         var ns: [int] = []
+        var nrd: [int] = []
         var i = 0
         loop {
             if i >= mark {
@@ -1638,6 +1853,7 @@ struct CgcGen {
             nes.append(self.sc_elem_struct[i])
             nrc.append(self.sc_refc[i])
             ns.append(self.sc_struct[i])
+            nrd.append(self.sc_render[i])
             i = i + 1
         }
         self.sc_elem_struct = nes
@@ -1650,6 +1866,7 @@ struct CgcGen {
         self.sc_array = na
         self.sc_elem_kind = ne
         self.sc_struct = ns
+        self.sc_render = nrd
     }
 
 
@@ -1714,6 +1931,28 @@ struct CgcGen {
     }
 
 
+    // object_is_owning_temp reports whether `e` produces a fresh OWNING temp whose field read must be a
+    // materialise-retain-drop (cgen_c.c's is_owning_temp / drop_object): `arr[i]` on an INLINE-PACKABLE
+    // (boxed) struct array (em_index materialises an owned COPY), or a CALL returning a refcounted (boxed)
+    // struct. Consuming such a field read in a `+` owns it (own_into_slot) WITHOUT the borrow retain-dance
+    // (emit_concat_operand's `!drop_object` gate).
+    fn object_is_owning_temp(self, e: ps.Expr) -> bool {
+        match e {
+            case EIndex(object, index) {
+                let esid = self.struct_sid_any(e)
+                return esid >= 0 && self.st.is_inline_packable(esid) && self.st.is_value(esid) == false
+            }
+            case ECall(callee, args) {
+                let sid = self.struct_sid_any(e)
+                return sid >= 0 && self.st.is_value(sid) == false   // a call returning a boxed struct is a fresh owned temp
+            }
+            case _ {
+                return false
+            }
+        }
+    }
+
+
     // ---- expression emission (M5a: int scalars — literals, idents, binops, user calls) --------------
     // emit_expr returns the C expression text for `e`. An in-scope SCALAR binding is re-boxed
     // `INT_VAL((int64_t)vN)`; a Value binding/param is its C name as-is.
@@ -1733,6 +1972,12 @@ struct CgcGen {
                 if self.en.is_variant(name) && self.lookup_cname(name) == "" {
                     var no_args: [ps.Expr] = []
                     return self.emit_enum_ctor(name, no_args)   // a bare (zero-payload) enum variant `Dot`
+                }
+                if self.lookup_cname(name) == "" {
+                    let ci = self.consts.lookup_idx(name)   // a module-level folded constant `TAG_IDENT` → its literal
+                    if ci >= 0 {
+                        return "INT_VAL({self.consts.vals[ci]}LL)"
+                    }
                 }
                 let cn = self.lookup_cname(name)
                 if self.lookup_unboxed(name) {
@@ -1765,7 +2010,7 @@ struct CgcGen {
                     if i >= elems.len() {
                         break
                     }
-                    let el = self.emit_expr(elems[i])      // a scalar element is emitted as its Value (em_array consumes it)
+                    let el = self.emit_consume_arg(elems[i])   // em_array CONSUMES its elements (an owned one moved in; a scalar as-is)
                     s = s + ", " + el
                     i = i + 1
                 }
@@ -1782,6 +2027,19 @@ struct CgcGen {
                 return self.emit_struct_lit(ty.value, fields)
             }
             case EGet(object, name) {
+                // An OWNING-TEMP receiver `arr[i].field` where the array's element is INLINE-PACKABLE
+                // (a boxed struct materialised by em_index into a fresh owned COPY, cgen_c.c drop_object):
+                // read the field, RETAIN it (survive the copy's drop), then DROP the element copy —
+                // materialise-retain-drop. Without this the materialised element leaks.
+                if self.object_is_owning_temp(object.value) {
+                    let esid = self.struct_sid_any(object.value)
+                    let fidx = self.st.field_index(esid, name)
+                    if fidx >= 0 {
+                        let ov = self.fresh_var()
+                        let fv = self.fresh_var()
+                        return "(\{ Value v{ov} = {self.emit_expr(object.value)}; Value v{fv} = em_enum_field(&g_em, v{ov}, {fidx}); if (IS_OBJ(v{fv})) OBJ_RETAIN(AS_OBJ(v{fv})); drop_value(&g_em, v{ov}); v{fv}; \})"
+                    }
+                }
                 // A VALUE-struct field read is a direct C member access `<obj>.f<idx>` (no heap, no ownership).
                 // A BOXED-struct field read is `em_enum_field(&g_em, <obj>, <idx>)` — a BORROW (the struct
                 // still owns the field; a consuming op retains it, see emit_concat_operand).
@@ -1820,10 +2078,17 @@ struct CgcGen {
                 return self.lookup_struct(name)
             }
             case EIndex(object, index) {
-                // an element read of a STRUCT array `arr[i]` → the array's element struct sid (a boxed clone).
+                // an element read of a STRUCT array `arr[i]` → the array's element struct sid (a boxed clone):
+                // a binding array `xs[i]`, or a struct-FIELD array `s.items[i]` (resolve the field's element sid).
                 match object.value {
                     case EIdent(aname) {
                         return self.lookup_elem_struct(aname)
+                    }
+                    case EGet(gobj, gname) {
+                        let osid = self.struct_sid_any(gobj.value)
+                        if osid >= 0 {
+                            return self.st.field_elem_struct(osid, gname)
+                        }
                     }
                     case _ {
                     }
@@ -1948,7 +2213,7 @@ struct CgcGen {
             let fname = self.st.f_name[self.st.flat_index(sid, f)]
             let fpos = self.slit_index(fields, fname)
             if fpos >= 0 {
-                s = s + ", " + self.emit_call_arg(fields[fpos].value)
+                s = s + ", " + self.emit_consume_arg(fields[fpos].value)   // a boxed struct CONSUMES its fields (owned ones moved in)
             }
             f = f + 1
         }
@@ -1970,17 +2235,19 @@ struct CgcGen {
             if i >= args.len() {
                 break
             }
-            s = s + ", " + self.emit_payload_arg(args[i])   // em_enum CONSUMES its payloads (an owned one is moved in)
+            s = s + ", " + self.emit_consume_arg(args[i])   // em_enum CONSUMES its payloads (an owned one is moved in)
             i = i + 1
         }
         return s + ")"
     }
 
 
-    // emit_payload_arg renders an enum-payload value: em_enum CONSUMES it, so an OWNED binding is MOVED in
-    // (move_binding — own_into_slot for a string/enum, the slot-niling move for an array); a scalar / literal
-    // / fresh temp is passed as-is.
-    fn emit_payload_arg(mut self, e: ps.Expr) -> string {
+    // emit_consume_arg renders a value moved INTO a container (an enum payload, a boxed-struct field, an
+    // array append element — cgen_c.c's emit_value_arg). The container takes ownership: an OWNED binding is
+    // MOVED in (move_binding — own_into_slot for a string/enum, slot-niling for an array/boxed struct); a
+    // refcounted FIELD / ELEMENT / owning-temp read is owned in (own_into_slot); a scalar / literal / fresh
+    // temp is passed as-is.
+    fn emit_consume_arg(mut self, e: ps.Expr) -> string {
         match e {
             case EIdent(name) {
                 if self.lookup_drop(name) {
@@ -1989,6 +2256,12 @@ struct CgcGen {
             }
             case _ {
             }
+        }
+        // a refcounted BORROW read (a field / string-or-enum element) is owned into the container
+        // (own_into_slot); an owning-temp read (a materialise field read, an inline element) already owns its
+        // result — ret_owns returns false for it (the own_into_slot rides the FIELD refcount / element kind).
+        if self.ret_owns(e) {
+            return "own_into_slot(&g_em, {self.emit_expr(e)})"
         }
         return self.emit_expr(e)
     }
@@ -2020,6 +2293,10 @@ struct CgcGen {
                             if fi >= 0 {
                                 return self.fn_ret_enum[fi]
                             }
+                        }
+                        let qfi = self.qual_free_fi(object.value, mname)   // a module-qualified enum-returning call
+                        if qfi >= 0 {
+                            return self.fn_ret_enum[qfi]
                         }
                     }
                     case _ {
@@ -2077,9 +2354,32 @@ struct CgcGen {
             if self.hole_is_string_temp(parts[i].hole[0]) {
                 return self.emit_expr(parts[i].hole[0])
             }
-            return "em_to_string(&g_em, {self.emit_expr(parts[i].hole[0])}, 0)"
+            let rk = self.render_kind_of_expr(parts[i].hole[0])   // int 0 · float 9 · bool 10 · sized 1..8
+            return "em_to_string(&g_em, {self.emit_expr(parts[i].hole[0])}, {rk})"
         }
         return self.emit_cached_str(parts[i].text)
+    }
+
+
+    // render_kind_of_expr returns an interpolation hole's render-kind (em_to_string's 3rd arg): a numeric
+    // LITERAL by its form, a binding by its tracked render-kind (float/bool/sized payload or scalar local),
+    // else 0 (int / non-numeric — em_to_string ignores the kind for a string/struct/enum value). Mirrors
+    // the checker's per-part render_kind (check.c int_kind).
+    fn render_kind_of_expr(self, e: ps.Expr) -> int {
+        match e {
+            case EFloat(v) {
+                return 9
+            }
+            case EBool(b) {
+                return 10
+            }
+            case EIdent(name) {
+                return self.lookup_render(name)
+            }
+            case _ {
+                return 0
+            }
+        }
     }
 
 
@@ -2175,7 +2475,12 @@ struct CgcGen {
     // (cgen_c.c: moves_local==1 for the array, moves_local==2 for the string.)
     fn move_binding(mut self, name: string) -> string {
         let cn = self.lookup_cname(name)
-        if self.lookup_array(name) {
+        // A UNIQUE-OWNER binding — an ARRAY or a plain (non-rc) BOXED STRUCT — is moved by NIL-ing its slot
+        // (a retain would deep-CLONE it; neither is refcounted). A refcounted STRING / ENUM / rc-struct is
+        // owned into the new slot via own_into_slot (a retain balanced by its scope-exit drop).
+        let sid = self.lookup_struct(name)
+        let unique_owner_struct = sid >= 0 && self.st.is_value(sid) == false && self.st.kinds[sid] == 0
+        if self.lookup_array(name) || unique_owner_struct {
             let m = self.fresh_var()
             return "(\{ Value v{m} = {cn}; {cn} = INT_VAL(0); v{m}; \})"
         }
@@ -2186,6 +2491,9 @@ struct CgcGen {
     fn emit_concat_operand(mut self, e: ps.Expr, consuming: bool) -> string {
         match e {
             case EIdent(name) {
+                if self.lookup_cname(name) == "" && self.en.is_variant(name) == false && self.consts.lookup_idx(name) >= 0 {
+                    return self.emit_expr(e)   // a folded int constant (INT_VAL literal) — not a heap borrow, no retain-dance
+                }
                 if self.lookup_drop(name) {
                     if consuming {
                         return self.move_binding(name)   // `+` consumes → move the owned binding out
@@ -2202,9 +2510,27 @@ struct CgcGen {
             case EIndex(object, index) {
                 // an array-element read `arr[i]` is a BORROW (em_index returns it un-retained) → retain it,
                 // so the consuming op balances and the array keeps ownership (cgen_c.c:emit_concat_operand).
+                // A refcounted STRING / ENUM element (`p.bindings[i]`) consumed / bound is first owned into a
+                // new slot (own_into_slot = the aliased-read moves_local==2 retain), then the balance-retain
+                // wraps it. A STRUCT element (`toks[i]` — em_index materialises/borrows the record) is only
+                // retained, not owned (its element sid resolves, so struct_sid_any >= 0).
+                if consuming && self.is_array_expr(object.value) && self.index_elem_kind(object.value) < 0 && self.struct_sid_any(e) < 0 {
+                    let v = self.fresh_var()
+                    return "(\{ Value v{v} = own_into_slot(&g_em, {self.emit_expr(e)}); if (IS_OBJ(v{v})) OBJ_RETAIN(AS_OBJ(v{v})); v{v}; \})"
+                }
                 return self.retain_dance(e)
             }
             case EGet(object, name) {
+                // An OWNING-TEMP field read `arr[i].field` (an inline-packable element — drop_object): emit_expr
+                // already materialise-retain-drops it into an OWNED value, so it is NOT a borrow (no retain-dance).
+                // Consumed by `+`, it is owned into the concat (own_into_slot, moves_local==2); a `==` read passes
+                // the materialised value directly. (cgen_c.c emit_concat_operand's `!drop_object` gate.)
+                if self.object_is_owning_temp(object.value) {
+                    if consuming {
+                        return "own_into_slot(&g_em, {self.emit_expr(e)})"
+                    }
+                    return self.emit_expr(e)
+                }
                 // A field read that is a BORROW yields a value the consuming op would over-release → retain it.
                 // (1) `self.field` — self is the borrowed method receiver (a by-value struct param / let field
                 // is an owned COPY, NOT retained). (2) a BOXED-struct field read (em_enum_field borrows — the
@@ -2255,6 +2581,11 @@ struct CgcGen {
                 if self.lookup_drop(name) && self.lookup_array(name) == false && is_boxed_struct == false {
                     return "own_into_slot(&g_em, {self.lookup_cname(name)})"
                 }
+                if self.lookup_refc(name) && is_boxed_struct == false {
+                    // a REFCOUNTED (string / enum) PAYLOAD binding (a borrow the enum owns) moved into a call:
+                    // own_into_slot RETAINS it for the callee's consume, leaving the arm's borrow untouched.
+                    return "own_into_slot(&g_em, {self.lookup_cname(name)})"
+                }
             }
             case EGet(object, name) {
                 // A REFCOUNTED (string / enum) struct field read passed to a call is MOVED in (own_into_slot
@@ -2266,10 +2597,15 @@ struct CgcGen {
                 }
             }
             case EIndex(object, index) {
-                // A REFCOUNTED (non-scalar: string / enum / struct) array-element read passed to a call is
-                // MOVED in — em_index returns a fresh owned clone/ref, moved into the callee. A scalar element
-                // (an int/… array) is passed as-is.
+                // A REFCOUNTED (string / enum) array-element read passed to a call is MOVED in (own_into_slot —
+                // em_index returns a fresh owned ref moved into the callee). A boxed STRUCT element (a boxed-
+                // pointer array like `[Param]`) is a BORROW (passed as-is, like a boxed-struct binding — the
+                // owner keeps it). A scalar element (an int/… array) is passed as-is.
                 if self.is_array_expr(object.value) && self.index_elem_kind(object.value) < 0 {
+                    let esid = self.struct_sid_any(e)
+                    if esid >= 0 && self.st.is_value(esid) == false && self.st.is_inline_packable(esid) == false {
+                        return self.emit_expr(e)   // a boxed (non-inline) struct element → a borrow
+                    }
                     return "own_into_slot(&g_em, {self.emit_expr(e)})"
                 }
             }
@@ -2310,6 +2646,12 @@ struct CgcGen {
                 if ck >= 0 && args.len() == 1 {
                     return "em_conv({self.emit_expr(args[0])}, {ck})"   // a numeric-width conversion `int(x)`
                 }
+                // WRAPPING arithmetic intrinsics (OFI-041): wrapping_add/sub/mul(a, b) → em_wrap_<op>(a, b,
+                // num_kind) — modulo 2^width, no trap. The args are borrowed scalars; num_kind 0 (i64 subset).
+                if args.len() == 2 && (name == "wrapping_add" || name == "wrapping_sub" || name == "wrapping_mul") {
+                    let opn = byte_slice(name, 9, name.len())   // drop the "wrapping_" prefix → add / sub / mul
+                    return "em_wrap_{opn}({self.emit_expr(args[0])}, {self.emit_expr(args[1])}, 0)"
+                }
                 if self.en.is_variant(name) {
                     return self.emit_enum_ctor(name, args)   // an enum-variant construction `Circle(4)`
                 }
@@ -2336,75 +2678,18 @@ struct CgcGen {
                 }
                 let fi = self.fn_index(name)
                 if fi >= 0 {
-                    // If any argument is an owning temporary (an array literal), hoist EVERY argument into a
-                    // `c%d` local (left-to-right), call, drop the masked temps, then yield the result — a
-                    // statement-expression so it stays usable in expression position (cgen_c.c:emit_call).
-                    var any_temp = false
-                    var ti = 0
-                    loop {
-                        if ti >= args.len() {
-                            break
-                        }
-                        if self.arg_is_owning_temp(args[ti]) {
-                            any_temp = true
-                        }
-                        ti = ti + 1
-                    }
-                    if any_temp {
-                        let rid = self.fresh_var()                  // result id, taken BEFORE the arg ids
-                        var argids: [int] = []
-                        var s = "(\{ "
-                        var i = 0
-                        loop {
-                            if i >= args.len() {
-                                break
-                            }
-                            let aid = self.fresh_var()
-                            argids.append(aid)
-                            s = s + "Value c{aid} = {self.emit_call_arg(args[i])}; "
-                            i = i + 1
-                        }
-                        s = s + "Value c{rid} = em_fn_{fi}("
-                        var j = 0
-                        loop {
-                            if j >= argids.len() {
-                                break
-                            }
-                            if j > 0 {
-                                s = s + ", "
-                            }
-                            s = s + "c{argids[j]}"
-                            j = j + 1
-                        }
-                        s = s + "); "
-                        var k = 0
-                        loop {
-                            if k >= args.len() {
-                                break
-                            }
-                            if self.arg_is_owning_temp(args[k]) {
-                                s = s + "drop_value(&g_em, c{argids[k]}); "
-                            }
-                            k = k + 1
-                        }
-                        return s + "c{rid}; \})"
-                    }
-                    var s = "em_fn_{fi}("
-                    var i = 0
-                    loop {
-                        if i >= args.len() {
-                            break
-                        }
-                        if i > 0 {
-                            s = s + ", "
-                        }
-                        s = s + self.emit_call_arg(args[i])
-                        i = i + 1
-                    }
-                    return s + ")"
+                    return self.emit_free_call(fi, args)
                 }
             }
             case EGet(object, mname) {
+                // A MODULE-QUALIFIED free call `mod.fn(args)` — the receiver is an import alias, not an
+                // in-scope binding (no cname, not a struct binding). The self-hosted path has no checker to
+                // stamp `resolved_fn`, so we resolve `fn` in the merged declaration-order fn table ourselves
+                // (the flattened em_fn_<index> numbering). (cgen_c.c takes the direct-call path off resolved_fn.)
+                let mfi = self.qual_free_fi(object.value, mname)
+                if mfi >= 0 {
+                    return self.emit_free_call(mfi, args)
+                }
                 // A built-in STRING method (a string receiver — a param / literal / owned local). `.len()`
                 // is em_str_len (NO ctx); `.bytes()`/`.chars()` return fresh OWNED arrays (em_str_bytes → [u8],
                 // em_str_chars → [string]); `.split(sep)` → [string]. The receiver is a BORROW (read as-is;
@@ -2440,7 +2725,7 @@ struct CgcGen {
                     }
                     if mname == "append" {
                         let recv = self.emit_expr(object.value)
-                        let el = self.emit_expr(args[0])      // element in source order, after the receiver (OFI-166)
+                        let el = self.emit_consume_arg(args[0])   // the array CONSUMES the element (owned ones moved in); source order (OFI-166)
                         return "em_array_append(&g_em, {recv}, {el})"
                     }
                 }
@@ -2469,6 +2754,95 @@ struct CgcGen {
             }
         }
         return "INT_VAL(0)"
+    }
+
+
+    // emit_free_call emits a direct FREE-function call `em_fn_<fi>(args…)`. If any argument is an owning
+    // temporary (an array literal), hoist EVERY argument into a `c%d` local (left-to-right), call, drop the
+    // masked temps, then yield the result — a statement-expression so it stays usable in expression position
+    // (cgen_c.c:emit_call). Shared by the bare-name and the module-qualified `mod.fn` call paths.
+    fn emit_free_call(mut self, fi: int, args: [ps.Expr]) -> string {
+        var any_temp = false
+        var ti = 0
+        loop {
+            if ti >= args.len() {
+                break
+            }
+            if self.arg_is_owning_temp(args[ti]) {
+                any_temp = true
+            }
+            ti = ti + 1
+        }
+        if any_temp {
+            let rid = self.fresh_var()                  // result id, taken BEFORE the arg ids
+            var argids: [int] = []
+            var s = "(\{ "
+            var i = 0
+            loop {
+                if i >= args.len() {
+                    break
+                }
+                let aid = self.fresh_var()
+                argids.append(aid)
+                s = s + "Value c{aid} = {self.emit_call_arg(args[i])}; "
+                i = i + 1
+            }
+            s = s + "Value c{rid} = em_fn_{fi}("
+            var j = 0
+            loop {
+                if j >= argids.len() {
+                    break
+                }
+                if j > 0 {
+                    s = s + ", "
+                }
+                s = s + "c{argids[j]}"
+                j = j + 1
+            }
+            s = s + "); "
+            var k = 0
+            loop {
+                if k >= args.len() {
+                    break
+                }
+                if self.arg_is_owning_temp(args[k]) {
+                    s = s + "drop_value(&g_em, c{argids[k]}); "
+                }
+                k = k + 1
+            }
+            return s + "c{rid}; \})"
+        }
+        var s = "em_fn_{fi}("
+        var i = 0
+        loop {
+            if i >= args.len() {
+                break
+            }
+            if i > 0 {
+                s = s + ", "
+            }
+            s = s + self.emit_call_arg(args[i])
+            i = i + 1
+        }
+        return s + ")"
+    }
+
+
+    // qual_free_fi resolves a MODULE-QUALIFIED free call `mod.fn` to its merged fn-table index, or -1. The
+    // receiver `obj` is a module import alias iff it is a bare EIdent that is NOT an in-scope binding (no
+    // cname) and NOT a struct binding — the only non-binding EIdent receiver. Used by emit_call and the
+    // is_string/array/enum return-type predicates so `lx.kind_name(op)` resolves like a bare free call.
+    fn qual_free_fi(self, obj: ps.Expr, mname: string) -> int {
+        match obj {
+            case EIdent(recv) {
+                if self.lookup_cname(recv) == "" && self.lookup_struct(recv) < 0 {
+                    return self.fn_index(mname)
+                }
+            }
+            case _ {
+            }
+        }
+        return 0 - 1
     }
 
 
@@ -2641,6 +3015,15 @@ struct CgcGen {
                 }
                 return 0 - 1
             }
+            case EGet(gobj, gname) {
+                // a struct FIELD array `s.nums[i]` → the field's element scalar kind (so a scalar element is
+                // not mistaken for a refcounted one that would be own_into_slot'd).
+                let sid = self.struct_sid_any(gobj.value)
+                if sid >= 0 {
+                    return self.st.field_elem(sid, gname)
+                }
+                return 0 - 1
+            }
             case _ {
                 return 0 - 1
             }
@@ -2674,6 +3057,13 @@ struct CgcGen {
             case EIdent(name) {
                 return self.lookup_drop(name) && self.lookup_array(name) == false   // owned, and NOT an array
             }
+            case EGet(object, name) {
+                // a refcounted (string / enum) struct FIELD read `self.src` — treated as a string for a
+                // receiver method (`self.src.len()` → em_str_len). An enum field would over-match, but the
+                // corpus only calls string methods on string fields (a benign over-approximation).
+                let sid = self.struct_sid_any(object.value)
+                return sid >= 0 && self.st.field_is_refcounted(sid, name)
+            }
             case EBinary(op, l, r) {
                 if ps.binop_id(op) == 1 {
                     return self.is_string_expr(l.value) || self.is_string_expr(r.value)
@@ -2699,6 +3089,10 @@ struct CgcGen {
                             if fi >= 0 {
                                 return self.fn_ret_str[fi]
                             }
+                        }
+                        let qfi = self.qual_free_fi(object.value, mname)   // a module-qualified free call `lx.kind_name(op)`
+                        if qfi >= 0 {
+                            return self.fn_ret_str[qfi]
                         }
                     }
                     case _ {
@@ -2744,6 +3138,17 @@ struct CgcGen {
                         if self.is_string_expr(object.value) {
                             return mname == "bytes" || mname == "chars" || mname == "split"
                         }
+                        let sid = self.struct_sid_any(object.value)   // an array-returning struct METHOD `self.parse_params()`
+                        if sid >= 0 {
+                            let fi = self.fn_index("{self.st.names[sid]}.{mname}")
+                            if fi >= 0 {
+                                return self.fn_ret_array[fi]
+                            }
+                        }
+                        let qfi = self.qual_free_fi(object.value, mname)   // a module-qualified array-returning call `lx.lex(src)`
+                        if qfi >= 0 {
+                            return self.fn_ret_array[qfi]
+                        }
                     }
                     case _ {
                     }
@@ -2761,12 +3166,15 @@ struct CgcGen {
     // element's form — mirroring codegen.em's elem_kind_of so both backends agree with stage-0's checker:
     // a string/array (boxed) element → 0, a float → f64=10, a bool → 11, otherwise i64=4 (int / arithmetic).
     fn elem_kind_of_expr(self, e: ps.Expr) -> int {
-        if self.is_string_expr(e) || self.is_array_expr(e) {
-            return 0
+        if self.is_string_expr(e) || self.is_array_expr(e) || self.is_enum_expr(e) {
+            return 0                          // string / array / enum element → boxed
         }
         match e {
             case EStr(parts) {
                 return 0
+            }
+            case EStructLit(ty, fields) {
+                return 0                      // a struct element is boxed (a Value pointer / packed record)
             }
             case EFloat(v) {
                 return 10
@@ -2843,6 +3251,68 @@ struct CgcGen {
     }
 
 
+    // emit_return_value renders a NON-drop-scope return value (no owned locals to survive). It mirrors
+    // emit_expr_raw's moves_local==2: a REFCOUNTED value READ from an existing owner (a boxed field, an array
+    // element, an owning-temp field read) is owned INTO the return slot via own_into_slot; a fresh temp
+    // (a call/ctor/concat), a scalar, or a literal is returned as-is. (The drop-scope path retains instead,
+    // via emit_concat_operand, so the value survives the local drops — cgen_c.c STMT_RETURN.)
+    fn emit_return_value(mut self, e: ps.Expr) -> string {
+        if self.ret_owns(e) {
+            return "own_into_slot(&g_em, {self.emit_expr(e)})"
+        }
+        return self.emit_expr(e)
+    }
+
+
+    // emit_assign_value renders the RHS stored into an OWNED `var` (`s = other`). It mirrors emit_expr with
+    // moves_local==2: an owned BINDING or a refcounted FIELD / ELEMENT / owning-temp read is owned INTO the
+    // slot (own_into_slot — retain a string/enum, clone an array); a fresh temp (call/ctor/concat) or a
+    // scalar is stored as-is. (We conservatively own_into_slot an owned binding rather than nil-slot-move it,
+    // since without liveness we cannot prove a last use — safe: never leaks, never double-frees.)
+    fn emit_assign_value(mut self, e: ps.Expr) -> string {
+        match e {
+            case EIdent(name) {
+                if self.lookup_drop(name) {
+                    return "own_into_slot(&g_em, {self.lookup_cname(name)})"
+                }
+            }
+            case _ {
+            }
+        }
+        if self.ret_owns(e) {
+            return "own_into_slot(&g_em, {self.emit_expr(e)})"
+        }
+        return self.emit_expr(e)
+    }
+
+
+    // ret_owns reports whether a value READ must be owned into a NEW slot (own_into_slot — the moves_local==2
+    // retain): a REFCOUNTED struct FIELD read (`self.name`, `f(x).text`, `arr[i].text` — regardless of whether
+    // the receiver is a borrow or an owning temp, since the own_into_slot rides the FIELD's refcount, not the
+    // receiver), or a refcounted (string/enum) array ELEMENT (`xs[i]`). A scalar / non-refcounted field, a
+    // struct element (em_index materialises/borrows the record), a literal, or a fresh owned temp go as-is.
+    fn ret_owns(self, e: ps.Expr) -> bool {
+        match e {
+            case EGet(object, name) {
+                let osid = self.struct_sid_any(object.value)
+                if osid >= 0 {
+                    return self.st.field_is_refcounted(osid, name)
+                }
+                return false
+            }
+            case EIndex(object, index) {
+                if self.object_is_owning_temp(e) {
+                    return false   // an inline-packable element — em_index already materialised an owned COPY
+                }
+                return self.is_array_expr(object.value) && self.index_elem_kind(object.value) < 0
+            }
+            case _ {
+                return false
+            }
+        }
+    }
+
+
     fn emit_stmt(mut self, s: ps.Stmt) {
         match s {
             case SReturn(value, line) {
@@ -2862,7 +3332,7 @@ struct CgcGen {
                     println("{self.ind()}\}")
                 } else {
                     if value.len() > 0 {
-                        println("{self.ind()}return {self.emit_expr(value[0].value)};")
+                        println("{self.ind()}return {self.emit_return_value(value[0].value)};")
                     } else {
                         println("{self.ind()}return INT_VAL(0);")    // a bare return yields unit (0), like the VM
                     }
@@ -2888,7 +3358,10 @@ struct CgcGen {
                 } else {
                     let arr = self.is_array_expr(value.value)
                     let bsid = self.boxed_sid_of(value.value)                            // a BOXED struct local (owned, like an array)
-                    let owned = self.is_string_expr(value.value) || arr || self.is_enum_expr(value.value) || bsid >= 0   // string / array / enum / boxed-struct local is owned/dropped
+                    // string / array / enum / boxed-struct local is owned/dropped; ret_owns also catches a
+                    // refcounted FIELD / ELEMENT / owning-temp read (`let w = self.peek().text`) whose owned
+                    // string/enum the plain predicates miss (is_string_expr has no field/element case).
+                    let owned = self.is_string_expr(value.value) || arr || self.is_enum_expr(value.value) || bsid >= 0 || self.ret_owns(value.value)
                     // An owned array local carries its ELEMENT scalar kind so a later `xs[i]` types as a scalar —
                     // from the `[T]` annotation if present, else inferred from the initialiser.
                     var elem_sk = 0 - 1
@@ -2905,11 +3378,12 @@ struct CgcGen {
                     match value.value {
                         case EArray(elems, lines) {
                             if elems.len() == 0 && ty.len() > 0 {
-                                // An empty array of STRUCTS is em_struct_array(&g_em, <sid>, 0) (the element
-                                // struct's inline layout); any other empty array is em_array(&g_em, 0, <kind>).
+                                // An empty array of INLINE-PACKABLE structs is em_struct_array(&g_em, <sid>, 0)
+                                // (packed layout); a non-inline struct element (boxed pointers) or any other
+                                // empty array is em_array(&g_em, 0, <kind>) — matching the checker's elem_struct_id.
                                 let esid = ty_struct_sid(elem_ty_of(ty[0]), self.st.names)
-                                if esid >= 0 {
-                                    println("{self.ind()}Value v{id} = em_struct_array(&g_em, {esid}, 0);")
+                                if esid >= 0 && self.st.is_inline_packable(esid) {
+                                    println("{self.ind()}Value v{id} = em_struct_array(&g_em, 0, {esid});")   // em_struct_array(&g_em, count, sid)
                                 } else {
                                     let ek = array_elem_kind_ty(elem_ty_of(ty[0]))
                                     println("{self.ind()}Value v{id} = em_array(&g_em, 0, {ek});")
@@ -3039,6 +3513,15 @@ struct CgcGen {
                 self.indent = self.indent + 1
                 println("{self.ind()}Value v{sv} = {self.emit_expr(value.value)};")
                 println("{self.ind()}int v{tv} = em_tag(v{sv});")
+                // If the scrutinee is a fresh OWNED enum temp (a call/ctor result — not a borrow binding/field),
+                // it must be dropped on every exit (each arm's return/break/… via emit_drops(0)) AND at the
+                // match's fall-through. Push it as a synthetic owned binding BELOW the arm payload marks so the
+                // per-arm emit_drops(mark) leaves it alive, then drop it after the if/else chain. (cgen_c.c.)
+                let owns_subj = self.is_enum_expr(value.value)
+                let subj_mark = self.sc_name.len()
+                if owns_subj {
+                    self.push("", "v{sv}", 0 - 1, false, true, false, 0 - 1)
+                }
                 var ci = 0
                 var first = true
                 loop {
@@ -3077,6 +3560,25 @@ struct CgcGen {
                         if self.en.payload_refc(cases[ci].pattern.variant, bi) {
                             self.set_last_refc(true)      // a refcounted (string/enum) payload → own_into_slot on consume
                         }
+                        if pa {
+                            // a `[Struct]` / `[Box<T>]` payload: resolve the element struct sid via sid_of_ty
+                            // (handles generic instances ty_struct_sid can't), so `xs[i]` / `xs[i].f` resolve.
+                            let ety = elem_ty_of(self.en.payload_ty(cases[ci].pattern.variant, bi))
+                            let pes = self.st.sid_of_ty(ety)
+                            if pes >= 0 {
+                                self.set_last_elem_struct(pes)
+                            }
+                        } else {
+                            let pty = self.en.payload_ty(cases[ci].pattern.variant, bi)
+                            let psid = self.st.sid_of_ty(pty)
+                            if psid >= 0 {
+                                self.set_last_struct(psid)       // a struct / `Box<T>` payload: `elem.value` / `s.field` resolves
+                            }
+                            let rk = render_kind_of_ty(pty)
+                            if rk != 0 {
+                                self.set_last_render(rk)         // a scalar float/bool/sized payload: `{v}` renders at its kind
+                            }
+                        }
                         bi = bi + 1
                     }
                     self.emit_block_raw(cases[ci].body)
@@ -3088,6 +3590,10 @@ struct CgcGen {
                 }
                 if first == false {
                     println("{self.ind()}\}")
+                }
+                if owns_subj {
+                    self.emit_drops(subj_mark)        // fall-through: drop the owning-temp scrutinee
+                    self.truncate_scope(subj_mark)
                 }
                 self.indent = self.indent - 1
                 println("{self.ind()}\}")
@@ -3105,7 +3611,7 @@ struct CgcGen {
                             println("{self.ind()}{cn} = ({ct})AS_INT({self.emit_expr(value.value)});")
                         } else if self.lookup_drop(name) {
                             let t = self.fresh_var()
-                            println("{self.ind()}\{ Value v{t} = {self.emit_expr(value.value)};")
+                            println("{self.ind()}\{ Value v{t} = {self.emit_assign_value(value.value)};")
                             self.indent = self.indent + 1
                             println("{self.ind()}drop_value(&g_em, {cn});")
                             println("{self.ind()}{cn} = v{t};")
@@ -3140,8 +3646,11 @@ struct CgcGen {
                 }
             }
             case SExpr(expr) {
-                // A bare expression statement. M5b: a builtin call (`println(x)`) whose result is discarded
-                // → `(void)(em_<name>(&g_em, <args>));`. The args are borrowed (read as-is).
+                // A bare expression statement. A builtin `println(x)` → `(void)(em_println(&g_em, <args>));`
+                // (borrowed args, read as-is). Any OTHER call (a user free fn, a struct method, a
+                // module-qualified call, an em_native builtin, an enum ctor) goes through emit_call_stmt,
+                // which mirrors stage-0's STMT_EXPR: `(void)(E)` for a unit result, or (for a discarded
+                // fresh OWNING temp — string/array/enum/boxed-struct) `{ Value _dis = (E); drop_value(…); }`.
                 match expr.value {
                     case ECall(callee, args) {
                         match callee.value {
@@ -3158,15 +3667,12 @@ struct CgcGen {
                                         i = i + 1
                                     }
                                     println(s + "));")
+                                } else {
+                                    self.emit_call_stmt(expr.value)
                                 }
                             }
                             case EGet(object, mname) {
-                                // A built-in array-method statement (`arr.append(x)`). The result is a borrow
-                                // of the array (em_array_append returns it un-retained), so discarding it does
-                                // not leak — `(void)(…)`, mirroring stage-0's STMT_EXPR without release_temp.
-                                if self.is_array_expr(object.value) {
-                                    println("{self.ind()}(void)({self.emit_call(callee.value, args)});")
-                                }
+                                self.emit_call_stmt(expr.value)
                             }
                             case _ {
                             }
@@ -3174,6 +3680,28 @@ struct CgcGen {
                     }
                     case _ {
                     }
+                }
+            }
+            case _ {
+            }
+        }
+    }
+
+
+    // emit_call_stmt renders a call expression STATEMENT whose result is discarded (a user free fn / struct
+    // method / module-qualified call / em_native builtin / enum ctor). Mirrors stage-0's STMT_EXPR: if the
+    // result is a FRESH OWNING temp (a string / array / enum / boxed struct — like the checker's release_temp
+    // flag), drop it (`{ Value _dis = (E); drop_value(&g_em, _dis); }`), else `(void)(E);`. A unit-returning
+    // call (p_expr) and a borrow-returning array method (`arr.append`) take the plain `(void)` form.
+    fn emit_call_stmt(mut self, e: ps.Expr) {
+        let owns = self.is_string_expr(e) || self.is_array_expr(e) || self.is_enum_expr(e) || self.boxed_sid_of(e) >= 0
+        match e {
+            case ECall(callee, args) {
+                let c = self.emit_call(callee.value, args)
+                if owns {
+                    println("{self.ind()}\{ Value _dis = ({c}); drop_value(&g_em, _dis); \}")
+                } else {
+                    println("{self.ind()}(void)({c});")
                 }
             }
             case _ {
@@ -3381,9 +3909,8 @@ fn numeric_typename_kind(name: string) -> int {
 fn is_enum_ty(ty: ps.Ty, en: EnumTab) -> bool {
     match ty {
         case TyName(qual, name) {
-            if qual != "" {
-                return false
-            }
+            // The qualifier is the module alias (`lx.Tk`); the merged enum table registers each enum by its
+            // BARE name (like ast_print drops the qualifier), so match on `name` regardless of `qual`.
             var i = 0
             loop {
                 if i >= en.names.len() {
@@ -3403,8 +3930,8 @@ fn is_enum_ty(ty: ps.Ty, en: EnumTab) -> bool {
 }
 
 
-fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_ret_kind: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_struct: [int], fn_ret_enum: [bool]) {
-    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_struct: [], sc_refc: [], sc_struct: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum }
+fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_ret_kind: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab) {
+    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_struct: [], sc_refc: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts }
     var ai = 0
     if has_self {
         g.push("self", "a0", 0 - 1, false, false, false, 0 - 1)
@@ -3752,7 +4279,8 @@ fn emit_program(decls: [ps.Decl], filename: string) {
     let fn_ret_array = build_fn_ret_array(decls)
     let fn_ret_elem_kind = build_fn_ret_elem_kinds(decls)
     let stab = build_struct_tab(decls)
-    let etab = build_enum_tab(decls)
+    let etab = build_enum_tab(decls, stab.names)
+    let ctab = build_const_tab(decls)
     let fn_ret_struct = build_fn_ret_structs(decls, stab)
     let fn_ret_enum = build_fn_ret_enum(decls, etab)
     println("// Generated by `emberc --emit=c` from {filename}. Do not edit.")
@@ -3848,7 +4376,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
         match decls[k] {
             case DFn(f) {
                 if f.has_body {
-                    emit_fn_body(f, b, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_struct, fn_ret_enum)
+                    emit_fn_body(f, b, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_struct, fn_ret_enum, ctab)
                     b = b + 1
                     if b < total {
                         println("")
@@ -3863,7 +4391,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
                         break
                     }
                     if methods[mi].has_body {
-                        emit_fn_body(methods[mi], b, true, owner, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_struct, fn_ret_enum)
+                        emit_fn_body(methods[mi], b, true, owner, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_struct, fn_ret_enum, ctab)
                         b = b + 1
                         if b < total {
                             println("")

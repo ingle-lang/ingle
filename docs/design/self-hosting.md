@@ -744,16 +744,34 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    `em_to_string(&g_em, <expr>, 0)` (a fresh owned string; the hole value borrowed), EXCEPT a hole that is
    already an OWNING-TEMP string (a string-returning call / concat / nested interpolation) is concatenated
    directly (em_add consumes the temp). Holes may be idents, struct fields, array indices, arithmetic exprs,
-   or adjacent. **With interpolation in, the parser's remaining tail is pure ownership.** **M5o (done, fixture
-   `array_payload.em`)** knocked down three of those: an ARRAY enum-payload binding `case V(xs)` is tracked as
-   an array (is_arr + element scalar kind via EnumTab.pf_array / pf_elem) so `xs.len()` / `xs[i]` resolve; a
-   REFCOUNTED (non-scalar) array-ELEMENT read `arr[i]` passed to a call is `own_into_slot(em_index(…))` (a
-   scalar element passes as-is); and an OWNED binding moved into an enum PAYLOAD (`Toks(ts)`) is a move
-   (move_binding — em_enum consumes payloads). The parser is chipping down (~500 → ~490 hunks) but is a
-   genuine multi-session ownership grind. Known features still to add: `arr[i].field` DIRECTLY (temp element →
-   materialise-retain-drop), an empty struct-array as a struct FIELD value (em_struct_array), `.len()` on a
-   call-result string (temp-receiver drop), a refcounted struct-array-element field into a call, a SCALAR
-   generic type arg (Box<int> — packed, deferred; unused by the compiler), and Option/Result generic ENUMs.
+   or adjacent. **M5p — `selfhost/parser.em` C-emits BYTE-IDENTICAL to stage-0 (both VM and native), a
+   permanent `make selfhost` gate (the SECOND full module after the lexer).** The parser fell in one campaign
+   from ~510 → 0 diff hunks; most of the distance was a handful of root causes whose C var-numbering cascade
+   inflated the count. The features/ownership rules landed, in rough order of impact:
+   - **module-qualified free calls** `lx.kind_name(op)` → resolve `fn` in the merged fn table (`qual_free_fi`);
+     the self-hosted path has no checker to stamp `resolved_fn`, so the emitter reconstructs it. Wired into
+     the is_string/array/enum return-type predicates too.
+   - **global constants** — module-level `let TAG_IDENT: int = 3` are checker-folded inline by stage-0 (native
+     rejects unresolved globals); a `ConstTab` collects the int-literal ones and folds each reference to
+     `INT_VAL(<v>LL)`.
+   - **user-call statements** — a discarded call `p_expr(x)` emits `(void)(E)` (or `{ Value _dis = E;
+     drop_value; }` for a discarded owning temp), not nothing; **owning-temp match scrutinee** (`match
+     self.peek_kind()`) is dropped on every arm exit + fall-through.
+   - **inline-packable struct arrays** (`is_inline_packable` mirroring `array_inline_struct_id`): a `[SLitField]`
+     element (all scalar/refcounted, no array field) is em_index-materialised into an owned COPY, so `arr[i].f`
+     is a materialise-retain-drop and `em_struct_array(&g_em, count, sid)`; a `[StrPart]` (has a `[Expr]` field)
+     stays boxed pointers (a borrow).
+   - **qualified struct types** `[lx.Token]` resolve by bare name (`ty_struct_sid` / `sid_of_ty` ignore the
+     alias); array-of-struct enum payloads (`[Box<Expr>]`) resolve via `sid_of_ty` (handles generic instances).
+   - **the ownership discipline unified**: `move_binding` nil-slots a unique-owner (array OR boxed struct) and
+     own_into_slots a refcounted string/enum; a value moved INTO a container (enum payload / boxed-struct field /
+     array append / array literal) goes through one `emit_consume_arg`; a `return` / `var =` / `let` owns a
+     refcounted read into its slot via `ret_owns` (own_into_slot rides the FIELD's refcount, not the receiver);
+     the wrapping intrinsics `wrapping_add/sub/mul` → `em_wrap_<op>`.
+   - **bool is not an unboxed scalar** (`is_numeric_type` excludes it): `let saved = self.no_struct` (a boxed
+     struct's bool field) keeps a retained Value, not an `int64_t` — the single fix that collapsed the last big
+     cascade (509→3). Float holes render at kind 9 (a per-binding render-kind).
+   Deferred: a SCALAR generic type arg (Box<int> — packed, unused by the compiler), Option/Result generic ENUMs.
    Orthogonal
    follow-up: float-literal emission needs a `%.17g` builtin
    (Ember interpolation is `%g`, so `FLOAT_VAL` can't be produced from a bare `{f}`). OFI-166 (the C
