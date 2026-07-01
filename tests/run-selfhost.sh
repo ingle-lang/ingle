@@ -386,7 +386,7 @@ if [ -f "$CCSRC" ]; then
     # actual compiler source). The first native-bootstrap milestone. This list grows as each module's
     # features land in cgen_c.em.
     cmpass=0; cmfail=0
-    for src in selfhost/lexer.em selfhost/parser.em selfhost/checker.em selfhost/codegen.em; do
+    for src in selfhost/lexer.em selfhost/parser.em selfhost/checker.em selfhost/codegen.em selfhost/cgen_c.em selfhost/cgen_c_dump.em; do
         oracle=$(cd "$ROOT" && "$BIN" --emit=c "$src" 2>/dev/null)
         if [ -n "$ccbin" ]; then
             actual=$(cd "$ROOT" && "$ccbin" "$src" 2>/dev/null | sed '/^=> 0$/d')
@@ -400,8 +400,39 @@ if [ -f "$CCSRC" ]; then
             echo "FAIL    self-hosted C-emit differs from stage-0 on module $src"
         fi
     done
-    echo "selfhost cgen_c: $cmpass/$((cmpass + cmfail)) whole MODULES self-C-emit byte-identical (lexer, parser, checker, codegen — the C-emit FIXED POINT)"
+    echo "selfhost cgen_c: $cmpass/$((cmpass + cmfail)) whole MODULES self-C-emit byte-identical (lexer, parser, checker, codegen, cgen_c, driver — the C-emit backend compiles ITSELF)"
     pass=$((pass + cmpass)); fail=$((fail + cmfail))
+
+    # THE REPRODUCTION FIXED POINT (the promised land): the native C-emitter N1 (built by stage-0 from
+    # cgen_c_dump.em, = `ccbin`) emits the C for its OWN source; that C is compiled into a SECOND-GENERATION
+    # compiler N2; N2 must then emit BYTE-IDENTICAL C for the whole self-hosted source. A self-built native
+    # compiler that regenerates an identical copy of itself — no stage-0 in the loop after N1 is built.
+    if [ -n "$ccbin" ]; then
+        rn1c="${TMPDIR:-/tmp}/emberc_repro_n1_$$.c"
+        rn2="${TMPDIR:-/tmp}/emberc_repro_n2_$$"
+        rn2c="${TMPDIR:-/tmp}/emberc_repro_n2_$$.c"
+        rok=1
+        # N1 emits the C for its own driver source; compile it into N2 (link the same runtime `emberc -o` does)
+        (cd "$ROOT" && "$ccbin" selfhost/cgen_c_dump.em 2>/dev/null) | sed '/^=> 0$/d' > "$rn1c"
+        if cc -std=c17 -O2 -D_DEFAULT_SOURCE -I"$ROOT/include" "$rn1c" "$ROOT/build/libember_rt.a" -lm -o "$rn2" 2>/dev/null; then
+            # N2 must reproduce the SAME C for the whole self-hosted source (checker+codegen+cgen_c+driver+…).
+            # Both run with the SAME relative path from $ROOT so the emitted `// … from <file>` header matches.
+            for src in lexer parser checker codegen cgen_c cgen_c_dump; do
+                oracle=$(cd "$ROOT" && "$BIN" --emit=c "selfhost/$src.em" 2>/dev/null)
+                n2out=$(cd "$ROOT" && "$rn2" "selfhost/$src.em" 2>/dev/null | sed '/^=> 0$/d')
+                [ "$oracle" = "$n2out" ] || { rok=0; echo "FAIL    2nd-gen compiler N2 diverges on $src.em"; }
+            done
+        else
+            rok=0; echo "FAIL    could not compile N1's self-emitted C into a 2nd-gen compiler"
+        fi
+        if [ "$rok" -eq 1 ]; then
+            echo "selfhost cgen_c: 🎉 REPRODUCTION FIXED POINT — the self-built native compiler regenerates an identical copy of itself (N1→N2, byte-identical over all 6 sources)"
+            pass=$((pass + 1))
+        else
+            fail=$((fail + 1))
+        fi
+        rm -f "$rn1c" "$rn2" "$rn2c"
+    fi
 
     [ -n "$ccbin" ] && rm -f "$ccbin"
 fi

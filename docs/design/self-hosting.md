@@ -790,8 +790,22 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    element renders at kind 9 (`aek_to_render_kind`); and a BORROWED array stored into a container is
    own_into_slot-CLONED (moves_local==2 — arrays are unique-owner, so the container gets an independent copy).
    Deferred: a SCALAR generic type arg (Box<int> — packed, unused by the compiler), Option/Result generic ENUMs,
-   a NON-round float literal (needs the `%.17g` builtin). **NEXT: link the C-emit front-end + backend into a
-   standalone self-built native `emberc.em` that rebuilds ITSELF to a native binary — the promised land.**
+   a NON-round float literal (needs the `%.17g` builtin).
+   **🎉🎉🎉 M5s — THE REPRODUCTION FIXED POINT (the promised land): a self-built NATIVE compiler regenerates a
+   BYTE-IDENTICAL copy of itself.** After the 4 modules, `cgen_c.em` itself (the C emitter — the densest file,
+   4429 lines) and the driver `cgen_c_dump.em` C-emit byte-identical too (`make selfhost` "6/6 whole MODULES …
+   the C-emit backend compiles ITSELF"). The keystone fix was **method-call receiver hoisting** — a method call
+   whose receiver is NOT a plain ident (`self.st.field_index(x)`, `f(x).m()`) evaluates the receiver ONCE into a
+   C temp, sequenced before the args (OFI-166), dropping an owning-temp receiver after (`cgen_c.c`'s
+   non-ident-receiver path); cgen_c.em calls into its `StructTab`/`EnumTab` sub-objects everywhere, so this one
+   rule collapsed **352 → 2 hunks**. The last two: `.len()` on a refcounted string PAYLOAD binding
+   (`name.len()` in the wrapping-intrinsic path — is_string_expr now covers a refc payload), and a BORROWED
+   BOXED-STRUCT param stored into a struct field is own_into_slot-CLONED like a borrowed array (`CgcGen{ st: st,
+   … }` — a unique-owner clone). **THE REPRODUCTION GATE** (run-selfhost.sh, permanent): stage-0 builds N1 (the
+   native C-emitter) from cgen_c_dump.em; N1 emits the C for its OWN source; that C is compiled + linked
+   (`libember_rt.a`) into a SECOND-GENERATION compiler N2; N2 then emits BYTE-IDENTICAL C for all 6 self-hosted
+   sources — no stage-0 in the loop after N1. A native compiler, built from the self-hosted source, that
+   regenerates an identical copy of itself. `make selfhost` 1209/0, verified macOS clang + Linux gcc (Docker).
    Orthogonal
    follow-up: float-literal emission needs a `%.17g` builtin
    (Ember interpolation is `%g`, so `FLOAT_VAL` can't be produced from a bare `{f}`). OFI-166 (the C

@@ -2390,9 +2390,9 @@ struct CgcGen {
                     // retains it for the container's consume, leaving the enum's own borrow untouched.
                     return "own_into_slot(&g_em, {self.lookup_cname(name)})"
                 }
-                if self.lookup_array(name) {
-                    // a BORROWED array (an array param / a still-live array binding) stored into a container is
-                    // owned in — own_into_slot CLONES it (arrays are unique-owner, not refcounted), so the
+                if self.lookup_array(name) || is_boxed_struct {
+                    // a BORROWED unique-owner (an array OR a boxed struct — an `st: StructTab` param) stored
+                    // into a container is owned in: own_into_slot CLONES it (neither is refcounted), so the
                     // container gets an independent copy and the borrow's owner keeps its own (moves_local==2).
                     return "own_into_slot(&g_em, {self.lookup_cname(name)})"
                 }
@@ -2934,6 +2934,45 @@ struct CgcGen {
                 if rsid >= 0 {
                     let fi = self.fn_index("{self.st.names[rsid]}.{mname}")
                     if fi >= 0 {
+                        // A NON-IDENT receiver (`self.st.field_index(x)`, `f(x).m()`) is evaluated ONCE into a
+                        // C temp, then the call reads it — sequencing the receiver before the args
+                        // deterministically (OFI-166) and letting an owning-temp receiver be dropped after. An
+                        // IDENT receiver (`self.m()`) is passed inline. (cgen_c.c non-ident-receiver path.)
+                        match object.value {
+                            case EIdent(rn) {
+                            }
+                            case _ {
+                                let recv_vs = self.struct_sid_of(object.value)   // value-struct receiver → em_s, else Value
+                                let ret_vs = self.fn_ret_struct[fi]              // value-struct return → em_s, else Value
+                                let tv = self.fresh_var()
+                                let rv = self.fresh_var()
+                                var h = "(\{ "
+                                if recv_vs >= 0 {
+                                    h = h + "em_s{recv_vs} v{tv} = "
+                                } else {
+                                    h = h + "Value v{tv} = "
+                                }
+                                h = h + self.emit_expr(object.value) + "; "
+                                if ret_vs >= 0 {
+                                    h = h + "em_s{ret_vs} v{rv} = em_fn_{fi}(v{tv}"
+                                } else {
+                                    h = h + "Value v{rv} = em_fn_{fi}(v{tv}"
+                                }
+                                var ai = 0
+                                loop {
+                                    if ai >= args.len() {
+                                        break
+                                    }
+                                    h = h + ", " + self.emit_call_arg(args[ai])
+                                    ai = ai + 1
+                                }
+                                h = h + "); "
+                                if recv_vs < 0 && self.recv_is_temp(object.value) {
+                                    h = h + "drop_value(&g_em, v{tv}); "   // an owned boxed temp receiver
+                                }
+                                return h + "v{rv}; \})"
+                            }
+                        }
                         var s = "em_fn_{fi}(" + self.emit_expr(object.value)   // self (em_s value / boxed Value)
                         var i = 0
                         loop {
@@ -3334,7 +3373,9 @@ struct CgcGen {
                 return true
             }
             case EIdent(name) {
-                return self.lookup_drop(name) && self.lookup_array(name) == false   // owned, and NOT an array
+                // an owned string LOCAL, or a refcounted (string/enum) PAYLOAD binding (`case EIdent(name)` —
+                // treated as a string for a receiver method like `.len()`; an enum payload never calls one).
+                return (self.lookup_drop(name) || self.lookup_refc(name)) && self.lookup_array(name) == false
             }
             case EGet(object, name) {
                 // a refcounted (string / enum) struct FIELD read `self.src` — treated as a string for a
