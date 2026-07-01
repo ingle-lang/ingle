@@ -744,13 +744,17 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    `em_to_string(&g_em, <expr>, 0)` (a fresh owned string; the hole value borrowed), EXCEPT a hole that is
    already an OWNING-TEMP string (a string-returning call / concat / nested interpolation) is concatenated
    directly (em_add consumes the temp). Holes may be idents, struct fields, array indices, arithmetic exprs,
-   or adjacent. **With interpolation in, the parser's remaining tail is pure ownership** (array-payload
-   bindings, a struct-array-ELEMENT read passed to a call → own_into_slot the em_index clone, a refcounted
-   field/element into a call, temp-receiver `.len()`, `arr[i].field` directly) — the same *kind* of long tail
-   the lexer had, just more of it. Known features still to add: array-payload `.len()`/index, `arr[i].field`
-   DIRECTLY (temp element → materialise-retain-drop), an empty struct-array as a struct FIELD value
-   (em_struct_array), `.len()` on a call-result string (temp-receiver drop), a SCALAR generic type arg
-   (Box<int> — packed, deferred; unused by the compiler), and Option/Result generic ENUMs. Orthogonal
+   or adjacent. **With interpolation in, the parser's remaining tail is pure ownership.** **M5o (done, fixture
+   `array_payload.em`)** knocked down three of those: an ARRAY enum-payload binding `case V(xs)` is tracked as
+   an array (is_arr + element scalar kind via EnumTab.pf_array / pf_elem) so `xs.len()` / `xs[i]` resolve; a
+   REFCOUNTED (non-scalar) array-ELEMENT read `arr[i]` passed to a call is `own_into_slot(em_index(…))` (a
+   scalar element passes as-is); and an OWNED binding moved into an enum PAYLOAD (`Toks(ts)`) is a move
+   (move_binding — em_enum consumes payloads). The parser is chipping down (~500 → ~490 hunks) but is a
+   genuine multi-session ownership grind. Known features still to add: `arr[i].field` DIRECTLY (temp element →
+   materialise-retain-drop), an empty struct-array as a struct FIELD value (em_struct_array), `.len()` on a
+   call-result string (temp-receiver drop), a refcounted struct-array-element field into a call, a SCALAR
+   generic type arg (Box<int> — packed, deferred; unused by the compiler), and Option/Result generic ENUMs.
+   Orthogonal
    follow-up: float-literal emission needs a `%.17g` builtin
    (Ember interpolation is `%g`, so `FLOAT_VAL` can't be produced from a bare `{f}`). OFI-166 (the C
    operand-eval-order discipline — sequence side-effecting subexpressions into ordered statements; gcc

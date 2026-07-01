@@ -1185,6 +1185,8 @@ struct EnumTab {
     v_arity: [int]             // ...payload field count
     pf_variant: [int]          // flat PAYLOAD-field table -> owning flat-variant index
     pf_refc: [bool]            // ...is the field a REFCOUNTED single Value (string / enum / struct / generic)?
+    pf_array: [bool]           // ...is the payload field an array `[T]`? (so a `case V(xs)` binding is an array)
+    pf_elem: [int]             // ...for an array payload field: its ELEMENT scalar kind (so `xs[i]` is a scalar), else -1
 
 
     // variant_flat returns the flat-table index of variant `name` (-1 if `name` is not a known variant).
@@ -1208,12 +1210,11 @@ struct EnumTab {
     }
 
 
-    // payload_refc reports whether the `idx`-th payload field of variant `vname` is a REFCOUNTED single Value
-    // (string / enum / struct) — so binding it and CONSUMING it (a `+` / `==` operand) is own_into_slot.
-    fn payload_refc(self, vname: string, idx: int) -> bool {
+    // payload_flat returns the flat payload-field-table index of variant `vname`'s `idx`-th field (or -1).
+    fn payload_flat(self, vname: string, idx: int) -> int {
         let vf = self.variant_flat(vname)
         if vf < 0 {
-            return false
+            return 0 - 1
         }
         var seen = 0
         var i = 0
@@ -1223,13 +1224,45 @@ struct EnumTab {
             }
             if self.pf_variant[i] == vf {
                 if seen == idx {
-                    return self.pf_refc[i]
+                    return i
                 }
                 seen = seen + 1
             }
             i = i + 1
         }
-        return false
+        return 0 - 1
+    }
+
+
+    // payload_refc reports whether the `idx`-th payload field of variant `vname` is a REFCOUNTED single Value
+    // (string / enum / struct) — so binding it and CONSUMING it (a `+` / `==` operand) is own_into_slot.
+    fn payload_refc(self, vname: string, idx: int) -> bool {
+        let f = self.payload_flat(vname, idx)
+        if f < 0 {
+            return false
+        }
+        return self.pf_refc[f]
+    }
+
+
+    // payload_array reports whether variant `vname`'s `idx`-th payload field is an ARRAY (so `case V(xs)`
+    // binds an array — `xs.len()` / `xs[i]` resolve).
+    fn payload_array(self, vname: string, idx: int) -> bool {
+        let f = self.payload_flat(vname, idx)
+        if f < 0 {
+            return false
+        }
+        return self.pf_array[f]
+    }
+
+
+    // payload_elem returns the ELEMENT scalar kind of an array payload field (or -1).
+    fn payload_elem(self, vname: string, idx: int) -> int {
+        let f = self.payload_flat(vname, idx)
+        if f < 0 {
+            return 0 - 1
+        }
+        return self.pf_elem[f]
     }
 }
 
@@ -1243,6 +1276,8 @@ fn build_enum_tab(decls: [ps.Decl]) -> EnumTab {
     var va: [int] = []
     var pfv: [int] = []
     var pfr: [bool] = []
+    var pfa: [bool] = []
+    var pfe: [int] = []
     var i = 0
     loop {
         if i >= decls.len() {
@@ -1269,9 +1304,16 @@ fn build_enum_tab(decls: [ps.Decl]) -> EnumTab {
                         }
                         let fty = variants[vi].fields[fi].ty
                         pfv.append(vflat)
+                        let fa = is_array_ty(fty)
                         // a REFCOUNTED single Value = a BOXED (aek 0), non-array field: string / enum / struct
                         // / generic. A scalar (aek 1..11) or an array is not.
-                        pfr.append(array_elem_kind_ty(fty) == 0 && is_array_ty(fty) == false)
+                        pfr.append(array_elem_kind_ty(fty) == 0 && fa == false)
+                        pfa.append(fa)
+                        if fa {
+                            pfe.append(ty_scalar_kind(elem_ty_of(fty)))   // element scalar kind, so `xs[i]` types
+                        } else {
+                            pfe.append(0 - 1)
+                        }
                         fi = fi + 1
                     }
                     vi = vi + 1
@@ -1282,7 +1324,7 @@ fn build_enum_tab(decls: [ps.Decl]) -> EnumTab {
         }
         i = i + 1
     }
-    return EnumTab { names: names, v_owner: vo, v_name: vn, v_tag: vt, v_arity: va, pf_variant: pfv, pf_refc: pfr }
+    return EnumTab { names: names, v_owner: vo, v_name: vn, v_tag: vt, v_arity: va, pf_variant: pfv, pf_refc: pfr, pf_array: pfa, pf_elem: pfe }
 }
 
 
@@ -1928,10 +1970,27 @@ struct CgcGen {
             if i >= args.len() {
                 break
             }
-            s = s + ", " + self.emit_expr(args[i])      // a scalar payload (owned payloads: a later increment)
+            s = s + ", " + self.emit_payload_arg(args[i])   // em_enum CONSUMES its payloads (an owned one is moved in)
             i = i + 1
         }
         return s + ")"
+    }
+
+
+    // emit_payload_arg renders an enum-payload value: em_enum CONSUMES it, so an OWNED binding is MOVED in
+    // (move_binding — own_into_slot for a string/enum, the slot-niling move for an array); a scalar / literal
+    // / fresh temp is passed as-is.
+    fn emit_payload_arg(mut self, e: ps.Expr) -> string {
+        match e {
+            case EIdent(name) {
+                if self.lookup_drop(name) {
+                    return self.move_binding(name)
+                }
+            }
+            case _ {
+            }
+        }
+        return self.emit_expr(e)
     }
 
 
@@ -2203,6 +2262,14 @@ struct CgcGen {
                 // array / struct field is passed as-is (a borrow).
                 let sid = self.struct_sid_any(object.value)
                 if sid >= 0 && self.st.field_is_refcounted(sid, name) {
+                    return "own_into_slot(&g_em, {self.emit_expr(e)})"
+                }
+            }
+            case EIndex(object, index) {
+                // A REFCOUNTED (non-scalar: string / enum / struct) array-element read passed to a call is
+                // MOVED in — em_index returns a fresh owned clone/ref, moved into the callee. A scalar element
+                // (an int/… array) is passed as-is.
+                if self.is_array_expr(object.value) && self.index_elem_kind(object.value) < 0 {
                     return "own_into_slot(&g_em, {self.emit_expr(e)})"
                 }
             }
@@ -3001,7 +3068,12 @@ struct CgcGen {
                         }
                         let bv = self.fresh_var()
                         println("{self.ind()}Value v{bv} = em_enum_field(&g_em, v{sv}, {bi});")
-                        self.push(cases[ci].pattern.bindings[bi], "v{bv}", 0 - 1, false, false, false, 0 - 1)   // a borrowed payload field
+                        let pa = self.en.payload_array(cases[ci].pattern.variant, bi)
+                        var pek = 0 - 1
+                        if pa {
+                            pek = self.en.payload_elem(cases[ci].pattern.variant, bi)
+                        }
+                        self.push(cases[ci].pattern.bindings[bi], "v{bv}", 0 - 1, false, false, pa, pek)   // a borrowed payload field (array-aware)
                         if self.en.payload_refc(cases[ci].pattern.variant, bi) {
                             self.set_last_refc(true)      // a refcounted (string/enum) payload → own_into_slot on consume
                         }
