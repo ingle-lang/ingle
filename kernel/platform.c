@@ -44,12 +44,17 @@ static uint64_t l1_table[512] __attribute__((aligned(4096)));
 
 void mmu_init(void) {
     for (int i = 0; i < 512; i++) {
-        l1_table[i] = 0;                              // unmapped
+        l1_table[i] = 0;                              // unmapped (a stray access past mapped RAM faults)
     }
     // Block descriptor bits: [1:0]=01 block, [4:2]=AttrIndx, [7:6]=AP(00 EL1 RW), [9:8]=SH,
-    // [10]=AF(1). Device -> AttrIndx0/SH=0; Normal -> AttrIndx1/SH=11 (inner shareable).
-    l1_table[0] = 0x0ull        | (0ull << 2) | (0ull << 8) | (1ull << 10) | 0x1ull;  // 0x0000_0000 Device (UART)
-    l1_table[1] = 0x40000000ull | (1ull << 2) | (3ull << 8) | (1ull << 10) | 0x1ull;  // 0x4000_0000 Normal (RAM)
+    // [10]=AF(1), [54]=XN (execute-never). Device -> AttrIndx0/SH=0/XN (no code at MMIO);
+    // Normal -> AttrIndx1/SH=11 (inner shareable), executable (code runs from RAM).
+    l1_table[0] = 0x0ull | (0ull << 2) | (0ull << 8) | (1ull << 10) | (1ull << 54) | 0x1ull;  // 0x0000_0000 Device (UART), XN
+    // RAM at 0x4000_0000: map 8 GiB of 1 GiB blocks (identity) as Normal cacheable, so a large `-m`
+    // still has its whole arena/stack mapped (QEMU virt default is 128 MiB, within the first block).
+    for (uint64_t g = 1; g <= 8; g++) {
+        l1_table[g] = (g << 30) | (1ull << 2) | (3ull << 8) | (1ull << 10) | 0x1ull;
+    }
 
     uint64_t mair = (0x00ull << 0) | (0xFFull << 8);  // attr0 = Device-nGnRnE, attr1 = Normal WB
     // TCR_EL1: T0SZ=25 (39-bit VA -> L1 is the top level, 1 GiB blocks), 4 KiB granule, WB cacheable
@@ -98,6 +103,9 @@ void *malloc(size_t n) {
 
 void *calloc(size_t count, size_t size) {
     size_t n = count * size;
+    if (size != 0 && n / size != count) {   // multiply overflow -> can't satisfy the request
+        bump_oom();
+    }
     void *p = malloc(n);
     memset(p, 0, n);
     return p;
@@ -213,6 +221,10 @@ static char *emit_float(char *p, char *end, double v) {
     if (v < 0) {
         if (p < end) { *p++ = '-'; }
         v = -v;
+    }
+    if (!(v < 18446744073709551616.0)) {   // >= 2^64 (or NaN): a (uint64_t) cast would be UB
+        for (const char *s = "inf"; *s != '\0' && p < end; s++) { *p++ = *s; }
+        return p;
     }
     uint64_t ip = (uint64_t)v;
     p = emit_uint(p, end, ip, 10, 0);
