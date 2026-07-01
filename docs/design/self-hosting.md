@@ -719,10 +719,18 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    a string-returning METHOD result bound to a local is an OWNED string; and `main_index` defaults to `em_fn_0`
    for a standalone module compile with no `main` (a dogfood artifact — the lexer is imported, not run). **The
    lexer is now down to essentially ONE diff hunk** (an owned string from a method, used twice in a token-build,
-   needing the move+drop). Remaining tail: that double-use liveness, `arr[i].field` DIRECTLY (temp element →
-   materialise-retain-drop), an empty struct-array as a struct FIELD value (em_struct_array), `.len()` on a
-   call-result string (temp-receiver drop), and string interpolation (206 sites). Then generics (Option/Result
-   monomorphization, arrays-of-structs). Orthogonal follow-up: float-literal emission needs a `%.17g` builtin
+   needing the move+drop). **🎯 MILESTONE — `selfhost/lexer.em` NOW C-EMITS BYTE-IDENTICALLY to stage-0** (VM
+   AND native): the last diff was `let k = self.scan_token(…)` — an enum-returning METHOD result (`Tk`) that
+   is_enum_expr wasn't tracking as owned; once fixed, the whole lexer module is byte-identical. This is the
+   FIRST full self-hosted module to self-compile through the native C-emit backend — the first real native-
+   bootstrap step. It is now a permanent gate in `make selfhost` ("whole MODULES self-C-emit byte-identical").
+   Next targets, in order: the **parser** (`selfhost/parser.em` — more of the same surface + string
+   interpolation), then the **checker** and **codegen**, then the unified **emberc.em** — at which point the
+   self-built native compiler can rebuild itself. Known remaining features those will need: `arr[i].field`
+   DIRECTLY (temp element → materialise-retain-drop), an empty struct-array as a struct FIELD value
+   (em_struct_array), `.len()` on a call-result string (temp-receiver drop), string interpolation (206 sites),
+   and generics (Option/Result monomorphization, arrays-of-structs). Orthogonal follow-up: float-literal
+   emission needs a `%.17g` builtin
    (Ember interpolation is `%g`, so `FLOAT_VAL` can't be produced from a bare `{f}`). OFI-166 (the C
    operand-eval-order discipline — sequence side-effecting subexpressions into ordered statements; gcc
    evaluates a binop/call's operands right-to-left where clang/the VM go left-to-right) is observed

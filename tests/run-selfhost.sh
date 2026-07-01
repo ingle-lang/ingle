@@ -379,9 +379,31 @@ if [ -f "$CCSRC" ]; then
             echo "FAIL    self-hosted C-emit differs from stage-0 on $src"
         fi
     done
-    [ -n "$ccbin" ] && rm -f "$ccbin"
     echo "selfhost cgen_c: $ccpass/$((ccpass + ccfail)) M5 C-emit fixtures byte-identical to stage-0 --emit=c"
     pass=$((pass + ccpass)); fail=$((fail + ccfail))
+
+    # The real payoff: whole self-hosted MODULES whose C-emit is byte-identical to stage-0 (not fixtures —
+    # actual compiler source). The first native-bootstrap milestone. This list grows as each module's
+    # features land in cgen_c.em.
+    cmpass=0; cmfail=0
+    for src in selfhost/lexer.em; do
+        oracle=$(cd "$ROOT" && "$BIN" --emit=c "$src" 2>/dev/null)
+        if [ -n "$ccbin" ]; then
+            actual=$(cd "$ROOT" && "$ccbin" "$src" 2>/dev/null | sed '/^=> 0$/d')
+        else
+            actual=$(cd "$ROOT" && "$BIN" --emit=run selfhost/cgen_c_dump.em "$src" 2>/dev/null | sed '/^=> 0$/d')
+        fi
+        if [ "$oracle" = "$actual" ]; then
+            cmpass=$((cmpass + 1))
+        else
+            cmfail=$((cmfail + 1))
+            echo "FAIL    self-hosted C-emit differs from stage-0 on module $src"
+        fi
+    done
+    echo "selfhost cgen_c: $cmpass/$((cmpass + cmfail)) whole MODULES self-C-emit byte-identical (lexer …)"
+    pass=$((pass + cmpass)); fail=$((fail + cmfail))
+
+    [ -n "$ccbin" ] && rm -f "$ccbin"
 fi
 
 echo "selfhost: passed $pass, failed $fail"

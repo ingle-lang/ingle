@@ -1535,6 +1535,16 @@ struct CgcGen {
                             return self.fn_ret_enum[fi]       // an enum-returning free-function call `wrap(7)`
                         }
                     }
+                    case EGet(object, mname) {
+                        // an enum-returning METHOD call `let k = self.scan_token(…)`.
+                        let sid = self.struct_sid_any(object.value)
+                        if sid >= 0 {
+                            let fi = self.fn_index("{self.st.names[sid]}.{mname}")
+                            if fi >= 0 {
+                                return self.fn_ret_enum[fi]
+                            }
+                        }
+                    }
                     case _ {
                     }
                 }
