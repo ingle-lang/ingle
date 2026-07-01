@@ -351,10 +351,18 @@ fn scalar_ctype(kind: int) -> string {
 
 // fn_param_list renders a function's C parameter list: `void` for no value params, else `Value a0, Value
 // a1, …` (one per non-self parameter; a method's receiver is the leading `Value a0`).
-fn fn_param_list(f: ps.FnDecl, has_self: bool) -> string {
-    var n = 0
+// param_value_sid returns the VALUE-struct sid of C parameter position `pi` of `f` (self is a0 when present,
+// typed as the owning struct `owner_sid`), or -1 if that parameter is not a value struct. Drives the C type.
+fn param_value_sid(f: ps.FnDecl, has_self: bool, stab: StructTab, owner_sid: int, pi: int) -> int {
+    var ci = 0
     if has_self {
-        n = 1
+        if ci == pi {
+            if owner_sid >= 0 && stab.is_value(owner_sid) {
+                return owner_sid
+            }
+            return 0 - 1
+        }
+        ci = 1
     }
     var p = 0
     loop {
@@ -362,10 +370,49 @@ fn fn_param_list(f: ps.FnDecl, has_self: bool) -> string {
             break
         }
         if f.params[p].is_self == false {
-            n = n + 1
+            if ci == pi {
+                if f.params[p].ty.len() > 0 {
+                    let s = ty_struct_sid(f.params[p].ty[0], stab.names)
+                    if s >= 0 && stab.is_value(s) {
+                        return s
+                    }
+                }
+                return 0 - 1
+            }
+            ci = ci + 1
         }
         p = p + 1
     }
+    return 0 - 1
+}
+
+
+// fn_ret_value_struct returns the VALUE-struct sid `f` returns (a `em_s<sid>` C return type), or -1.
+fn fn_ret_value_struct(f: ps.FnDecl, stab: StructTab) -> int {
+    if f.ret.len() > 0 {
+        let sid = ty_struct_sid(f.ret[0], stab.names)
+        if sid >= 0 && stab.is_value(sid) {
+            return sid
+        }
+    }
+    return 0 - 1
+}
+
+
+// fn_ret_ctype is `f`'s C return type: `em_s<sid>` for a value-struct return, else `Value`.
+fn fn_ret_ctype(f: ps.FnDecl, stab: StructTab) -> string {
+    let sid = fn_ret_value_struct(f, stab)
+    if sid >= 0 {
+        return "em_s{sid}"
+    }
+    return "Value"
+}
+
+
+// fn_param_list renders `f`'s C parameter list. A value-struct parameter is `em_s<sid> a<i>` (passed by
+// value), everything else is `Value a<i>`; a method's `self` is the leading a0, typed as its owning struct.
+fn fn_param_list(f: ps.FnDecl, has_self: bool, stab: StructTab, owner_sid: int) -> string {
+    let n = value_arity(f, has_self)
     if n == 0 {
         return "void"
     }
@@ -378,7 +425,12 @@ fn fn_param_list(f: ps.FnDecl, has_self: bool) -> string {
         if i > 0 {
             s = s + ", "
         }
-        s = s + "Value a{i}"
+        let psid = param_value_sid(f, has_self, stab, owner_sid, i)
+        if psid >= 0 {
+            s = s + "em_s{psid} a{i}"
+        } else {
+            s = s + "Value a{i}"
+        }
         i = i + 1
     }
     return s
@@ -664,6 +716,42 @@ fn build_struct_tab(decls: [ps.Decl]) -> StructTab {
 }
 
 
+// build_fn_ret_structs is the VALUE-struct sid each body-bearing fn returns (parallel to build_fn_names),
+// so a `let p = mk()` of a struct-returning call is typed / stored as the C em_s aggregate.
+fn build_fn_ret_structs(decls: [ps.Decl], stab: StructTab) -> [int] {
+    var out: [int] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.has_body {
+                    out.append(fn_ret_value_struct(f, stab))
+                }
+            }
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        out.append(fn_ret_value_struct(methods[mi], stab))
+                    }
+                    mi = mi + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
 // ---- the C-emit generator state (mirrors src/cgen_c.c's CgcGen) -------------------------------------
 // next_var is the per-function `v%d` temp counter (retain temps + scalar `let` bindings share it). The
 // scope maps an in-scope binding NAME to its C expression (`a0` for a param, `v3` for a `let`) and its
@@ -687,6 +775,7 @@ struct CgcGen {
     fn_ret_str: [bool]         // ...does each fn return a string (a `let x = f()` owned binding)?
     fn_ret_array: [bool]       // ...does each fn return an array (a `let x = f()` owned array binding)?
     fn_ret_elem_kind: [int]    // ...for an array-returning fn: its element scalar kind (so `f()[i]` is a scalar), else -1
+    fn_ret_struct: [int]       // ...for a value-struct-returning fn: the struct sid (so `let p = f()` is an em_s), else -1
 
 
     fn fresh_var(mut self) -> int {
@@ -1004,6 +1093,29 @@ struct CgcGen {
             case EIdent(name) {
                 return self.lookup_struct(name)
             }
+            case ECall(callee, args) {
+                // a value-struct-returning call `let p = mk()` / `let q = p.method()` — its return struct sid.
+                match callee.value {
+                    case EIdent(name) {
+                        let fi = self.fn_index(name)
+                        if fi >= 0 {
+                            return self.fn_ret_struct[fi]
+                        }
+                    }
+                    case EGet(object, mname) {
+                        let rsid = self.struct_sid_of(object.value)
+                        if rsid >= 0 {
+                            let fi = self.fn_index("{self.st.names[rsid]}.{mname}")
+                            if fi >= 0 {
+                                return self.fn_ret_struct[fi]
+                            }
+                        }
+                    }
+                    case _ {
+                    }
+                }
+                return 0 - 1
+            }
             case EGet(object, name) {
                 let osid = self.struct_sid_of(object.value)
                 if osid >= 0 {
@@ -1173,10 +1285,32 @@ struct CgcGen {
                 // so the consuming op balances and the array keeps ownership (cgen_c.c:emit_concat_operand).
                 return self.retain_dance(e)
             }
+            case EGet(object, name) {
+                // a field read of the BORROWED method receiver `self` is a borrow → retain in a consuming op.
+                // A by-value struct PARAM / a struct LET is an OWNED copy, so its field read is NOT retained
+                // (the field lives in the copy). Value-struct scalar fields make the IS_OBJ retain a no-op.
+                if self.is_self_field(object.value) {
+                    return self.retain_dance(e)
+                }
+            }
             case _ {
             }
         }
         return self.emit_expr(e)
+    }
+
+
+    // is_self_field reports whether `object` is the borrowed method receiver `self` (a value-struct binding),
+    // so a field read off it is a borrow. (mut/move self — a consuming receiver — is a later increment.)
+    fn is_self_field(self, object: ps.Expr) -> bool {
+        match object {
+            case EIdent(oname) {
+                return oname == "self" && self.lookup_struct(oname) >= 0
+            }
+            case _ {
+                return false
+            }
+        }
     }
 
 
@@ -1309,6 +1443,24 @@ struct CgcGen {
                         return "em_array_append(&g_em, {recv}, {el})"
                     }
                 }
+                // A VALUE-struct method call `recv.m(args)` → em_fn_<K>(recv, args…): self is arg 0 (passed by
+                // value), the method's fn-index resolves via the `Struct.method` name (cgen_c.c method path).
+                let rsid = self.struct_sid_of(object.value)
+                if rsid >= 0 {
+                    let fi = self.fn_index("{self.st.names[rsid]}.{mname}")
+                    if fi >= 0 {
+                        var s = "em_fn_{fi}(" + self.emit_expr(object.value)   // self (an em_s), by value
+                        var i = 0
+                        loop {
+                            if i >= args.len() {
+                                break
+                            }
+                            s = s + ", " + self.emit_call_arg(args[i])
+                            i = i + 1
+                        }
+                        return s + ")"
+                    }
+                }
             }
             case _ {
             }
@@ -1373,6 +1525,14 @@ struct CgcGen {
                         if mname == "len" {
                             if self.is_array_expr(object.value) || self.is_string_expr(object.value) {
                                 return 0
+                            }
+                        }
+                        // a value-struct method call `p.method()` returning a scalar (`let n = p.norm1()`).
+                        let rsid = self.struct_sid_of(object.value)
+                        if rsid >= 0 {
+                            let fi = self.fn_index("{self.st.names[rsid]}.{mname}")
+                            if fi >= 0 {
+                                return self.fn_ret_kind[fi]
                             }
                         }
                     }
@@ -1944,11 +2104,14 @@ fn is_string_ty(ty: ps.Ty) -> bool {
 }
 
 
-fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, st: StructTab, fn_names: [string], fn_ret_kind: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int]) {
-    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_struct: [], indent: 1, st: st, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind }
+fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, fn_names: [string], fn_ret_kind: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_struct: [int]) {
+    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_struct: [], indent: 1, st: st, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_struct: fn_ret_struct }
     var ai = 0
     if has_self {
         g.push("self", "a0", 0 - 1, false, false, false, 0 - 1)
+        if owner_sid >= 0 && st.is_value(owner_sid) {
+            g.set_last_struct(owner_sid)          // `self` is the owning value struct (read via a0.fN)
+        }
         ai = 1
     }
     var p = 0
@@ -1958,11 +2121,12 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, st: StructTab, fn_names:
         }
         if f.params[p].is_self == false {
             // a param's TYPE scalar-kind (so `let x = a` infers a scalar) — but its STORAGE is the Value aN.
-            // A string param is an OWNED value, dropped at every exit.
+            // A string param is an OWNED value, dropped at every exit; a value-struct param is an em_s.
             var pk = 0 - 1
             var owned = false
             var is_arr = false
             var ek = 0 - 1
+            var psid = 0 - 1
             if f.params[p].ty.len() > 0 {
                 pk = ty_scalar_kind(f.params[p].ty[0])
                 owned = is_string_ty(f.params[p].ty[0])
@@ -1970,13 +2134,20 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, st: StructTab, fn_names:
                 if is_arr {
                     ek = ty_scalar_kind(elem_ty_of(f.params[p].ty[0]))   // its element scalar kind, so `a[i]` is a scalar
                 }
+                let s = ty_struct_sid(f.params[p].ty[0], st.names)
+                if s >= 0 && st.is_value(s) {
+                    psid = s
+                }
             }
             g.push(f.params[p].name, "a{ai}", pk, false, owned, is_arr, ek)
+            if psid >= 0 {
+                g.set_last_struct(psid)           // a value-struct param is read via aN.fM
+            }
             ai = ai + 1
         }
         p = p + 1
     }
-    println("static Value em_fn_{idx}({fn_param_list(f, has_self)}) \{")
+    println("static {fn_ret_ctype(f, st)} em_fn_{idx}({fn_param_list(f, has_self, st, owner_sid)}) \{")
     var i = 0
     loop {
         if i >= f.body.len() {
@@ -1985,11 +2156,17 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, st: StructTab, fn_names:
         g.emit_stmt(f.body[i])
         i = i + 1
     }
-    // the implicit trailing return — preceded by the owned-binding drops on the fall-through path
+    // the implicit trailing return — preceded by the owned-binding drops on the fall-through path. A value-
+    // struct-returning fn yields a zero-initialised `(em_s<sid>){0}` (the C return type must match).
     if g.scope_has_drops() {
         g.emit_drops(0)
     }
-    println("    return INT_VAL(0);")
+    let rsid = fn_ret_value_struct(f, st)
+    if rsid >= 0 {
+        println("    return (em_s{rsid})\{0\};")
+    } else {
+        println("    return INT_VAL(0);")
+    }
     println("\}")
 }
 
@@ -2035,6 +2212,53 @@ fn invoke_args(arity: int) -> string {
         a = a + 1
     }
     return argl
+}
+
+
+// emit_invoke_case prints the em_invoke dispatcher case for fn `idx` (the indirect-call trampoline). Each
+// value-struct PARAMETER slot is unboxed into an em_s temp (em_unbox_struct); em_fn_idx is called; a value-
+// struct RESULT is boxed back to a Value (em_box_struct). A purely Value-signature fn is unchanged
+// (`Value _r = em_fn_idx(slots…); return _r;`). Mirrors cgen_c.c's em_invoke.
+fn emit_invoke_case(f: ps.FnDecl, idx: int, has_self: bool, stab: StructTab, owner_sid: int) {
+    println("        case {idx}: \{")
+    let n = value_arity(f, has_self)
+    var i = 0
+    loop {
+        if i >= n {
+            break
+        }
+        let psid = param_value_sid(f, has_self, stab, owner_sid, i)
+        if psid >= 0 {
+            println("            em_s{psid} p{i}; em_unbox_struct(ctx, {psid}, slots[{i}], (Value*)&p{i}, {stab.field_count(psid)});")
+        }
+        i = i + 1
+    }
+    var args = ""
+    var j = 0
+    loop {
+        if j >= n {
+            break
+        }
+        if j > 0 {
+            args = args + ", "
+        }
+        let psid = param_value_sid(f, has_self, stab, owner_sid, j)
+        if psid >= 0 {
+            args = args + "p{j}"
+        } else {
+            args = args + "slots[{j}]"
+        }
+        j = j + 1
+    }
+    let rsid = fn_ret_value_struct(f, stab)
+    if rsid >= 0 {
+        println("            em_s{rsid} r = em_fn_{idx}({args});")
+        println("            return em_box_struct(ctx, {rsid}, (Value*)&r, {stab.field_count(rsid)});")
+    } else {
+        println("            Value _r = em_fn_{idx}({args});")
+        println("            return _r;")
+    }
+    println("        \}")
 }
 
 
@@ -2220,6 +2444,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
     let fn_ret_array = build_fn_ret_array(decls)
     let fn_ret_elem_kind = build_fn_ret_elem_kinds(decls)
     let stab = build_struct_tab(decls)
+    let fn_ret_struct = build_fn_ret_structs(decls, stab)
     println("// Generated by `emberc --emit=c` from {filename}. Do not edit.")
     println("// The bytecode VM is the reference semantics; tests/native diffs the two.")
     println("#include \"ember_rt.h\"")
@@ -2237,18 +2462,19 @@ fn emit_program(decls: [ps.Decl], filename: string) {
         match decls[i] {
             case DFn(f) {
                 if f.has_body {
-                    println("static Value em_fn_{fwd}({fn_param_list(f, false)});")
+                    println("static {fn_ret_ctype(f, stab)} em_fn_{fwd}({fn_param_list(f, false, stab, 0 - 1)});")
                     fwd = fwd + 1
                 }
             }
             case DStruct(name, generics, impls, fields, methods, kind) {
+                let owner = stab.sid_of(name)
                 var mi = 0
                 loop {
                     if mi >= methods.len() {
                         break
                     }
                     if methods[mi].has_body {
-                        println("static Value em_fn_{fwd}({fn_param_list(methods[mi], true)});")
+                        println("static {fn_ret_ctype(methods[mi], stab)} em_fn_{fwd}({fn_param_list(methods[mi], true, stab, owner)});")
                         fwd = fwd + 1
                     }
                     mi = mi + 1
@@ -2273,24 +2499,19 @@ fn emit_program(decls: [ps.Decl], filename: string) {
         match decls[j] {
             case DFn(f) {
                 if f.has_body {
-                    println("        case {inv}: \{")
-                    println("            Value _r = em_fn_{inv}({invoke_args(value_arity(f, false))});")
-                    println("            return _r;")
-                    println("        \}")
+                    emit_invoke_case(f, inv, false, stab, 0 - 1)
                     inv = inv + 1
                 }
             }
             case DStruct(name, generics, impls, fields, methods, kind) {
+                let owner = stab.sid_of(name)
                 var mi = 0
                 loop {
                     if mi >= methods.len() {
                         break
                     }
                     if methods[mi].has_body {
-                        println("        case {inv}: \{")
-                        println("            Value _r = em_fn_{inv}({invoke_args(value_arity(methods[mi], true))});")
-                        println("            return _r;")
-                        println("        \}")
+                        emit_invoke_case(methods[mi], inv, true, stab, owner)
                         inv = inv + 1
                     }
                     mi = mi + 1
@@ -2317,7 +2538,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
         match decls[k] {
             case DFn(f) {
                 if f.has_body {
-                    emit_fn_body(f, b, false, stab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind)
+                    emit_fn_body(f, b, false, 0 - 1, stab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_struct)
                     b = b + 1
                     if b < total {
                         println("")
@@ -2325,13 +2546,14 @@ fn emit_program(decls: [ps.Decl], filename: string) {
                 }
             }
             case DStruct(name, generics, impls, fields, methods, kind) {
+                let owner = stab.sid_of(name)
                 var mi = 0
                 loop {
                     if mi >= methods.len() {
                         break
                     }
                     if methods[mi].has_body {
-                        emit_fn_body(methods[mi], b, true, stab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind)
+                        emit_fn_body(methods[mi], b, true, owner, stab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_struct)
                         b = b + 1
                         if b < total {
                             println("")

@@ -666,10 +666,17 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    `((em_s<sid>){ … })` in declared field order, struct-typed `let` bindings (stored as the C em_s
    aggregate), scalar field reads `p.f` → `.f<idx>` (in arithmetic and bool conditions), sized-int/bool
    fields, multiple structs, and NESTED value structs (an inline `em_s<m> f<i>` field, `knd`=AEK_INLINE_
-   STRUCT, read via a C member chain) — all byte-identical (fixture `structs_value.em`). Next M5e steps:
-   **1b** value-struct params/returns/methods (`em_s<sid>` signatures + em_box/unbox_struct in em_invoke),
-   field WRITE, then **M5e.2** BOXED structs (`em_struct` / `em_enum_field` / `em_set_field` + the drop
-   discipline), then bridges/nesting. Orthogonal follow-up: float-literal emission needs a `%.17g` builtin
+   STRUCT, read via a C member chain) — all byte-identical (fixture `structs_value.em`). **M5e.1b — value-
+   struct params / returns / methods** is also done (fixture `structs_methods.em`): a value-struct parameter
+   is `em_s<sid> a<i>` (by value), a value-struct return is a `em_s<sid>` C return type, and the em_invoke
+   dispatcher unboxes each struct-param slot (em_unbox_struct) + boxes a struct result (em_box_struct); a
+   method call `recv.m(args)` lowers to `em_fn_<K>(recv, args…)` (self arg 0, resolved via the `Struct.method`
+   name); a method's `self` is the borrowed receiver, so a `self.field` read in a CONSUMING op is retained
+   while a by-value param / let field (an owned copy) is not; the implicit trailing return of a struct-
+   returning fn is `(em_s<sid>){0}`. Deferred within M5e.1: chained / call-result method receivers (a struct
+   TEMP receiver needs materialisation into an em_s temp), field WRITE (`p.f = v`), and mut/move self. Then
+   **M5e.2** BOXED structs (`em_struct` / `em_enum_field` / `em_set_field` + the drop discipline), then
+   bridges/nesting. Orthogonal follow-up: float-literal emission needs a `%.17g` builtin
    (Ember interpolation is `%g`, so `FLOAT_VAL` can't be produced from a bare `{f}`). OFI-166 (the C
    operand-eval-order discipline — sequence side-effecting subexpressions into ordered statements; gcc
    evaluates a binop/call's operands right-to-left where clang/the VM go left-to-right) is observed
