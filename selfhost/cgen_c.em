@@ -1701,6 +1701,26 @@ struct CgcGen {
                 }
             }
             case EGet(object, mname) {
+                // A built-in STRING method (a string receiver — a param / literal / owned local). `.len()`
+                // is em_str_len (NO ctx); `.bytes()`/`.chars()` return fresh OWNED arrays (em_str_bytes → [u8],
+                // em_str_chars → [string]); `.split(sep)` → [string]. The receiver is a BORROW (read as-is;
+                // a temp-receiver drop is a later increment). (cgen_c.c string-method ops.)
+                if self.is_string_expr(object.value) {
+                    if mname == "len" {
+                        return "em_str_len({self.emit_expr(object.value)})"
+                    }
+                    if mname == "bytes" {
+                        return "em_str_bytes(&g_em, {self.emit_expr(object.value)})"
+                    }
+                    if mname == "chars" {
+                        return "em_str_chars(&g_em, {self.emit_expr(object.value)})"
+                    }
+                    if mname == "split" {
+                        let recv = self.emit_expr(object.value)
+                        let sep = self.emit_expr(args[0])
+                        return "em_str_split(&g_em, {recv}, {sep})"
+                    }
+                }
                 // A built-in array method. `.len()` returns the length scalar; `.append(x)` grows the array.
                 if self.is_array_expr(object.value) {
                     if mname == "len" {
@@ -1868,6 +1888,11 @@ struct CgcGen {
                             return self.fn_ret_elem_kind[fi]
                         }
                     }
+                    case EGet(object, mname) {
+                        if self.is_string_expr(object.value) && mname == "bytes" {
+                            return 4                      // `s.bytes()` → [u8]; u8 is element scalar kind 4
+                        }
+                    }
                     case _ {
                     }
                 }
@@ -1983,6 +2008,12 @@ struct CgcGen {
                         let fi = self.fn_index(name)
                         if fi >= 0 {
                             return self.fn_ret_array[fi]
+                        }
+                    }
+                    case EGet(object, mname) {
+                        // a string→array method `s.bytes()` / `s.chars()` / `s.split(sep)` (an owned array).
+                        if self.is_string_expr(object.value) {
+                            return mname == "bytes" || mname == "chars" || mname == "split"
                         }
                     }
                     case _ {

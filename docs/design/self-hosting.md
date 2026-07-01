@@ -701,10 +701,13 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    CONSUMES its operands (move) but `==`/`!=` only COMPARE, so an owned operand (a string param compared
    against many keyword literals — the lexer's hot path) is RETAINED not moved; (2) numeric CONVERSIONS
    `int(x)` / `i32(x)` / `u8(x)` / `f64(x)` → `em_conv(x, <kind>)`, with `let a = i32(n)` binding a sized C
-   scalar. Remaining lexer gaps (each a small increment, differential-scoped): string methods (`.bytes()` /
-   `.chars()` / `.split()` returning owned arrays), native builtins via `em_native(<id>, …)` (byte_slice, …),
-   `em_struct_array` for struct-element arrays, owned struct-field moves into calls, and string interpolation
-   (206 sites). Then generics (Option/Result monomorphization, arrays-of-structs). Orthogonal follow-up:
+   scalar. **M5h — built-in STRING methods (done, fixture `string_methods.em`):** `s.len()` → em_str_len
+   (no ctx), `s.bytes()` → em_str_bytes (a fresh owned [u8], so `let bs = s.bytes()` is a dropped array local
+   of element kind u8), `s.chars()`/`s.split(sep)` → [string]. Remaining lexer gaps (each a small, differential-
+   scoped increment): native builtins via `em_native(<id>, …)` (byte_slice, … — needs a builtin name→id
+   table), `em_struct_array` for struct-element arrays, owned struct-field moves into calls
+   (`f(own_into_slot(&g_em, em_enum_field(…)))`), and string interpolation (206 sites). Then generics
+   (Option/Result monomorphization, arrays-of-structs). Orthogonal follow-up:
    float-literal emission needs a `%.17g` builtin
    (Ember interpolation is `%g`, so `FLOAT_VAL` can't be produced from a bare `{f}`). OFI-166 (the C
    operand-eval-order discipline — sequence side-effecting subexpressions into ordered statements; gcc
