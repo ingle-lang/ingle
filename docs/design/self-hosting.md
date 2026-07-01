@@ -685,9 +685,20 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    (borrows); `case _` is the trailing `else`. Covers bare + scalar + string + multi-field variants,
    wildcard, match-assigns-var, and nested match. Deferred in M5f: owned-payload USE (a string/enum payload
    flowing out of a case), generic enums (Option/Result — tied to generics/prelude), and an owning-temp
-   scrutinee. Then **M5e.2** BOXED structs (`em_struct` / `em_enum_field` / `em_set_field` + the drop
-   discipline) — after which the LEXER should be the first real module to self-compile via cgen_c.em. Then
-   bridges/nesting + generics. Orthogonal follow-up: float-literal emission needs a `%.17g` builtin
+   scrutinee. **M5e.2 — BOXED structs** is done (fixture `structs_boxed.em`): a struct with any heap field
+   (string / array / enum) is a heap ObjStruct Value (refcounted, dropped by drop_value), NOT a C value-type
+   — every struct still gets a `typedef struct {…} em_s<sid>;` + a metadata row (a heap field is 16 bytes).
+   Construction → `em_struct(&g_em, <sid>, <fcount>, fields…)` (an owned field MOVED in); field read `c.f` →
+   `em_enum_field` (a BORROW — retained in a consuming op); field write `c.f = v` → `em_set_field`; a boxed
+   LOCAL is OWNED (dropped) but a boxed PARAM is a BORROW (like an array); a method call → `em_fn_<K>(recv,
+   args…)` with self the borrowed heap Value (a `mut self` mutation via em_set_field reaches the caller's
+   object); `s.arrayfield.len()` / `s.arrayfield[i]` resolve through the struct table (f_array / f_elem). The
+   value/boxed split is threaded through struct_sid_any + struct_sid_of (value, gated on is_value) /
+   boxed_sid_of. Deferred: an owned-field READ escaping a case/return (em_field_owned), nested boxed structs,
+   and enum fields. **With enums+match (M5f) + arrays (M5d) + boxed structs (M5e.2) all done, the LEXER is now
+   the target for the first full module to self-compile via cgen_c.em** — remaining gaps for it are string
+   interpolation (206 sites) and whatever builtins it uses. Then generics (Option/Result monomorphization,
+   arrays-of-structs). Orthogonal follow-up: float-literal emission needs a `%.17g` builtin
    (Ember interpolation is `%g`, so `FLOAT_VAL` can't be produced from a bare `{f}`). OFI-166 (the C
    operand-eval-order discipline — sequence side-effecting subexpressions into ordered statements; gcc
    evaluates a binop/call's operands right-to-left where clang/the VM go left-to-right) is observed

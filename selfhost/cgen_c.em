@@ -450,6 +450,8 @@ struct StructTab {
     f_aek: [int]               // flat field -> its ArrayElemKind byte (the metadata `knd`)
     f_scalar: [bool]           // flat field -> is it a scalar type? (drives is_value / storage)
     f_struct: [int]            // flat field -> nested struct sid (or -1); the metadata `fst`
+    f_array: [bool]            // flat field -> is it an array `[T]`? (so `s.field.len()` / `s.field[i]` resolve)
+    f_elem: [int]              // ...for an array field: its ELEMENT scalar kind (so `s.field[i]` is a scalar), else -1
 
 
     fn sid_of(self, name: string) -> int {
@@ -496,6 +498,42 @@ struct StructTab {
                     return i
                 }
                 seen = seen + 1
+            }
+            i = i + 1
+        }
+        return 0 - 1
+    }
+
+
+    // field_is_array reports whether field `fname` of struct `sid` is an array (so `s.field.len()` resolves).
+    fn field_is_array(self, sid: int, fname: string) -> bool {
+        let flat = self.field_flat(sid, fname)
+        if flat < 0 {
+            return false
+        }
+        return self.f_array[flat]
+    }
+
+
+    // field_elem returns the ELEMENT scalar kind of array field `fname` of struct `sid` (or -1).
+    fn field_elem(self, sid: int, fname: string) -> int {
+        let flat = self.field_flat(sid, fname)
+        if flat < 0 {
+            return 0 - 1
+        }
+        return self.f_elem[flat]
+    }
+
+
+    // field_flat returns the flat-table index of field `fname` within struct `sid` (or -1).
+    fn field_flat(self, sid: int, fname: string) -> int {
+        var i = 0
+        loop {
+            if i >= self.f_owner.len() {
+                break
+            }
+            if self.f_owner[i] == sid && self.f_name[i] == fname {
+                return i
             }
             i = i + 1
         }
@@ -653,7 +691,7 @@ fn size_of_aek(aek: int) -> int {
     if aek == 11 {
         return 1                       // bool
     }
-    return 8                           // boxed (a Value pointer)
+    return 16                          // AEK_BOXED — a full 16-byte Value (a heap field of a boxed struct)
 }
 
 
@@ -683,6 +721,8 @@ fn build_struct_tab(decls: [ps.Decl]) -> StructTab {
     var fa: [int] = []
     var fsc: [bool] = []
     var fsd: [int] = []
+    var far: [bool] = []
+    var fel: [int] = []
     var sid = 0
     var j = 0
     loop {
@@ -703,6 +743,13 @@ fn build_struct_tab(decls: [ps.Decl]) -> StructTab {
                     let aek = array_elem_kind_ty(fty)   // 0 for string/array/struct (boxed), 1..11 for a scalar
                     fa.append(aek)
                     fsc.append(aek != 0)
+                    let is_a = is_array_ty(fty)
+                    far.append(is_a)
+                    if is_a {
+                        fel.append(ty_scalar_kind(elem_ty_of(fty)))
+                    } else {
+                        fel.append(0 - 1)
+                    }
                     fi = fi + 1
                 }
                 sid = sid + 1
@@ -712,7 +759,7 @@ fn build_struct_tab(decls: [ps.Decl]) -> StructTab {
         }
         j = j + 1
     }
-    return StructTab { names: names, kinds: kinds, f_owner: fo, f_name: fnm, f_aek: fa, f_scalar: fsc, f_struct: fsd }
+    return StructTab { names: names, kinds: kinds, f_owner: fo, f_name: fnm, f_aek: fa, f_scalar: fsc, f_struct: fsd, f_array: far, f_elem: fel }
 }
 
 
@@ -786,8 +833,10 @@ fn build_enum_tab(decls: [ps.Decl]) -> EnumTab {
 }
 
 
-// build_fn_ret_structs is the VALUE-struct sid each body-bearing fn returns (parallel to build_fn_names),
-// so a `let p = mk()` of a struct-returning call is typed / stored as the C em_s aggregate.
+// build_fn_ret_structs is the struct sid (VALUE or BOXED) each body-bearing fn returns (parallel to
+// build_fn_names), so a `let p = mk()` of a struct-returning call resolves its type (an em_s for a value
+// struct / a boxed ObjStruct otherwise). The is_value gate is applied at the use site (struct_sid_of /
+// boxed_sid_of), not here.
 fn build_fn_ret_structs(decls: [ps.Decl], stab: StructTab) -> [int] {
     var out: [int] = []
     var i = 0
@@ -798,7 +847,7 @@ fn build_fn_ret_structs(decls: [ps.Decl], stab: StructTab) -> [int] {
         match decls[i] {
             case DFn(f) {
                 if f.has_body {
-                    out.append(fn_ret_value_struct(f, stab))
+                    out.append(fn_ret_struct_id(f, stab))
                 }
             }
             case DStruct(name, generics, impls, fields, methods, kind) {
@@ -808,7 +857,7 @@ fn build_fn_ret_structs(decls: [ps.Decl], stab: StructTab) -> [int] {
                         break
                     }
                     if methods[mi].has_body {
-                        out.append(fn_ret_value_struct(methods[mi], stab))
+                        out.append(fn_ret_struct_id(methods[mi], stab))
                     }
                     mi = mi + 1
                 }
@@ -819,6 +868,15 @@ fn build_fn_ret_structs(decls: [ps.Decl], stab: StructTab) -> [int] {
         i = i + 1
     }
     return out
+}
+
+
+// fn_ret_struct_id is the struct sid (value OR boxed) `f` returns, or -1 if it does not return a struct.
+fn fn_ret_struct_id(f: ps.FnDecl, stab: StructTab) -> int {
+    if f.ret.len() > 0 {
+        return ty_struct_sid(f.ret[0], stab.names)
+    }
+    return 0 - 1
 }
 
 
@@ -1174,12 +1232,20 @@ struct CgcGen {
             }
             case EGet(object, name) {
                 // A VALUE-struct field read is a direct C member access `<obj>.f<idx>` (no heap, no ownership).
-                // A boxed-struct field read (em_enum_field) is a later increment (M5e.2).
-                let osid = self.struct_sid_of(object.value)
-                if osid >= 0 {
-                    let fidx = self.st.field_index(osid, name)
+                // A BOXED-struct field read is `em_enum_field(&g_em, <obj>, <idx>)` — a BORROW (the struct
+                // still owns the field; a consuming op retains it, see emit_concat_operand).
+                let vsid = self.struct_sid_of(object.value)
+                if vsid >= 0 {
+                    let fidx = self.st.field_index(vsid, name)
                     if fidx >= 0 {
                         return "{self.emit_expr(object.value)}.f{fidx}"
+                    }
+                }
+                let bsid = self.boxed_sid_of(object.value)
+                if bsid >= 0 {
+                    let fidx = self.st.field_index(bsid, name)
+                    if fidx >= 0 {
+                        return "em_enum_field(&g_em, {self.emit_expr(object.value)}, {fidx})"
                     }
                 }
                 return "INT_VAL(0)"
@@ -1191,22 +1257,18 @@ struct CgcGen {
     }
 
 
-    // struct_sid_of returns the VALUE-struct sid an expression produces (or -1): a struct literal of a value
-    // struct, a value-struct binding, or a nested value-struct field read. Mirrors cgen_c.c:struct_sid_of.
-    fn struct_sid_of(self, e: ps.Expr) -> int {
+    // struct_sid_any returns the struct sid (VALUE or BOXED) an expression produces, or -1: a struct literal,
+    // a struct binding, a struct-returning call / method, or a nested struct field read. The two public
+    // accessors gate it by is_value. Mirrors cgen_c.c:struct_sid_of (value) / the boxed-receiver paths.
+    fn struct_sid_any(self, e: ps.Expr) -> int {
         match e {
             case EStructLit(ty, fields) {
-                let sid = ty_struct_sid(ty.value, self.st.names)
-                if sid >= 0 && self.st.is_value(sid) {
-                    return sid
-                }
-                return 0 - 1
+                return ty_struct_sid(ty.value, self.st.names)
             }
             case EIdent(name) {
                 return self.lookup_struct(name)
             }
             case ECall(callee, args) {
-                // a value-struct-returning call `let p = mk()` / `let q = p.method()` — its return struct sid.
                 match callee.value {
                     case EIdent(name) {
                         let fi = self.fn_index(name)
@@ -1215,7 +1277,7 @@ struct CgcGen {
                         }
                     }
                     case EGet(object, mname) {
-                        let rsid = self.struct_sid_of(object.value)
+                        let rsid = self.struct_sid_any(object.value)
                         if rsid >= 0 {
                             let fi = self.fn_index("{self.st.names[rsid]}.{mname}")
                             if fi >= 0 {
@@ -1229,14 +1291,11 @@ struct CgcGen {
                 return 0 - 1
             }
             case EGet(object, name) {
-                let osid = self.struct_sid_of(object.value)
+                let osid = self.struct_sid_any(object.value)
                 if osid >= 0 {
                     let fidx = self.st.field_index(osid, name)
                     if fidx >= 0 {
-                        let nsid = self.st.f_struct[self.st.flat_index(osid, fidx)]
-                        if nsid >= 0 && self.st.is_value(nsid) {
-                            return nsid
-                        }
+                        return self.st.f_struct[self.st.flat_index(osid, fidx)]   // nested field's struct sid (or -1)
                     }
                 }
                 return 0 - 1
@@ -1245,6 +1304,27 @@ struct CgcGen {
                 return 0 - 1
             }
         }
+    }
+
+
+    // struct_sid_of is the VALUE-struct sid an expression produces (an em_s: value semantics, `.fN` reads).
+    fn struct_sid_of(self, e: ps.Expr) -> int {
+        let s = self.struct_sid_any(e)
+        if s >= 0 && self.st.is_value(s) {
+            return s
+        }
+        return 0 - 1
+    }
+
+
+    // boxed_sid_of is the BOXED-struct sid an expression produces (a heap ObjStruct: em_struct / em_enum_field
+    // field access, owned local / borrow param — like an array).
+    fn boxed_sid_of(self, e: ps.Expr) -> int {
+        let s = self.struct_sid_any(e)
+        if s >= 0 && self.st.is_value(s) == false {
+            return s
+        }
+        return 0 - 1
     }
 
 
@@ -1273,9 +1353,10 @@ struct CgcGen {
         if sid < 0 {
             return "INT_VAL(0)"
         }
+        let fc = self.st.field_count(sid)
         if self.st.is_value(sid) {
+            // VALUE struct → a C compound literal `((em_s<sid>){ f0, f1, … })` in DECLARED field order.
             var s = "((em_s{sid})\{ "
-            let fc = self.st.field_count(sid)
             var f = 0
             loop {
                 if f >= fc {
@@ -1293,7 +1374,23 @@ struct CgcGen {
             }
             return s + " \})"
         }
-        return "INT_VAL(0)"
+        // BOXED struct → em_struct(&g_em, <sid>, <fcount>, f0, f1, …) — a heap ObjStruct whose fields are
+        // dropped by drop_value. Fields in DECLARED order; a field value is CONSUMED (an owned binding is
+        // MOVED in via emit_call_arg, a scalar / fresh temp passed as-is).
+        var s = "em_struct(&g_em, {sid}, {fc}"
+        var f = 0
+        loop {
+            if f >= fc {
+                break
+            }
+            let fname = self.st.f_name[self.st.flat_index(sid, f)]
+            let fpos = self.slit_index(fields, fname)
+            if fpos >= 0 {
+                s = s + ", " + self.emit_call_arg(fields[fpos].value)
+            }
+            f = f + 1
+        }
+        return s + ")"
     }
 
 
@@ -1449,10 +1546,11 @@ struct CgcGen {
                 return self.retain_dance(e)
             }
             case EGet(object, name) {
-                // a field read of the BORROWED method receiver `self` is a borrow → retain in a consuming op.
-                // A by-value struct PARAM / a struct LET is an OWNED copy, so its field read is NOT retained
-                // (the field lives in the copy). Value-struct scalar fields make the IS_OBJ retain a no-op.
-                if self.is_self_field(object.value) {
+                // A field read that is a BORROW yields a value the consuming op would over-release → retain it.
+                // (1) `self.field` — self is the borrowed method receiver (a by-value struct param / let field
+                // is an owned COPY, NOT retained). (2) a BOXED-struct field read (em_enum_field borrows — the
+                // struct owns the field). A value-struct scalar field makes the IS_OBJ retain a no-op.
+                if self.is_self_field(object.value) || self.boxed_sid_of(object.value) >= 0 {
                     return self.retain_dance(e)
                 }
             }
@@ -1483,9 +1581,12 @@ struct CgcGen {
     fn emit_call_arg(mut self, e: ps.Expr) -> string {
         match e {
             case EIdent(name) {
-                // An owned STRING binding is MOVED in; an owned ARRAY is passed as a BORROW (the callee's
-                // array param is a borrow by default — the owner keeps it and drops it at its own scope exit).
-                if self.lookup_drop(name) && self.lookup_array(name) == false {
+                // An owned STRING / ENUM binding is MOVED in (own_into_slot). An owned ARRAY or BOXED-STRUCT
+                // binding is passed as a BORROW (the callee's param is a borrow — the owner keeps it and drops
+                // it at its own scope exit).
+                let sid = self.lookup_struct(name)
+                let is_boxed_struct = sid >= 0 && self.st.is_value(sid) == false
+                if self.lookup_drop(name) && self.lookup_array(name) == false && is_boxed_struct == false {
                     return "own_into_slot(&g_em, {self.lookup_cname(name)})"
                 }
             }
@@ -1609,13 +1710,15 @@ struct CgcGen {
                         return "em_array_append(&g_em, {recv}, {el})"
                     }
                 }
-                // A VALUE-struct method call `recv.m(args)` → em_fn_<K>(recv, args…): self is arg 0 (passed by
-                // value), the method's fn-index resolves via the `Struct.method` name (cgen_c.c method path).
-                let rsid = self.struct_sid_of(object.value)
+                // A struct method call `recv.m(args)` → em_fn_<K>(recv, args…): self is arg 0, the method's
+                // fn-index resolves via the `Struct.method` name. A VALUE-struct self is passed by value (an
+                // em_s); a BOXED-struct self is passed as its borrowed Value (a heap pointer — mutations via
+                // em_set_field reach the caller's object). (cgen_c.c method path.)
+                let rsid = self.struct_sid_any(object.value)
                 if rsid >= 0 {
                     let fi = self.fn_index("{self.st.names[rsid]}.{mname}")
                     if fi >= 0 {
-                        var s = "em_fn_{fi}(" + self.emit_expr(object.value)   // self (an em_s), by value
+                        var s = "em_fn_{fi}(" + self.emit_expr(object.value)   // self (em_s value / boxed Value)
                         var i = 0
                         loop {
                             if i >= args.len() {
@@ -1693,8 +1796,9 @@ struct CgcGen {
                                 return 0
                             }
                         }
-                        // a value-struct method call `p.method()` returning a scalar (`let n = p.norm1()`).
-                        let rsid = self.struct_sid_of(object.value)
+                        // a struct method call `p.method()` returning a scalar (`let n = p.norm1()` / a boxed
+                        // `let a = lx.advance()`).
+                        let rsid = self.struct_sid_any(object.value)
                         if rsid >= 0 {
                             let fi = self.fn_index("{self.st.names[rsid]}.{mname}")
                             if fi >= 0 {
@@ -1854,6 +1958,11 @@ struct CgcGen {
             case EIdent(name) {
                 return self.lookup_array(name)
             }
+            case EGet(object, name) {
+                // a struct's ARRAY field `s.toks` (so `s.toks.len()` / `s.toks[i]` resolve)
+                let sid = self.struct_sid_any(object.value)
+                return sid >= 0 && self.st.field_is_array(sid, name)
+            }
             case ECall(callee, args) {
                 match callee.value {
                     case EIdent(name) {
@@ -2004,7 +2113,8 @@ struct CgcGen {
                     self.push(name, "v{id}", kind, true, false, false, 0 - 1)        // unboxed C scalar storage
                 } else {
                     let arr = self.is_array_expr(value.value)
-                    let owned = self.is_string_expr(value.value) || arr || self.is_enum_expr(value.value)   // string / array / enum local is owned/dropped
+                    let bsid = self.boxed_sid_of(value.value)                            // a BOXED struct local (owned, like an array)
+                    let owned = self.is_string_expr(value.value) || arr || self.is_enum_expr(value.value) || bsid >= 0   // string / array / enum / boxed-struct local is owned/dropped
                     // An owned array local carries its ELEMENT scalar kind so a later `xs[i]` types as a scalar —
                     // from the `[T]` annotation if present, else inferred from the initialiser.
                     var elem_sk = 0 - 1
@@ -2033,6 +2143,9 @@ struct CgcGen {
                         println("{self.ind()}Value v{id} = {self.emit_concat_operand(value.value)};")
                     }
                     self.push(name, "v{id}", 0 - 1, false, owned, arr, elem_sk)
+                    if bsid >= 0 {
+                        self.set_last_struct(bsid)          // track the boxed-struct sid so `c.field` resolves
+                    }
                 }
             }
             case SIf(cond, then_blk, els) {
@@ -2215,6 +2328,18 @@ struct CgcGen {
                         let val = self.emit_expr(value.value)
                         println("{self.ind()}em_set_index(&g_em, {o}, {ix}, {val});")
                     }
+                    case EGet(object, name) {
+                        // Field mutation `recv.f = v` on a BOXED struct → em_set_field (drops the overwritten
+                        // field, moves the new value in). A VALUE-struct field write (a C member assign) is a
+                        // later increment. Receiver then value in source order (OFI-166).
+                        let bsid = self.boxed_sid_of(object.value)
+                        if bsid >= 0 {
+                            let fidx = self.st.field_index(bsid, name)
+                            let o = self.emit_expr(object.value)
+                            let val = self.emit_call_arg(value.value)
+                            println("{self.ind()}em_set_field(&g_em, {o}, {fidx}, {val});")
+                        }
+                    }
                     case _ {
                     }
                 }
@@ -2358,8 +2483,8 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: Stru
     var ai = 0
     if has_self {
         g.push("self", "a0", 0 - 1, false, false, false, 0 - 1)
-        if owner_sid >= 0 && st.is_value(owner_sid) {
-            g.set_last_struct(owner_sid)          // `self` is the owning value struct (read via a0.fN)
+        if owner_sid >= 0 {
+            g.set_last_struct(owner_sid)          // `self` is the owning struct (value → a0.fN, boxed → em_enum_field)
         }
         ai = 1
     }
@@ -2383,14 +2508,11 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: Stru
                 if is_arr {
                     ek = ty_scalar_kind(elem_ty_of(f.params[p].ty[0]))   // its element scalar kind, so `a[i]` is a scalar
                 }
-                let s = ty_struct_sid(f.params[p].ty[0], st.names)
-                if s >= 0 && st.is_value(s) {
-                    psid = s
-                }
+                psid = ty_struct_sid(f.params[p].ty[0], st.names)   // value OR boxed struct sid this param carries
             }
             g.push(f.params[p].name, "a{ai}", pk, false, owned, is_arr, ek)
             if psid >= 0 {
-                g.set_last_struct(psid)           // a value-struct param is read via aN.fM
+                g.set_last_struct(psid)           // value param → read via aN.fM; boxed param → a borrowed Value
             }
             ai = ai + 1
         }
@@ -2594,35 +2716,35 @@ fn emit_struct_preamble(tab: StructTab) {
     if n == 0 {
         return
     }
-    // (1) typedefs — VALUE structs only (a boxed struct stays a uniform Value with no C type). Flat structs
-    // reference no other struct, so sid order is already topological for M5e.1 (nesting adds ordering later).
+    // (1) typedefs — EVERY struct gets a `typedef struct {…} em_s<sid>;` (a value struct IS this C type; a
+    // boxed struct's typedef mirrors its field count for the em_box/unbox_struct bridge). A nested value-
+    // struct field is an inline `em_s<m> f<i>`; a scalar or boxed field is a `Value f<i>`. Flat structs
+    // reference no other struct, so sid order is already topological for M5e.1/.2 (nesting adds ordering).
     var sid = 0
     loop {
         if sid >= n {
             break
         }
-        if tab.is_value(sid) {
-            println("typedef struct \{")
-            let fc = tab.field_count(sid)
-            var f = 0
-            loop {
-                if f >= fc {
-                    break
-                }
-                let flat = tab.flat_index(sid, f)
-                if tab.f_struct[flat] >= 0 {
-                    println("    em_s{tab.f_struct[flat]} f{f};")
-                } else {
-                    println("    Value f{f};")
-                }
-                f = f + 1
+        println("typedef struct \{")
+        let fc = tab.field_count(sid)
+        var f = 0
+        loop {
+            if f >= fc {
+                break
             }
-            if fc == 0 {
-                println("    Value _unit;")           // C forbids an empty struct
+            let flat = tab.flat_index(sid, f)
+            if tab.f_struct[flat] >= 0 && tab.is_value(tab.f_struct[flat]) {
+                println("    em_s{tab.f_struct[flat]} f{f};")
+            } else {
+                println("    Value f{f};")
             }
-            println("\} em_s{sid};")
-            println("")
+            f = f + 1
         }
+        if fc == 0 {
+            println("    Value _unit;")           // C forbids an empty struct
+        }
+        println("\} em_s{sid};")
+        println("")
         sid = sid + 1
     }
     // (2) packed-layout metadata arrays (offset / kind / field_struct), for EVERY struct in sid order.
