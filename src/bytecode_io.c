@@ -167,15 +167,16 @@ int bytecode_write(const CompiledProgram *prog, const char *path) {
         bb_uvarint(&b, (uint64_t)ch->code_len);
         bb_bytes(&b, ch->code, ch->code_len);
 
-        // Line/col table, run-length-encoded (a whole instruction shares one position). Count runs, then
-        // emit each as {run length, line, col}.
+        // Line table, run-length-encoded (a whole instruction shares one line). Count runs, then emit each
+        // as {run length, line}. Phase 1 is LINE-precise, not column-precise: the self-hosted codegen
+        // tracks per-node lines but not columns, so storing lines only is what lets an Ember serializer be
+        // byte-identical to stage 0 (docs/design/bytecode-container.md). Columns default to 0 at load — a
+        // Fault from a `.emb` is line-precise; the col is restorable later via a col-tracking pass.
         size_t run_count = 0;
         for (size_t i = 0; i < ch->code_len; ) {
             int line = ch->lines ? ch->lines[i] : 0;
-            int col  = ch->cols  ? ch->cols[i]  : 0;
             size_t j = i + 1;
-            while (j < ch->code_len && (ch->lines ? ch->lines[j] : 0) == line &&
-                   (ch->cols ? ch->cols[j] : 0) == col) {
+            while (j < ch->code_len && (ch->lines ? ch->lines[j] : 0) == line) {
                 j++;
             }
             run_count++;
@@ -184,15 +185,12 @@ int bytecode_write(const CompiledProgram *prog, const char *path) {
         bb_uvarint(&b, (uint64_t)run_count);
         for (size_t i = 0; i < ch->code_len; ) {
             int line = ch->lines ? ch->lines[i] : 0;
-            int col  = ch->cols  ? ch->cols[i]  : 0;
             size_t j = i + 1;
-            while (j < ch->code_len && (ch->lines ? ch->lines[j] : 0) == line &&
-                   (ch->cols ? ch->cols[j] : 0) == col) {
+            while (j < ch->code_len && (ch->lines ? ch->lines[j] : 0) == line) {
                 j++;
             }
             bb_uvarint(&b, (uint64_t)(j - i));
             bb_svarint(&b, line);
-            bb_svarint(&b, col);
             i = j;
         }
 
@@ -535,9 +533,8 @@ int bytecode_read(const char *path, CompiledProgram *out) {
         for (uint64_t run = 0; run < run_count && !r.error; run++) {
             uint64_t run_len = rd_uvarint(&r);
             int      line    = (int)rd_svarint(&r);
-            int      col     = (int)rd_svarint(&r);
             for (uint64_t k = 0; k < run_len && idx < code_len; k++) {
-                chunk_write(&fn->chunk, code[idx], line, col);
+                chunk_write(&fn->chunk, code[idx], line, 0);   // col 0: Phase-1 line-precise container
                 idx++;
             }
         }
