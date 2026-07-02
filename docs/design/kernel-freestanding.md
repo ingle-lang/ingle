@@ -221,11 +221,43 @@ reported. The **fault-vector regression** is a second image, `kernel/faultdemo.e
 `EC` is the field that matters — `0x25` data abort, `0x07` SIMD/FP trapped, `0x3c` BRK — so a future
 fault is a one-line diagnosis instead of a mystery.
 
+## Milestone 4 — timer + interrupts: the first asynchronous event ✅ (2026-07-02)
+
+The IRQ vector installed in M3 now has a live source. `make test-kernel` boots a third image,
+`kernel/timerdemo.elf`, which brings up the interrupt controller + the generic timer and observes ticks
+arriving **asynchronously**:
+
+```
+timer: waiting for interrupts...
+tick 1
+tick 2
+tick 3
+tick 4
+tick 5
+timer: 5 ticks delivered by IRQ — interrupts work!
+```
+
+exit code **5** (the tick count, which only advances from the IRQ handler). The pieces (`kernel/timer.c`):
+
+- **GICv2** (QEMU `virt`, forced with `-machine virt,gic-version=2`): distributor at `0x0800_0000`, CPU
+  interface at `0x0801_0000`. `timer_init` enables the distributor, enables the timer PPI (INTID 30),
+  sets the priority mask, and enables the CPU interface.
+- **The generic timer** (EL1 non-secure physical, `CNTP`): `CNTP_TVAL_EL0` = `CNTFRQ_EL0/10` (~100 ms),
+  `CNTP_CTL_EL0` = ENABLE. Then `msr daifclr, #2` unmasks IRQs at the CPU.
+- **The IRQ path**: `kernel/vectors.S` entry 5 (Current EL SPx IRQ) now branches to `irq_entry`, which —
+  unlike the fault path — saves all GP registers (an IRQ interrupts arbitrary code), calls `em_irq`, restores,
+  and returns with `eret`. `em_irq` acknowledges via `GICC_IAR`, bumps the tick count + re-arms the timer,
+  and signals `GICC_EOIR`. Ember polls the count through the `tick_count` direct extern; that it climbs
+  proves a real hardware interrupt is being taken and handled.
+
+`make kernel` now builds three images from a shared object set (`boot`/`vectors`/`timer`/`runtime`/
+`platform`) — `kernel.elf` (heap), `faultdemo.elf` (M3 panic), `timerdemo.elf` (M4 IRQ). Kernel-only
+change; no `src/` or `include/` touched, so the hosted gates are unaffected.
+
 ### Next increments
 
-- **A timer + interrupts** (`em_clock` returns 0 today) — configure the GIC + the generic timer, take an
-  IRQ through the (already-present) IRQ vector, and drive a periodic tick. The gateway to a **scheduler**,
-  which is the kernel proper.
+- **A scheduler** — now that a periodic tick exists, save/restore two Ember fibers' contexts on the tick
+  and round-robin between them. This is the kernel proper, and the direct next step.
 - **Widen the freestanding math/util surface** (soft-float `sqrt`/`floor`; a PRNG seeded off the timer) —
   currently they panic as "unsupported".
 - **MMIO/asm intrinsics** (volatile load/store — retires the `extern "c"` shim for hardware access), then

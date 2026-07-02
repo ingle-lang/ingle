@@ -73,7 +73,11 @@ elif command -v gtimeout >/dev/null 2>&1; then
     TIMEOUT="gtimeout 15"
 fi
 
-OUT=$($TIMEOUT "$QEMU" -M virt -cpu cortex-a53 -nographic -semihosting -kernel "$ELF" 2>/dev/null)
+# Force GICv2 (kernel M4 targets the GICv2 MMIO CPU interface); the machine flags are shared by every
+# boot below.
+QMACH="-machine virt,gic-version=2 -cpu cortex-a53 -nographic -semihosting"
+
+OUT=$($TIMEOUT "$QEMU" $QMACH -kernel "$ELF" 2>/dev/null)
 RC=$?
 
 printf '%s\n' "$OUT"
@@ -103,7 +107,7 @@ fi
 # kernel panic (rather than hang silently, as a fault did before the vectors existed).
 FAULT_ELF="kernel/faultdemo.elf"
 if [ -f "$FAULT_ELF" ]; then
-    FOUT=$($TIMEOUT "$QEMU" -M virt -cpu cortex-a53 -nographic -semihosting -kernel "$FAULT_ELF" 2>/dev/null)
+    FOUT=$($TIMEOUT "$QEMU" $QMACH -kernel "$FAULT_ELF" 2>/dev/null)
     printf '%s\n' "$FOUT"
     echo "--- (fault demo) ---"
     if printf '%s' "$FOUT" | grep -q "EMBER KERNEL PANIC"; then
@@ -117,6 +121,29 @@ if [ -f "$FAULT_ELF" ]; then
         echo "PASS: exception syndrome decoded (EC=0x3c, a BRK)"
     else
         echo "FAIL: expected EC=0x3c (BRK) in the panic report"
+        fail=1
+    fi
+fi
+
+# --- timer/interrupt demo (kernel milestone 4) ------------------------------------------------------
+# timerdemo.elf brings up the GIC + generic timer and polls a tick counter that only advances from the
+# IRQ handler; it must print climbing ticks and exit 5 (the tick count) — proving async interrupts.
+TIMER_ELF="kernel/timerdemo.elf"
+if [ -f "$TIMER_ELF" ]; then
+    TOUT=$($TIMEOUT "$QEMU" $QMACH -kernel "$TIMER_ELF" 2>/dev/null)
+    TRC=$?
+    printf '%s\n' "$TOUT"
+    echo "--- (timer demo, qemu exit: $TRC) ---"
+    if printf '%s' "$TOUT" | grep -q "tick 5"; then
+        echo "PASS: timer IRQ delivered 5 ticks (asynchronous interrupts work on bare metal)"
+    else
+        echo "FAIL: expected 'tick 5' from the timer demo (no interrupts delivered?)"
+        fail=1
+    fi
+    if [ "$TRC" -eq 5 ]; then
+        echo "PASS: timer demo exit 5 — the IRQ-driven tick count reached the host"
+    else
+        echo "FAIL: expected timer demo exit 5, got $TRC"
         fail=1
     fi
 fi

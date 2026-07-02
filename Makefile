@@ -399,20 +399,29 @@ test-db: db
 # `--emit=c --freestanding` (bare entry, no stdio/argv; main's int result = the exit code), then
 # cross-compiles the C + the freestanding shim against the boot stub and linker script into a flat
 # aarch64 ELF for QEMU `virt`. Opt-in (LLVM cross toolchain + qemu).
+# Shared freestanding objects every kernel image links: the boot stub, the exception/IRQ vectors, the
+# GIC/timer driver (vectors.o references em_irq), the real runtime, and the platform layer.
+KERNEL_SHARED := kernel/boot.o kernel/vectors.o kernel/timer.o kernel/runtime.o kernel/platform.o
+
 kernel: $(BIN)
 	$(BIN) --emit=c --freestanding kernel/hello.em > kernel/hello.c
 	$(BIN) --emit=c --freestanding kernel/faultdemo.em > kernel/faultdemo.c
+	$(BIN) --emit=c --freestanding kernel/timerdemo.em > kernel/timerdemo.c
 	$(KERNEL_CC) $(KERNEL_CC_FLAGS) -c kernel/boot.S -o kernel/boot.o
 	$(KERNEL_CC) $(KERNEL_CC_FLAGS) -c kernel/vectors.S -o kernel/vectors.o
+	$(KERNEL_CC) $(KERNEL_CC_FLAGS) $(KERNEL_FS_FLAGS) -c kernel/timer.c -o kernel/timer.o
 	$(KERNEL_CC) $(KERNEL_CC_FLAGS) $(KERNEL_FS_FLAGS) -c kernel/platform.c -o kernel/platform.o
 	$(KERNEL_CC) $(KERNEL_CC_FLAGS) $(KERNEL_FS_FLAGS) -c src/runtime.c -o kernel/runtime.o
 	$(KERNEL_CC) $(KERNEL_CC_FLAGS) $(KERNEL_FS_FLAGS) -c kernel/hello.c -o kernel/hello.o
 	$(KERNEL_CC) $(KERNEL_CC_FLAGS) $(KERNEL_FS_FLAGS) -c kernel/faultdemo.c -o kernel/faultdemo.o
+	$(KERNEL_CC) $(KERNEL_CC_FLAGS) $(KERNEL_FS_FLAGS) -c kernel/timerdemo.c -o kernel/timerdemo.o
 	$(KERNEL_CC) $(KERNEL_CC_FLAGS) --ld-path=$(KERNEL_LLD) -T kernel/kernel.ld \
-		kernel/boot.o kernel/vectors.o kernel/runtime.o kernel/platform.o kernel/hello.o -o $(KERNEL_ELF)
+		$(KERNEL_SHARED) kernel/hello.o -o $(KERNEL_ELF)
 	$(KERNEL_CC) $(KERNEL_CC_FLAGS) --ld-path=$(KERNEL_LLD) -T kernel/kernel.ld \
-		kernel/boot.o kernel/vectors.o kernel/runtime.o kernel/platform.o kernel/faultdemo.o -o kernel/faultdemo.elf
-	@echo "Built $(KERNEL_ELF) + kernel/faultdemo.elf.  Boot:  make test-kernel"
+		$(KERNEL_SHARED) kernel/faultdemo.o -o kernel/faultdemo.elf
+	$(KERNEL_CC) $(KERNEL_CC_FLAGS) --ld-path=$(KERNEL_LLD) -T kernel/kernel.ld \
+		$(KERNEL_SHARED) kernel/timerdemo.o -o kernel/timerdemo.elf
+	@echo "Built $(KERNEL_ELF) + faultdemo.elf + timerdemo.elf.  Boot:  make test-kernel"
 
 # Kernel QEMU smoke test — boots kernel.elf on aarch64 virt and greps the UART output. Kept OUT of
 # the dependency-free `make test` (needs the cross toolchain + qemu), like test-graphics / test-db.
