@@ -67,6 +67,8 @@ let OP_INCREF: int = 85
 let OP_RETURN_STRUCT: int = 87
 let OP_RETURN: int = 88
 let OP_CONCAT: int = 89
+let OP_DUP: int = 5
+let OP_ROUTE_HOP: int = 90
 
 
 // ty_is_scalar reports whether a type is a scalar (so a struct of only scalars is multi-slot, not boxed).
@@ -2672,6 +2674,54 @@ struct Chunk {
                 }
                 return 0
             }
+            case EBinary(op, l, r) {
+                // an arithmetic hole `{sum / 3}` renders with its operand's width; a comparison/logical hole
+                // renders as a bool.
+                let bid = ps.binop_id(op)
+                if bid >= 6 && bid <= 13 {
+                    return 10
+                }
+                return self.render_kind_of(l.value)
+            }
+            case EUnary(op, operand) {
+                return self.render_kind_of(operand.value)
+            }
+            case _ {
+                return 0
+            }
+        }
+    }
+
+
+    // infer_render_kind derives the scalar (render/num) kind an initialiser produces, so a `let x = …`
+    // binding without an annotation still carries its width: a float is 9, a bool 10, a comparison/logical
+    // result is a bool (10), and arithmetic/bitwise preserves its (left) operand's kind — so `let s = u64a +
+    // u64b` is u64 (7). Mirrors the checker's type of the initialiser closely enough for num_kind parity.
+    fn infer_render_kind(self, e: ps.Expr) -> int {
+        match e {
+            case EFloat(v) {
+                return 9
+            }
+            case EBool(v) {
+                return 10
+            }
+            case EIdent(name) {
+                let slot = self.resolve_slot(name)
+                if slot >= 0 {
+                    return self.slot_kind[slot]
+                }
+                return 0
+            }
+            case EBinary(op, l, r) {
+                let bid = ps.binop_id(op)
+                if bid >= 6 && bid <= 13 {
+                    return 10                        // comparison/logical -> a bool result
+                }
+                return self.infer_render_kind(l.value)   // arithmetic/bitwise preserve the operand's kind
+            }
+            case EUnary(op, operand) {
+                return self.infer_render_kind(operand.value)
+            }
             case _ {
                 return 0
             }
@@ -3218,6 +3268,30 @@ struct Chunk {
                 self.gen_expr(index.value, line)        // the index
                 self.emit(OP_INDEX)
             }
+            case ETry(operand) {
+                // the `?` operator: evaluate a Result/Option; if Ok/Some (tag 0), unwrap its payload
+                // (GET_FIELD 0); if Err/None, record a propagation hop (ROUTE_HOP), drop the owned locals,
+                // and RETURN the value. DUP keeps the value on the stack across the tag test so both the
+                // payload path and the Err/None early-return can reach it (mirrors src/codegen.c).
+                self.gen_expr(operand.value, line)
+                self.emit(OP_DUP)
+                self.emit(OP_GET_TAG)
+                let z = self.add_const_int(0)
+                self.emit(OP_CONST)
+                self.emit_idx(z)
+                self.emit(OP_EQ)
+                let jf = self.emit_jump(OP_JUMP_IF_FALSE)
+                self.emit(OP_POP)                       // Ok/Some: drop the tag-compare result
+                self.emit(OP_GET_FIELD)
+                self.emit_idx(0)                        // unwrap the payload
+                let jend = self.emit_jump(OP_JUMP)
+                self.patch_jump(jf)
+                self.emit(OP_POP)                       // Err/None: drop the tag-compare result
+                self.emit(OP_ROUTE_HOP)
+                self.emit_drops()                       // release owned locals before propagating out
+                self.emit(OP_RETURN)
+                self.patch_jump(jend)
+            }
             case _ {
             }
         }
@@ -3271,12 +3345,40 @@ struct Chunk {
                         self.declare_binding(name, 1, sid, false, true, true, false)
                     }
                 } else if is_array_lit(value.value) {
+                    var done = false
                     if ty.len() > 0 && array_lit_is_empty(value.value) {
                         // an empty `[]` has no element to infer the kind from; take it from the `[T]`
                         // annotation: an all-scalar struct element packs inline (NEW_STRUCT_ARRAY), else the
                         // element kind (e.g. `[string]` -> 0, not int).
                         self.emit_empty_array(elem_ty_of(ty[0]), value.line)
-                    } else {
+                        done = true
+                    } else if ty.len() > 0 {
+                        // a non-empty array with a SIZED-scalar annotation (`[u8]`/`[u64]`/`[f32]`) must pack
+                        // at the annotation's width, not the first element's inferred kind (`[u8] = [1,2,3]`
+                        // is bytes, not i64s). A boxed/inline-struct element (aek 0 / 12) falls to gen_expr.
+                        let aek = array_elem_kind_from_ty(elem_ty_of(ty[0]))
+                        if aek >= 1 && aek <= 11 {
+                            match value.value {
+                                case EArray(elems, lines) {
+                                    var ai = 0
+                                    loop {
+                                        if ai >= elems.len() {
+                                            break
+                                        }
+                                        self.gen_consume(elems[ai], lines[ai])
+                                        ai = ai + 1
+                                    }
+                                    self.emit(OP_NEW_ARRAY)
+                                    self.emit_idx(elems.len())
+                                    self.emit(aek)
+                                    done = true
+                                }
+                                case _ {
+                                }
+                            }
+                        }
+                    }
+                    if done == false {
                         self.gen_expr(value.value, value.line)       // NEW_ARRAY -> one owned array slot
                     }
                     self.declare_binding(name, 1, -1, false, true, false, true)
@@ -3315,6 +3417,14 @@ struct Chunk {
                     } else {
                         self.gen_expr(value.value, value.line)       // a scalar initialiser stays on the stack
                         self.declare_binding(name, 1, -1, false, false, false, false)
+                        // Record the scalar width so later arithmetic/comparison/interpolation on this local
+                        // emits the right num_kind: a `[T]`-style annotation drives it, else infer it from the
+                        // initialiser (so `let s: u64 = …` and `let s = u64a + u64b` are both u64).
+                        if ty.len() > 0 {
+                            self.slot_kind[self.slot_kind.len() - 1] = ty_scalar_kind(ty[0])
+                        } else {
+                            self.slot_kind[self.slot_kind.len() - 1] = self.infer_render_kind(value.value)
+                        }
                     }
                 }
             }
