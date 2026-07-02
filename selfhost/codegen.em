@@ -60,6 +60,8 @@ let OP_SET_INDEX: int = 57
 let OP_ARRAY_LEN: int = 58
 let OP_ARRAY_APPEND: int = 59
 let OP_STR_LEN: int = 64
+let OP_STR_CHARS: int = 65
+let OP_STR_CHAR_COUNT: int = 66
 let OP_STR_BYTES: int = 67
 let OP_TO_STRING: int = 74
 let OP_DROP: int = 84
@@ -886,6 +888,12 @@ fn string_method_op(mname: string) -> int {
     if mname == "bytes" {
         return OP_STR_BYTES
     }
+    if mname == "chars" {
+        return OP_STR_CHARS
+    }
+    if mname == "char_count" {
+        return OP_STR_CHAR_COUNT
+    }
     return 0 - 1
 }
 
@@ -1678,6 +1686,9 @@ struct Chunk {
                         if mname == "bytes" {
                             return -2                     // `s.bytes()` -> an owned byte array
                         }
+                        if mname == "chars" {
+                            return -2                     // `s.chars()` -> an owned [string] of characters
+                        }
                     }
                     case _ {
                     }
@@ -1715,6 +1726,9 @@ struct Chunk {
                     case EGet(object, mname) {
                         if mname == "bytes" {
                             return 0 - 1                  // s.bytes() -> a scalar (u8) byte array
+                        }
+                        if mname == "chars" {
+                            return 0 - 3                  // s.chars() -> a [string]: string elements
                         }
                     }
                     case _ {
@@ -3193,12 +3207,12 @@ struct Chunk {
                         let wop = wrapping_opcode(name)
                         if wop >= 0 && args.len() == 2 {
                             // built-in wrapping arithmetic `wrapping_add/sub/mul(a, b)` -> push both operands,
-                            // then the WRAP_* opcode carrying the operand width kind (int=0; sized/float = M4b).
+                            // then the WRAP_* opcode carrying the operand's width kind (int=0, u32=6, …).
                             self.gen_expr(args[0], line)
                             self.gen_expr(args[1], line)
                             self.cur_line = line
                             self.emit(wop)
-                            self.emit(0)
+                            self.emit(self.scalar_kind_of(args[0]))
                             return
                         }
                         let nid = native_id_for_name(name)
