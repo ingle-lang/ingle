@@ -128,6 +128,7 @@ struct StructTable {
     f_elem: [int]              // ...for an array field: its element type code (struct sid / -3 str / -4 enum / -1)
     f_arrkind: [int]           // ...for an array field: its NEW_ARRAY element kind byte (AEK_*), else -1
     f_enum: [bool]             // ...is the field a known enum (a refcounted single Value — inline-packable)?
+    f_kind: [int]              // ...for a scalar field: its num/render kind (int=0, sized 1..7, f32=8, f64=9, bool=10)
 }
 
 
@@ -165,6 +166,7 @@ fn build_structs(decls: [ps.Decl]) -> StructTable {
     var fel: [int] = []
     var fak: [int] = []
     var fen: [bool] = []
+    var fkind: [int] = []
     var id = 0
     var i = 0
     loop {
@@ -186,6 +188,7 @@ fn build_structs(decls: [ps.Decl]) -> StructTable {
                     far.append(ty_is_array(fty))
                     fsd.append(ty_struct_id(fty, names))
                     fen.append(ty_enum_id(fty, enames) >= 0)
+                    fkind.append(ty_scalar_kind(fty))
                     if ty_is_array(fty) {
                         fel.append(elem_type_code(elem_ty_of(fty), names, enames))
                         fak.append(array_elem_kind_from_ty(elem_ty_of(fty)))
@@ -202,7 +205,7 @@ fn build_structs(decls: [ps.Decl]) -> StructTable {
         }
         i = i + 1
     }
-    return StructTable { names: names, f_owner: fo, f_name: fn_, f_scalar: fsc, f_string: fst, f_array: far, f_struct: fsd, f_elem: fel, f_arrkind: fak, f_enum: fen }
+    return StructTable { names: names, f_owner: fo, f_name: fn_, f_scalar: fsc, f_string: fst, f_array: far, f_struct: fsd, f_elem: fel, f_arrkind: fak, f_enum: fen, f_kind: fkind }
 }
 
 
@@ -1263,6 +1266,7 @@ struct Chunk {
     st_felem: [int]             // ...for an array field: its element type code (struct sid / -3 / -4 / -1)
     st_farrkind: [int]          // ...for an array field: its NEW_ARRAY element kind byte (AEK_*), else -1
     st_fenum: [bool]            // ...is the field a known enum (a refcounted single Value)?
+    st_fkind: [int]             // ...for a scalar field: its num/render kind (int=0, sized 1..7, f32=8, f64=9, bool=10)
     inst_keys: [string]         // generic-struct INSTANCE keys (cloned): id = st_names.len() + index here
     et_names: [string]          // the enum table (cloned): enum id -> name
     ev_owner: [int]             // ...flat variant table: owning enum id
@@ -1338,6 +1342,23 @@ struct Chunk {
             i = i + 1
         }
         return 0 - 1
+    }
+
+
+    // field_kind returns the num/render kind of a scalar field `fname` of struct `id` (int=0, sized 1..7,
+    // f32=8, f64=9, bool=10), so `self.x - other.x` on float/sized fields emits the right operand width.
+    fn field_kind(self, id: int, fname: string) -> int {
+        var i = 0
+        loop {
+            if i >= self.st_fowner.len() {
+                break
+            }
+            if self.st_fowner[i] == id && self.st_fname[i] == fname {
+                return self.st_fkind[i]
+            }
+            i = i + 1
+        }
+        return 0
     }
 
 
@@ -2648,6 +2669,18 @@ struct Chunk {
             case EBinary(op, l, r) {
                 return self.scalar_kind_of(l.value)  // arithmetic preserves its operand kind
             }
+            case EGet(object, name) {
+                // a scalar field read `self.x` carries the field's width (a float field -> f64=9)
+                let osid = self.expr_type_kind(object.value)
+                if osid >= 0 {
+                    let k = self.field_kind(osid, name)
+                    if k == 10 {
+                        return 0
+                    }
+                    return k
+                }
+                return 0
+            }
             case _ {
                 return 0
             }
@@ -2670,6 +2703,14 @@ struct Chunk {
                 let slot = self.resolve_slot(name)
                 if slot >= 0 {
                     return self.slot_kind[slot]
+                }
+                return 0
+            }
+            case EGet(object, name) {
+                // a scalar field hole `{p.x}` renders at the field's width (a float field -> f64=9).
+                let osid = self.expr_type_kind(object.value)
+                if osid >= 0 {
+                    return self.field_kind(osid, name)
                 }
                 return 0
             }
@@ -2735,6 +2776,17 @@ struct Chunk {
             }
             case EUnary(op, operand) {
                 return self.infer_render_kind(operand.value)
+            }
+            case EGet(object, name) {
+                // `let dx = self.x - other.x` needs the field's width so `dx * dx` is float, not int.
+                let osid = self.expr_type_kind(object.value)
+                if osid >= 0 {
+                    return self.field_kind(osid, name)
+                }
+                return 0
+            }
+            case EIndex(object, index) {
+                return self.render_kind_of(e)   // reuse the field-array element-kind inference
             }
             case _ {
                 return 0
@@ -4128,7 +4180,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
     var loopb: [int] = []
     var brkj: [int] = []
     var brkb: [int] = []
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval) }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval) }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     if self_struct_id >= 0 {
         // a method receiver: `self` is a BOXED struct in slot 0 (so self.field is GET_FIELD even for an
