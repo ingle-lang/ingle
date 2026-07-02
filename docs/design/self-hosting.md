@@ -468,12 +468,19 @@ rebuilt without itself is a trap; keeping stage 0 is what avoids it.
   `Box<Expr>` — a boxed generic array element is a construct the self-hosted C-emit backend can't yet lower).
   Guarded end-to-end (bytecode, C-emit, AND the `.emb` serializer) by `tests/selfhost/codegen/contracts.em`,
   because the disassembly differential is blind to string pools (OFI-171) — only the Stage 8 byte-identity
-  catches a missing message. **Remaining M4, ranked by the corpus differential:**
-  closures/generics (the `GET_LOCAL`/witness-passing bulk);
-  conversions (`CONV`); concurrency (channels/`SEND`); FFI (`CALL_C`); closures/generics; sized-int & float
-  **arithmetic** + interpolation render-kind (one shared `scalar_type_code`, the "M4b" batch); the
-  nested-inline flattening (deferred-low, 3 files); then the **VM fixed point** (the compiler compiles
-  its own source). The dev loop for all of this is **`tools/cgdiff.sh`** (below).
+  catches a missing message. **Sized-int/float scalar kinds are done** (M4b): a sized literal carries its
+  `iN`/`uN` width on the `EInt` node, a call its declared return width (`fn_ret_kind`), so `WRAP_*`/binary
+  `num_kind` and `TO_STRING` render at the right width. **Concurrency is done**: `channel(cap)`→`CHANNEL_NEW`,
+  `send`→`SEND`, `recv`/`try_recv`→`RECV`/`TRY_RECV` (carrying the Some enum-id + Some/None tags to build
+  `Option<T>`), `close`→`CLOSE`, and `nursery { spawn f(a) }`→`NURSERY_BEGIN`/`SPAWN <fn> <argslots>`/
+  `NURSERY_END`; a `Channel<T>` `let`/param is an owned refcounted handle (dropped at exit, INCREF'd into a
+  spawn/call). Fixture `tests/selfhost/codegen/concurrency.em`; surfaced+fixed OFI-172 (a duplicate prelude
+  `Option` when the program redeclares it — only the `.emb` enum table showed it). **Remaining M4, ranked by
+  the corpus differential:** closures/generics (the `GET_LOCAL`/witness-passing bulk, incl. `spawn` of a
+  generic); FFI (`CALL_C`); the long tail of per-file INCREF/offset off-by-ones (incl. OFI-165 cross-module
+  string-literal args) + OFI-163 generic Option/Result payload bindings; the nested-inline flattening
+  (deferred-low, 3 files). The VM + C-emit **fixed points are already DONE** (the compiler reproduces its own
+  source on both backends); the corpus is breadth. The dev loop for all of this is **`tools/cgdiff.sh`** (below).
 - **M5** *(follow-on)* — self-hosted C-emit backend; native self-hosted binaries; `tests/native`
   green with the self-hosted compiler producing the C.
 

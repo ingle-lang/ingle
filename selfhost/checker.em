@@ -1946,7 +1946,7 @@ struct Checker {
                 }
                 self.check_expr(call.value)
             }
-            case SNursery(body) {
+            case SNursery(body, _) {
                 self.nursery_depth = self.nursery_depth + 1
                 self.check_block(body)
                 self.nursery_depth = self.nursery_depth - 1
@@ -2693,7 +2693,7 @@ fn stmt_exit_break(s: ps.Stmt) -> bool {
         case SBlock(body) {
             return loop_exit_break(body)
         }
-        case SNursery(body) {
+        case SNursery(body, _) {
             return loop_exit_break(body)
         }
         case SIf(cond, then_blk, els) {
@@ -2953,7 +2953,7 @@ fn stmt_uses_self_field(s: ps.Stmt, field: string) -> bool {
         case SSpawn(call) {
             return expr_uses_self_field(call.value, field)
         }
-        case SNursery(body) {
+        case SNursery(body, _) {
             return stmts_use_self_field(body, field)
         }
         case SBlock(body) {

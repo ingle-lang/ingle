@@ -64,7 +64,15 @@ let OP_STR_CHARS: int = 65
 let OP_STR_CHAR_COUNT: int = 66
 let OP_STR_BYTES: int = 67
 let OP_TO_STRING: int = 74
+let OP_NURSERY_BEGIN: int = 75
 let OP_CONTRACT_CHECK: int = 76
+let OP_SPAWN: int = 77
+let OP_NURSERY_END: int = 78
+let OP_CHANNEL_NEW: int = 79
+let OP_SEND: int = 80
+let OP_RECV: int = 81
+let OP_TRY_RECV: int = 82
+let OP_CLOSE: int = 83
 let OP_DROP: int = 84
 let OP_INCREF: int = 85
 let OP_RETURN_STRUCT: int = 87
@@ -95,6 +103,41 @@ fn ty_is_array(ty: ps.Ty) -> bool {
     match ty {
         case TyArray(elem) {
             return true
+        }
+        case _ {
+            return false
+        }
+    }
+}
+
+
+// ty_is_channel reports whether a type is `Channel<T>` — a refcounted HANDLE, so a channel `let`/param is
+// owned/droppable (like an enum) and INCREFs when passed to a spawned task or another function.
+fn ty_is_channel(ty: ps.Ty) -> bool {
+    match ty {
+        case TyGeneric(qual, name, args) {
+            return name == "Channel"
+        }
+        case _ {
+            return false
+        }
+    }
+}
+
+
+// is_channel_call reports whether an expression is `channel(cap)` — the channel constructor, whose result is
+// an owned refcounted handle (so its `let` binding is droppable).
+fn is_channel_call(e: ps.Expr) -> bool {
+    match e {
+        case ECall(callee, args) {
+            match callee.value {
+                case EIdent(name) {
+                    return name == "channel" && args.len() == 1
+                }
+                case _ {
+                    return false
+                }
+            }
         }
         case _ {
             return false
@@ -384,27 +427,33 @@ fn build_enums(decls: [ps.Decl], structs: StructTable) -> EnumTable {
         i = i + 1
     }
     // Append the prelude enums the parser never sees, at the ids that continue after the user enums
-    // (Option before Result; Some/Ok = tag 0, None/Err = tag 1 — confirmed against stage-0).
-    let opt = en.len()
-    en.append("Option")
-    vo.append(opt)
-    vn.append("Some")
-    vt.append(0)
-    va.append(1)
-    vo.append(opt)
-    vn.append("None")
-    vt.append(1)
-    va.append(0)
-    let res = en.len()
-    en.append("Result")
-    vo.append(res)
-    vn.append("Ok")
-    vt.append(0)
-    va.append(1)
-    vo.append(res)
-    vn.append("Err")
-    vt.append(1)
-    va.append(1)
+    // (Option before Result; Some/Ok = tag 0, None/Err = tag 1 — confirmed against stage-0). A program MAY
+    // redeclare `enum Option`/`Result` (a self-contained test often does); stage-0 then uses ITS OWN as the
+    // prelude enum rather than adding a duplicate, so skip a prelude enum the user already declared.
+    if cg_index_of(en, "Option") < 0 {
+        let opt = en.len()
+        en.append("Option")
+        vo.append(opt)
+        vn.append("Some")
+        vt.append(0)
+        va.append(1)
+        vo.append(opt)
+        vn.append("None")
+        vt.append(1)
+        va.append(0)
+    }
+    if cg_index_of(en, "Result") < 0 {
+        let res = en.len()
+        en.append("Result")
+        vo.append(res)
+        vn.append("Ok")
+        vt.append(0)
+        va.append(1)
+        vo.append(res)
+        vn.append("Err")
+        vt.append(1)
+        va.append(1)
+    }
     // The prelude payloads (Some/Ok/Err's `T`/`E`) are generic — left out of the field table (OFI-163).
     return EnumTable { e_names: en, v_owner: vo, v_name: vn, v_tag: vt, v_arity: va, vf_var: fv, vf_string: fs, vf_struct: fd, vf_array: fa, vf_elem: fe, vf_enum: fn2, vf_kind: fk }
 }
@@ -2988,6 +3037,10 @@ struct Chunk {
             self.slot_elem[self.slot_elem.len() - 1] = self.array_elem_type_code(elem_ty_of(p.ty[0]))
             return
         }
+        if ty_is_channel(p.ty[0]) {
+            self.declare_binding(p.name, 1, -1, false, true, false, false)   // channel param: owned, droppable handle
+            return
+        }
         if self.type_enum_id(p.ty[0]) >= 0 {
             self.declare_binding(p.name, 1, -1, false, true, false, false)   // enum param: owned, droppable
             return
@@ -3343,6 +3396,42 @@ struct Chunk {
                             self.emit(self.scalar_kind_of(args[0]))
                             return
                         }
+                        // Channel intrinsics lower to dedicated opcodes, NOT a CALL: channel(cap) -> CHANNEL_NEW,
+                        // send(ch, v) -> SEND, recv(ch)/try_recv(ch) -> RECV/TRY_RECV (which build an Option at
+                        // runtime, so they carry the Some enum-id + Some/None variant tags), close(ch) -> CLOSE.
+                        if name == "channel" && args.len() == 1 {
+                            self.gen_expr(args[0], line)
+                            self.cur_line = line
+                            self.emit(OP_CHANNEL_NEW)
+                            return
+                        }
+                        if name == "send" && args.len() == 2 {
+                            self.gen_expr(args[0], line)
+                            self.gen_expr(args[1], line)
+                            self.cur_line = line
+                            self.emit(OP_SEND)
+                            return
+                        }
+                        if name == "recv" && args.len() == 1 {
+                            self.gen_expr(args[0], line)
+                            self.cur_line = line
+                            self.emit(OP_RECV)
+                            self.emit_recv_option_operands()
+                            return
+                        }
+                        if name == "try_recv" && args.len() == 1 {
+                            self.gen_expr(args[0], line)
+                            self.cur_line = line
+                            self.emit(OP_TRY_RECV)
+                            self.emit_recv_option_operands()
+                            return
+                        }
+                        if name == "close" && args.len() == 1 {
+                            self.gen_expr(args[0], line)
+                            self.cur_line = line
+                            self.emit(OP_CLOSE)
+                            return
+                        }
                         let nid = native_id_for_name(name)
                         if nid >= 0 {
                             self.gen_builtin_call(nid, args, line)   // a built-in: CALL_NATIVE, not CALL
@@ -3440,9 +3529,54 @@ struct Chunk {
     }
 
 
+    // emit_recv_option_operands writes RECV/TRY_RECV's operands: the Some variant's enum id, then the Some and
+    // None tags (so the VM builds Option<T> — Some(v) on receive, None on a closed+drained channel).
+    fn emit_recv_option_operands(mut self) {
+        let si = cg_index_of(self.ev_name, "Some")
+        let ni = cg_index_of(self.ev_name, "None")
+        self.emit_idx(self.ev_owner[si])
+        self.emit_idx(self.ev_tag[si])
+        self.emit_idx(self.ev_tag[ni])
+    }
+
+
+    // gen_spawn lowers `spawn f(args)`: push each argument (the fiber TAKES OWNERSHIP, so args INCREF/move like
+    // a call's but with NO drop-mask — the spawner never drops them), then SPAWN <fn index> <total arg slots>.
+    fn gen_spawn(mut self, call: ps.Expr, line: int) {
+        match call {
+            case ECall(callee, args) {
+                let fi = self.resolve_call_fn_index(callee.value)
+                self.cur_line = line
+                var built = 0
+                var i = 0
+                loop {
+                    if i >= args.len() {
+                        break
+                    }
+                    built = built + self.gen_one_arg(args[i], line)
+                    i = i + 1
+                }
+                self.cur_line = line
+                self.emit(OP_SPAWN)
+                self.emit_idx(fi)
+                self.emit_idx(built)
+            }
+            case _ {
+            }
+        }
+    }
+
+
     fn gen_stmt(mut self, s: ps.Stmt) {
         match s {
             case SLet(is_var, name, ty, value) {
+                if is_channel_call(value.value) {
+                    // `let ch = channel(N)` lands a fresh owned channel HANDLE (refcounted) -> a single droppable
+                    // slot, dropped at every exit and INCREF'd when passed to a spawn/call.
+                    self.gen_expr(value.value, value.line)
+                    self.declare_binding(name, 1, -1, false, true, false, false)
+                    return
+                }
                 if self.is_enum_ctor(value.value) || self.call_returns_enum(value.value) {
                     // an enum is a heap/move value -> the owned binding is dropped at every exit (a variant
                     // construction or an enum-returning call both land a fresh owned enum)
@@ -3892,6 +4026,16 @@ struct Chunk {
                 self.cur_line = line
                 self.emit_unwind(self.loop_bases[self.loop_bases.len() - 1])   // release body locals first
                 self.emit_loop(self.cont_targets[self.cont_targets.len() - 1])
+            }
+            case SNursery(body, line) {
+                // open a task group, run the body (which spawns into it), then join at NURSERY_END.
+                self.cur_line = line
+                self.emit(OP_NURSERY_BEGIN)
+                self.gen_block(body)
+                self.emit(OP_NURSERY_END)
+            }
+            case SSpawn(call) {
+                self.gen_spawn(call.value, call.line)
             }
             case _ {
             }

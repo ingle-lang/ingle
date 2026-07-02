@@ -88,7 +88,7 @@ enum Stmt {
     SContinue(line: int)
     SMatch(value: Box<Expr>, cases: [Case])
     SSpawn(call: Box<Expr>)
-    SNursery(body: [Stmt])
+    SNursery(body: [Stmt], line: int)
     SBlock(body: [Stmt])
 }
 
@@ -462,7 +462,7 @@ fn p_stmt(s: Stmt, depth: int) {
             println("{pad}Spawn")
             p_expr(call.value, depth + 1)
         }
-        case SNursery(body) {
+        case SNursery(body, _) {
             println("{pad}Nursery")
             p_block(body, depth + 1)
         }
@@ -1543,13 +1543,12 @@ struct Parser {
             }
             case TMatch { return self.parse_match() }
             case TSpawn {
-                let _ = self.advance()
-                let ss = self.peek().line
-                return SSpawn(Box<Expr>{ value: self.parse_expr(), line: ss })
+                let kw = self.advance()
+                return SSpawn(Box<Expr>{ value: self.parse_expr(), line: kw.line })
             }
             case TNursery {
-                let _ = self.advance()
-                return SNursery(self.parse_block())
+                let kw = self.advance()
+                return SNursery(self.parse_block(), kw.line)
             }
             case TLBrace { return SBlock(self.parse_block()) }
             case _ {
