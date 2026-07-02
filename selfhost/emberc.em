@@ -1,21 +1,33 @@
-// selfhost/emberc.em — the UNIFIED self-hosted compiler driver: lex → parse → CHECK → codegen, run as
-// ONE program (the per-stage `*_dump.em` drivers each run only a slice for the differentials). It
+// selfhost/emberc.em — the UNIFIED self-hosted compiler: lex → parse → CHECK → codegen → SERIALIZE, run
+// as ONE program (the per-stage `*_dump.em` drivers each run only a slice for the differentials). It
 // type-checks the entry program — rejecting an ill-typed one with exit 65, exactly like stage-0's check
-// error — and otherwise emits each function's bytecode in stage-0's `--emit=bytecode` disassembly format.
+// error — then, given an output path, emits a RUNNABLE `.emb` bytecode container (docs/design/bytecode-
+// container.md); with no output path it prints stage-0's `--emit=bytecode` disassembly (the differential).
 //
-// This is the first standalone-bootstrap milestone: the self-hosted compiler as a single program. It both
-// runs on the stage-0 VM and compiles to a native self-built compiler BINARY:
+// This is the standalone-bootstrap milestone: the self-hosted compiler as a single program that produces
+// executable bytecode. It runs on the stage-0 VM and compiles to a native self-built compiler BINARY:
 //
-//   emberc --emit=run selfhost/emberc.em <file.em>          # run on the stage-0 VM
-//   emberc -o emberc-self selfhost/emberc.em && ./emberc-self <file.em>   # a self-built compiler binary
+//   emberc --emit=run selfhost/emberc.em <file.em>                    # disassembly, on the stage-0 VM
+//   emberc -o emberc-self selfhost/emberc.em                          # a self-built compiler binary
+//   ./emberc-self <file.em> <out.emb> && emberc --run-bytecode out.emb  # emit + run a bytecode image
 //
-// The checker is single-module and lenient about imports (mirrors check_dump.em); codegen is multi-module
-// over the merged declaration list (mirrors codegen_dump.em). Making the emitted bytecode RUNNABLE (a
-// serialization format + a stage-0 loader) is the next increment.
+// The checker is single-module and lenient about imports (mirrors check_dump.em); codegen + serialize run
+// multi-module over the merged declaration list. The emitted image runs identically to the source (it is
+// byte-identical to stage 0 wherever the self-hosted codegen is; generic-method monomorphization is the
+// one residual numbering difference — internally consistent, so the image still runs correctly).
 
 import "parser" as ps
 import "checker" as ck
 import "codegen" as cg
+import "serialize" as sz
+
+
+// Loaded is the merged program plus, parallel to it, the source module each declaration came from — so a
+// serialized function's source_file is its OWN module's path (multi-module byte-identity).
+struct Loaded {
+    decls: [ps.Decl]
+    sources: [string]
+}
 
 
 // last_slash returns the index of the final '/' in a path, or -1.
@@ -76,11 +88,12 @@ fn seen_has(seen: [string], p: string) -> bool {
 
 
 // load_modules parses the entry module and every module it transitively imports, BFS over imports, deduped
-// by resolved path, returning the merged declaration list ([entry decls, import1 decls, …]).
-fn load_modules(entry: string) -> [ps.Decl] {
+// by resolved path, returning the merged declaration list plus each declaration's source module.
+fn load_modules(entry: string) -> Loaded {
     var seen: [string] = []
     var queue: [string] = []
     var combined: [ps.Decl] = []
+    var sources: [string] = []
     seen.append(entry)
     queue.append(entry)
     var qi = 0
@@ -95,6 +108,7 @@ fn load_modules(entry: string) -> [ps.Decl] {
                 break
             }
             combined.append(decls[di])
+            sources.append(queue[qi])
             di = di + 1
         }
         var ii = 0
@@ -117,7 +131,7 @@ fn load_modules(entry: string) -> [ps.Decl] {
         }
         qi = qi + 1
     }
-    return combined
+    return Loaded { decls: combined, sources: sources }
 }
 
 
@@ -181,8 +195,15 @@ fn main() -> int {
         println("error: '{entry}' did not type-check")
         exit(65)
     } else {
-        // 2. CODEGEN every (merged) module → emit the bytecode.
-        emit_program(load_modules(entry))
+        // 2. CODEGEN every (merged) module. With an output path, write a RUNNABLE `.emb` container (the
+        //    unified self-hosted compiler emits executable bytecode, not just a disassembly); without one,
+        //    print the `--emit=bytecode` disassembly (the differential path, byte-identical to stage 0).
+        let loaded = load_modules(entry)
+        if argv.len() >= 2 {
+            sz.serialize_program(loaded.decls, loaded.sources, argv[1])
+        } else {
+            emit_program(loaded.decls)
+        }
     }
     // `exit` sets the real process code AND suppresses the runtime's `=> N` echo, so emberc-self's output
     // is exactly stage-0's `--emit=bytecode` and `$?` reflects success/failure (a usable compiler binary).
