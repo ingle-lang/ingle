@@ -135,6 +135,10 @@ struct FnDecl {
     ret: [Ty]                                       // [] = unit
     has_body: bool
     body: [Stmt]
+    reqs: [Expr]                                    // `requires` clause predicates (parallel to req_lines); NOT
+    req_lines: [int]                                // printed by ast_print, so M2 stays byte-identical
+    enss: [Expr]                                    // `ensures` clause predicates (parallel to ens_lines)
+    ens_lines: [int]
 }
 
 
@@ -1288,20 +1292,31 @@ struct Parser {
             ret.append(self.parse_type())
         }
         if with_body == false {
-            return FnDecl{ name: name, generics: generics, params: params, ret: ret, has_body: false, body: [] }
+            return FnDecl{ name: name, generics: generics, params: params, ret: ret, has_body: false, body: [], reqs: [], req_lines: [], enss: [], ens_lines: [] }
         }
-        // requires/ensures contract clauses (parsed to consume tokens, not stored/printed)
+        // requires/ensures contract clauses — captured into parallel predicate/line arrays (the line is the
+        // clause keyword's, for codegen attribution), but ast_print does NOT print them, so the M2
+        // differential is unaffected.
+        var reqs: [Expr] = []
+        var req_lines: [int] = []
+        var enss: [Expr] = []
+        var ens_lines: [int] = []
         loop {
             self.skip_newlines()
-            if self.at(TAG_REQUIRES) || self.at(TAG_ENSURES) {
-                let _ = self.advance()
-                let _ = self.parse_expr()
+            if self.at(TAG_REQUIRES) {
+                let kw = self.advance()
+                reqs.append(self.parse_expr())
+                req_lines.append(kw.line)
+            } else if self.at(TAG_ENSURES) {
+                let kw = self.advance()
+                enss.append(self.parse_expr())
+                ens_lines.append(kw.line)
             } else {
                 break
             }
         }
         let body = self.parse_block()
-        return FnDecl{ name: name, generics: generics, params: params, ret: ret, has_body: true, body: body }
+        return FnDecl{ name: name, generics: generics, params: params, ret: ret, has_body: true, body: body, reqs: reqs, req_lines: req_lines, enss: enss, ens_lines: ens_lines }
     }
 
 

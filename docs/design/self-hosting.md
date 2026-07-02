@@ -460,8 +460,16 @@ rebuilt without itself is a trap; keeping stage 0 is what avoids it.
   catch-all, the subject-`POP`/early-exit drop discipline), an `EnumTable` that injects the prelude
   `Option`/`Result` at the ids the parser can't see, and the enum move/drop discipline (enum lets/params are
   owned and dropped; passing an owned string/enum local to a call `INCREF`s) — verified byte-identical and
-  **Crucible-clean** (187/187, covering enum/match). **Remaining M4, ranked by the corpus differential:**
-  closures/generics (the `GET_LOCAL`/witness-passing bulk); contracts (`requires`/`ensures`);
+  **Crucible-clean** (187/187, covering enum/match). **Contracts are done**: `requires` checked at entry and
+  `ensures` re-checked at every return (explicit + implicit trailing), with `result` bound just above the
+  locals; each clause lowers to its predicate + `OP_CONTRACT_CHECK <midx>`, where `midx` is the string-pool
+  index of a synthesized violation message (`"precondition/postcondition failed in '<fn>' (…, line N)"`) built
+  byte-identically to stage-0. The parser captures the clauses as flat `[Expr]`/`[int]` parallel arrays (not
+  `Box<Expr>` — a boxed generic array element is a construct the self-hosted C-emit backend can't yet lower).
+  Guarded end-to-end (bytecode, C-emit, AND the `.emb` serializer) by `tests/selfhost/codegen/contracts.em`,
+  because the disassembly differential is blind to string pools (OFI-171) — only the Stage 8 byte-identity
+  catches a missing message. **Remaining M4, ranked by the corpus differential:**
+  closures/generics (the `GET_LOCAL`/witness-passing bulk);
   conversions (`CONV`); concurrency (channels/`SEND`); FFI (`CALL_C`); closures/generics; sized-int & float
   **arithmetic** + interpolation render-kind (one shared `scalar_type_code`, the "M4b" batch); the
   nested-inline flattening (deferred-low, 3 files); then the **VM fixed point** (the compiler compiles

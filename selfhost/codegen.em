@@ -64,6 +64,7 @@ let OP_STR_CHARS: int = 65
 let OP_STR_CHAR_COUNT: int = 66
 let OP_STR_BYTES: int = 67
 let OP_TO_STRING: int = 74
+let OP_CONTRACT_CHECK: int = 76
 let OP_DROP: int = 84
 let OP_INCREF: int = 85
 let OP_RETURN_STRUCT: int = 87
@@ -1256,6 +1257,10 @@ struct Chunk {
     slot_elem: [int]            // ...for an array binding: its ELEMENT type code (struct sid, -3 string, else -1)
     slot_kind: [int]            // ...for a SCALAR binding: its numeric/render kind (int=0, sized 1..7, f32=8, f64=9, bool=10)
     cur_return_span: int        // >0 if this function returns an all-scalar struct (RETURN_STRUCT span)
+    cur_fn_name: string         // this function's own name (for synthesizing contract-violation messages)
+    fn_ens_e: [ps.Expr]         // this function's `ensures` predicate exprs (checked at every return)
+    fn_ens_l: [int]             // ...parallel: each clause's source line (for codegen attribution)
+    ret_kind: int               // the return type's scalar kind (for the temporary `result` binding's slot_kind)
     st_names: [string]          // the struct table (cloned): struct id -> name
     st_fowner: [int]            // ...flat field table: owning struct id
     st_fname: [string]          // ...field name
@@ -2586,6 +2591,33 @@ struct Chunk {
     }
 
 
+    // emit_ensures checks this function's `ensures` clauses at a return point. The return value is already
+    // on the stack, occupying the slot just past the declared locals; bind `result` there so the predicate
+    // can read it (GET_LOCAL), evaluate each clause, and CONTRACT_CHECK <running index>. The binding is a
+    // borrow (the real value stays on the stack for RETURN) and is removed afterwards. Emitted BEFORE the
+    // exit drops and RETURN. (A struct/RETURN_STRUCT result's ensures is a later increment.)
+    fn emit_ensures(mut self) {
+        if self.fn_ens_e.len() == 0 {
+            return
+        }
+        let rs = self.locals.len()
+        self.declare_binding("result", 1, -1, false, false, false, false)
+        self.slot_kind[self.slot_kind.len() - 1] = self.ret_kind
+        var ei = 0
+        loop {
+            if ei >= self.fn_ens_e.len() {
+                break
+            }
+            self.gen_expr(self.fn_ens_e[ei], self.fn_ens_l[ei])
+            let msg = "postcondition failed in '{self.cur_fn_name}' (ensures, line {self.fn_ens_l[ei]})"
+            self.emit(OP_CONTRACT_CHECK)
+            self.emit_idx(self.add_string(msg))
+            ei = ei + 1
+        }
+        self.truncate_to(rs)
+    }
+
+
     // expr_is_string reports whether an expression has string type (so `+` lowers to CONCAT not ADD).
     // Step 1 sees string literals/interpolation and `+`-chains of them; locals/calls come with type tracking.
     fn expr_is_string(self, e: ps.Expr) -> bool {
@@ -3503,6 +3535,7 @@ struct Chunk {
                         self.emit_idx(self.cur_return_span)
                     } else {
                         self.gen_consume(value[0].value, value[0].line)  // incref a borrowed-string return
+                        self.emit_ensures()                              // check `ensures` with `result` on the stack
                         self.emit_drops()
                         self.emit(OP_RETURN)
                     }
@@ -3513,6 +3546,7 @@ struct Chunk {
                     let zidx = self.add_const_int(0)
                     self.emit(OP_CONST)
                     self.emit_idx(zidx)
+                    self.emit_ensures()
                     self.emit_drops()
                     self.emit(OP_RETURN)
                 }
@@ -4180,7 +4214,24 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
     var loopb: [int] = []
     var brkj: [int] = []
     var brkb: [int] = []
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval) }
+    var ret_k = 0
+    if f.ret.len() > 0 {
+        ret_k = ty_scalar_kind(f.ret[0])
+    }
+    // Copy the `ensures` predicate/line arrays into the Chunk (element-wise: passing f.enss directly would be
+    // a partial move of `f`). Each read is a plain array-index place-read (INCREF), not a move.
+    var ee: [ps.Expr] = []
+    var el: [int] = []
+    var ek = 0
+    loop {
+        if ek >= f.enss.len() {
+            break
+        }
+        ee.append(f.enss[ek])
+        el.append(f.ens_lines[ek])
+        ek = ek + 1
+    }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval) }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     if self_struct_id >= 0 {
         // a method receiver: `self` is a BOXED struct in slot 0 (so self.field is GET_FIELD even for an
@@ -4196,6 +4247,18 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
             ch.declare_param(f.params[p])
         }
         p = p + 1
+    }
+    // `requires` clauses are checked at entry: evaluate each predicate, then CONTRACT_CHECK <running index>.
+    var rq = 0
+    loop {
+        if rq >= f.reqs.len() {
+            break
+        }
+        ch.gen_expr(f.reqs[rq], f.req_lines[rq])
+        let rmsg = "precondition failed in '{f.name}' (requires, line {f.req_lines[rq]})"
+        ch.emit(OP_CONTRACT_CHECK)
+        ch.emit_idx(ch.add_string(rmsg))
+        rq = rq + 1
     }
     var i = 0
     loop {
@@ -4225,6 +4288,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         let idx = ch.add_const_int(0)
         ch.emit(OP_CONST)
         ch.emit_idx(idx)
+        ch.emit_ensures()
         ch.emit_drops()
         ch.emit(OP_RETURN)
     }
