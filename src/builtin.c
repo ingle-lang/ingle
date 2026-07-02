@@ -22,6 +22,7 @@ int native_id_for_name(const char *name) {
     if (strcmp(name, "from_char_code") == 0) return NATIVE_FROM_CHAR_CODE;
     if (strcmp(name, "byte_slice") == 0)     return NATIVE_BYTE_SLICE;
     if (strcmp(name, "from_bytes") == 0)     return NATIVE_FROM_BYTES;
+    if (strcmp(name, "float_bits") == 0)     return NATIVE_FLOAT_BITS;
     if (strcmp(name, "parse_float") == 0)    return NATIVE_PARSE_FLOAT;
     if (strcmp(name, "sqrt") == 0)           return NATIVE_SQRT;
     if (strcmp(name, "pow") == 0)            return NATIVE_POW;

@@ -1499,7 +1499,7 @@ static void emit_call(CgcGen *g, const Expr *e) {
         // band plus byte_slice (id 22) and from_bytes (id 23, past the witness-only HASH_ANY/VALUE_EQ
         // which are NOT runtime calls), so they're named explicitly rather than by widening the range.
         if ((nid >= NATIVE_READ_LINE && nid <= NATIVE_EXIT) || nid == NATIVE_BYTE_SLICE ||
-            nid == NATIVE_FROM_BYTES) {
+            nid == NATIVE_FROM_BYTES || nid == NATIVE_FLOAT_BITS) {
             fprintf(g->out, "em_native(&g_em, %d, %zu, ", nid, e->as.call.arg_count);
             if (e->as.call.arg_count == 0) {
                 fputs("0)", g->out);

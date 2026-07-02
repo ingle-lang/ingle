@@ -96,7 +96,7 @@ fn prim_type(name: string) -> int {
 // names used as functions (int(x), u8(x), ...). A call target matching one of these is never "undefined".
 fn builtin_names() -> [string] {
     return ["print", "println", "concat", "hash", "abs", "ceil", "floor", "round", "sqrt", "pow",
-        "parse_float", "char_code", "from_char_code", "byte_slice", "from_bytes", "read_line", "read_file", "write_file",
+        "parse_float", "char_code", "from_char_code", "byte_slice", "from_bytes", "float_bits", "read_line", "read_file", "write_file",
         "random", "args", "env", "exit", "channel", "send", "recv", "close", "to_int", "to_float",
         "draw_rect", "draw_text", "fill_circle", "fill_grad", "fill_round", "stroke_round", "shadow",
         "measure_text", "measure_misses", "text_line_height", "load_font", "set_font", "set_alpha",

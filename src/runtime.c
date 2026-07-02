@@ -2173,6 +2173,14 @@ Value em_native(EmberRt *ctx, int nid, int argc, const Value *args) {
             }
             return OBJ_VAL(out);
         }
+        case NATIVE_FLOAT_BITS: {
+            // float_bits(f) -> the f64's raw IEEE-754 bits reinterpreted as an i64 (bit-for-bit, no
+            // numeric conversion) — lets an Ember serializer write a float constant's 8 bytes.
+            double  d = argc >= 1 ? AS_FLOAT(args[0]) : 0.0;
+            int64_t bits;
+            memcpy(&bits, &d, sizeof bits);
+            return INT_VAL(bits);
+        }
 #ifndef EMBER_FREESTANDING
         case NATIVE_PARSE_FLOAT: {
             const char *str = argc >= 1 ? AS_CSTRING(args[0]) : "";

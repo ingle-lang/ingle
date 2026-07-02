@@ -11,6 +11,14 @@ import "parser" as ps
 import "serialize" as sz
 
 
+// Loaded is the merged program plus, parallel to it, the source file each declaration came from (so a
+// function's source_file is its OWN module's path, not the entry's — needed for multi-module byte-identity).
+struct Loaded {
+    decls: [ps.Decl]
+    sources: [string]
+}
+
+
 fn last_slash(s: string) -> int {
     let bs = s.bytes()
     var last = 0 - 1
@@ -64,10 +72,11 @@ fn seen_has(seen: [string], p: string) -> bool {
 }
 
 
-fn load_modules(entry: string) -> [ps.Decl] {
+fn load_modules(entry: string) -> Loaded {
     var seen: [string] = []
     var queue: [string] = []
     var combined: [ps.Decl] = []
+    var sources: [string] = []
     seen.append(entry)
     queue.append(entry)
     var qi = 0
@@ -82,6 +91,7 @@ fn load_modules(entry: string) -> [ps.Decl] {
                 break
             }
             combined.append(decls[di])
+            sources.append(queue[qi])
             di = di + 1
         }
         var ii = 0
@@ -104,7 +114,7 @@ fn load_modules(entry: string) -> [ps.Decl] {
         }
         qi = qi + 1
     }
-    return combined
+    return Loaded { decls: combined, sources: sources }
 }
 
 
@@ -116,8 +126,8 @@ fn main() -> int {
     }
     let entry = argv[0]
     let out = argv[1]
-    let decls = load_modules(entry)
-    sz.serialize_program(decls, entry, out)
+    let loaded = load_modules(entry)
+    sz.serialize_program(loaded.decls, loaded.sources, out)
     exit(0)
     return 0
 }

@@ -38,10 +38,14 @@ enum {
                               // s, BYTE-indexed (not code-point); the faithful inverse of .bytes()
                               // over a sub-range. Added for the self-hosted lexer (exact lexemes).
 
-    NATIVE_FROM_BYTES    = 23 // from_bytes(bytes) -> string — a string whose raw buffer is EXACTLY the
+    NATIVE_FROM_BYTES    = 23,// from_bytes(bytes) -> string — a string whose raw buffer is EXACTLY the
                               // [u8] array's bytes; the inverse of .bytes() with NO UTF-8 re-encoding
                               // (unlike from_char_code), so it can build ANY byte sequence. The Ember-
                               // side binary-serializer primitive (docs/design/bytecode-container.md).
+
+    NATIVE_FLOAT_BITS    = 24 // float_bits(f) -> int — the raw IEEE-754 bits of an f64 reinterpreted as an
+                              // i64 (bit-for-bit, no conversion). Lets an Ember serializer write a float
+                              // constant's 8 bytes to the .emb container (docs/design/bytecode-container.md).
 };
 
 // A witness method slot normally holds an Ember function-table index. For a built-in

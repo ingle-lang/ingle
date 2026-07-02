@@ -4563,6 +4563,16 @@ static SemType check_expr_inner(Checker *c, Expr *e) {
                     }
                     return TY_STRING;
                 }
+                if (nid == NATIVE_FLOAT_BITS) {
+                    if (argc != 1) {
+                        type_error(c, e->line, e->col, "float_bits takes one float argument");
+                    }
+                    SemType a0 = argc >= 1 ? check_expr(c, e->as.call.args[0]) : TY_ERROR;
+                    if (a0 != TY_ERROR && a0 != TY_FLOAT) {
+                        type_error(c, e->line, e->col, "float_bits requires a float");
+                    }
+                    return TY_INT;
+                }
                 if (nid == NATIVE_ARGS) {
                     if (argc != 0) {
                         type_error(c, e->line, e->col, "args takes no arguments");

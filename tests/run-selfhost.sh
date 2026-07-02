@@ -489,5 +489,33 @@ fi
 pass=$((pass + bcpass))
 fail=$((fail + bcfail))
 
+# ---- Stage 8: the self-hosted bytecode SERIALIZER (selfhost/serialize.em) ---------------------------
+# docs/design/bytecode-container.md, Phase 1c. The Ember serializer must produce a `.emb` container that is
+# BYTE-IDENTICAL to stage 0's `--emit=bytecode-bin` — the same self-hosting rigor as every other stage, now
+# for the container writer, so the SELF-HOSTED compiler can emit a runnable artifact identical to stage 0's.
+# Diffed over the codegen fixtures (the codegen-byte-identical set): where the self-hosted codegen matches
+# stage 0, the self-hosted serializer must reproduce stage 0's `.emb` exactly.
+SZA="${TMPDIR:-/tmp}/emberc_selfhost_sza_$$.emb"
+SZB="${TMPDIR:-/tmp}/emberc_selfhost_szb_$$.emb"
+szpass=0
+szfail=0
+for src in "$ROOT"/tests/selfhost/codegen/*.em; do
+    [ -e "$src" ] || continue
+    rel=${src#"$ROOT"/}
+    rm -f "$SZA" "$SZB"
+    (cd "$ROOT" && "$BIN" --emit=bytecode-bin -o "$SZA" "$rel" >/dev/null 2>&1) || continue
+    (cd "$ROOT" && "$BIN" --emit=run selfhost/serialize_dump.em "$rel" "$SZB" </dev/null >/dev/null 2>&1)
+    if cmp -s "$SZA" "$SZB"; then
+        szpass=$((szpass + 1))
+    else
+        echo "FAIL    self-hosted serializer .emb differs from stage-0 --emit=bytecode-bin on $rel"
+        szfail=$((szfail + 1))
+    fi
+done
+rm -f "$SZA" "$SZB"
+echo "selfhost serializer: $szpass/$((szpass + szfail)) .emb containers byte-identical to stage-0 --emit=bytecode-bin"
+pass=$((pass + szpass))
+fail=$((fail + szfail))
+
 echo "selfhost: passed $pass, failed $fail"
 [ "$fail" -eq 0 ]

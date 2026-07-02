@@ -164,7 +164,7 @@ struct Writer {
             }
             if ch.const_is_float[ci] {
                 self.emit_u8(1)
-                self.emit_u64(0)   // TODO(float): needs a float_bits builtin to reinterpret the f64
+                self.emit_u64(float_bits(ch.const_float[ci]))
             } else {
                 self.emit_u8(0)
                 self.emit_u64(ch.const_int[ci])
@@ -191,7 +191,12 @@ struct Writer {
     // at its natural width, an aggregate / erased generic parameter is boxed. The loader repacks offsets
     // from the kinds. (rc/resource/drop_fn, nested inline value-struct fields, and bounded-generic witness
     // fields are the next increments — the compiler's own structs use none of them.)
-    fn emit_one_struct(mut self, name: string, fields: [ps.Field]) {
+    // emit_one_struct writes one struct entry. For a monomorphized generic instance, `gparams`/`gargs` are
+    // the base's type-parameter names and this instance's concrete type arguments (empty for a declared
+    // struct); a field whose type IS a type parameter takes the substituted argument's kind (so Box<int>'s
+    // `value` packs as I64, not boxed).
+    fn emit_one_struct(mut self, name: string, fields: [ps.Field], structs: cg.StructTable,
+                       gparams: [string], gargs: [string]) {
         self.emit_str(name)
         self.emit_u8(0)             // flags: is_rc | is_resource<<1 (TODO)
         self.emit_svarint(0 - 1)    // drop_fn (TODO)
@@ -201,8 +206,24 @@ struct Writer {
             if fi >= fields.len() {
                 break
             }
-            self.emit_uvarint(cg.array_elem_kind_from_ty(fields[fi].ty))
-            self.emit_svarint(0 - 1)   // field_struct: -1 unless AEK_INLINE_STRUCT (TODO)
+            let ty = fields[fi].ty
+            let gi = cg.cg_index_of(gparams, ty_name_of(ty))
+            if gi >= 0 && gi < gargs.len() {
+                // A type-parameter field in an instance: pack at the concrete argument's width.
+                self.emit_uvarint(aek_of_typename(gargs[gi]))
+                self.emit_svarint(0 - 1)
+            } else {
+                let nsid = cg.ty_struct_id(ty, structs.names)
+                if nsid >= 0 && struct_all_scalar_st(structs, nsid) {
+                    // A nested all-scalar struct field is packed INLINE (kind AEK_INLINE_STRUCT, the nested
+                    // struct id in field_struct) — mirrors stage 0's nested_inline_sid.
+                    self.emit_uvarint(12)          // AEK_INLINE_STRUCT
+                    self.emit_svarint(nsid)
+                } else {
+                    self.emit_uvarint(cg.array_elem_kind_from_ty(ty))
+                    self.emit_svarint(0 - 1)
+                }
+            }
             self.emit_optstr(fields[fi].name)
             fi = fi + 1
         }
@@ -213,7 +234,7 @@ struct Writer {
     // the monomorphized generic-struct instances (Box<Expr>, …) — each with its BASE struct's name + fields
     // (an erased generic-parameter field maps to boxed through the same kind map, matching stage 0's
     // append-model layout for a Box<Aggregate>).
-    fn emit_struct_table(mut self, decls: [ps.Decl], instances: [string]) {
+    fn emit_struct_table(mut self, decls: [ps.Decl], instances: [string], structs: cg.StructTable) {
         var i = 0
         loop {
             if i >= decls.len() {
@@ -221,7 +242,8 @@ struct Writer {
             }
             match decls[i] {
                 case DStruct(name, generics, impls, fields, methods, kind) {
-                    self.emit_one_struct(name, fields)
+                    let none: [string] = []
+                    self.emit_one_struct(name, fields, structs, none, none)
                 }
                 case _ {
                 }
@@ -242,7 +264,17 @@ struct Writer {
                 match decls[j] {
                     case DStruct(name, generics, impls, fields, methods, kind) {
                         if name == base {
-                            self.emit_one_struct(name, fields)
+                            var gnames: [string] = []
+                            var gk = 0
+                            loop {
+                                if gk >= generics.len() {
+                                    break
+                                }
+                                gnames.append(generics[gk].name)
+                                gk = gk + 1
+                            }
+                            let gargs = type_args(instances[ii])
+                            self.emit_one_struct(name, fields, structs, gnames, gargs)
                         }
                     }
                     case _ {
@@ -253,6 +285,27 @@ struct Writer {
             ii = ii + 1
         }
     }
+}
+
+
+// struct_all_scalar_st reports whether every field of struct `sid` is a packed scalar (the StructTable
+// counterpart of codegen's Chunk.struct_all_scalar) — the test for an inline-able nested value struct.
+fn struct_all_scalar_st(structs: cg.StructTable, sid: int) -> bool {
+    var seen = false
+    var i = 0
+    loop {
+        if i >= structs.f_owner.len() {
+            break
+        }
+        if structs.f_owner[i] == sid {
+            seen = true
+            if structs.f_scalar[i] == false {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    return seen
 }
 
 
@@ -270,6 +323,94 @@ fn base_name(key: string) -> string {
         i = i + 1
     }
     return key
+}
+
+
+// ty_name_of returns the bare name of a TyName type (a plain identifier such as a type parameter `T` or
+// `int`), or "" for any other type form (array, generic application, …).
+fn ty_name_of(ty: ps.Ty) -> string {
+    match ty {
+        case TyName(q, n) {
+            return n
+        }
+        case _ {
+            return ""
+        }
+    }
+}
+
+
+// aek_of_typename maps a scalar type NAME to its ArrayElemKind (the string counterpart of codegen's
+// array_elem_kind_from_ty), used to pack a monomorphized type argument; a non-scalar (string/struct/enum
+// or another generic) is boxed.
+fn aek_of_typename(name: string) -> int {
+    if name == "i8" {
+        return 1
+    }
+    if name == "i16" {
+        return 2
+    }
+    if name == "i32" {
+        return 3
+    }
+    if name == "int" || name == "i64" {
+        return 4
+    }
+    if name == "u8" {
+        return 5
+    }
+    if name == "u16" {
+        return 6
+    }
+    if name == "u32" {
+        return 7
+    }
+    if name == "u64" {
+        return 8
+    }
+    if name == "f32" {
+        return 9
+    }
+    if name == "float" || name == "f64" {
+        return 10
+    }
+    if name == "bool" {
+        return 11
+    }
+    return 0
+}
+
+
+// type_args splits a monomorphized-instance key's type arguments ("Box<int>" -> ["int"], "Map<K,V>" ->
+// ["K","V"], "Box<Map<K,V>>" -> ["Map<K,V>"]) — top-level commas only, tracking `<`/`>` nesting depth.
+fn type_args(key: string) -> [string] {
+    var out: [string] = []
+    let bs = key.bytes()
+    var depth = 0
+    var argstart = 0
+    var i = 0
+    loop {
+        if i >= bs.len() {
+            break
+        }
+        let c = int(bs[i])
+        if c == 60 {              // '<'
+            depth = depth + 1
+            if depth == 1 {
+                argstart = i + 1
+            }
+        } else if c == 62 {       // '>'
+            if depth == 1 {
+                out.append(byte_slice(key, argstart, i))
+            }
+            depth = depth - 1
+        } else if c == 44 && depth == 1 {   // ',' at the top level
+            out.append(byte_slice(key, argstart, i))
+            argstart = i + 1
+        }
+        i = i + 1
+    }
+    return out
 }
 
 
@@ -327,10 +468,11 @@ fn count_functions(decls: [ps.Decl]) -> int {
 
 
 // serialize_program builds the whole `.emb` container for `decls` (the merged multi-module declaration
-// list) and writes it to `out_path`. `src_path` is stamped as each function's source_file (single-module
-// for now). It writes the file directly rather than returning the byte array, because returning a struct
-// FIELD is a partial move (unsupported); from_bytes borrows the field, so no move occurs.
-fn serialize_program(decls: [ps.Decl], src_path: string, out_path: string) {
+// list) and writes it to `out_path`. `sources[i]` is the module path declaration `decls[i]` came from, so
+// each function's source_file is its OWN module (multi-module byte-identity). It writes the file directly
+// rather than returning the byte array, because returning a struct FIELD is a partial move (unsupported);
+// from_bytes borrows the field, so no move occurs.
+fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
     let fn_names = cg.build_fn_names(decls)
     let structs = cg.build_structs(decls)
     let enums = cg.build_enums(decls, structs)
@@ -371,7 +513,7 @@ fn serialize_program(decls: [ps.Decl], src_path: string, out_path: string) {
     w.emit_uvarint(variant_count)
 
     // Struct-type table.
-    w.emit_struct_table(decls, instances)
+    w.emit_struct_table(decls, instances, structs)
 
     // Enum-variant table.
     var vi = 0
@@ -402,7 +544,7 @@ fn serialize_program(decls: [ps.Decl], src_path: string, out_path: string) {
                     }
                     if methods[mi].has_body {
                         w.emit_str(name + "." + methods[mi].name)
-                        w.emit_optstr(src_path)
+                        w.emit_optstr(sources[i])
                         w.emit_uvarint(methods[mi].params.len())
                         let ch = cg.compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid)
                         w.emit_chunk(ch)
@@ -414,7 +556,7 @@ fn serialize_program(decls: [ps.Decl], src_path: string, out_path: string) {
             case DFn(f) {
                 if f.has_body {
                     w.emit_str(f.name)
-                    w.emit_optstr(src_path)
+                    w.emit_optstr(sources[i])
                     w.emit_uvarint(f.params.len())
                     let ch = cg.compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1)
                     w.emit_chunk(ch)
