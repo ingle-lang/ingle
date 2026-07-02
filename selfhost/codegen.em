@@ -3280,6 +3280,12 @@ struct Chunk {
                         self.gen_expr(value.value, value.line)       // NEW_ARRAY -> one owned array slot
                     }
                     self.declare_binding(name, 1, -1, false, true, false, true)
+                    if ty.len() > 0 {
+                        // Record the element type from the `[T]` annotation so a later `arr[i]` read knows
+                        // its element kind (e.g. `var q: [string] = []` -> `q[i]` is a refcounted place read
+                        // that INCREFs when consumed). An empty literal has no element to infer it from.
+                        self.slot_elem[self.slot_elem.len() - 1] = self.array_elem_type_code(elem_ty_of(ty[0]))
+                    }
                 } else {
                     // An initialiser that is a same-file call to a function returning an owned type lands an
                     // owned-droppable value (array/struct/string) the checker would track; re-derive it here.

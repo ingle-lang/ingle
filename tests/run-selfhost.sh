@@ -517,5 +517,30 @@ echo "selfhost serializer: $szpass/$((szpass + szfail)) .emb containers byte-ide
 pass=$((pass + szpass))
 fail=$((fail + szfail))
 
+# ---- The CAPSTONE: the self-hosted compiler serializes ITSELF to a RUNNABLE bytecode image ----------
+# The self-hosted serializer emits a `.emb` for the WHOLE self-hosted compiler (emberc.em), and running
+# that image (`--run-bytecode`) as a compiler produces output IDENTICAL to running emberc.em from source
+# — the Phase 1 payoff (a working bytecode image of the compiler, produced by the compiler itself). It is
+# not yet byte-identical to stage 0 on emberc.em (generic-method monomorphization numbers the merged
+# function table differently), but the image is internally consistent and runs correctly. A behavioural
+# check, so it complements the byte-identity diff above.
+CAPEMB="${TMPDIR:-/tmp}/emberc_selfhost_cap_$$.emb"
+capok=1
+if (cd "$ROOT" && "$BIN" --emit=run selfhost/serialize_dump.em selfhost/emberc.em "$CAPEMB" </dev/null >/dev/null 2>&1); then
+    cap_src=$(cd "$ROOT" && "$BIN" --emit=run selfhost/emberc.em std/string.em </dev/null 2>/dev/null)
+    cap_emb=$(cd "$ROOT" && "$BIN" --run-bytecode "$CAPEMB" std/string.em </dev/null 2>/dev/null)
+    [ "$cap_src" = "$cap_emb" ] || capok=0
+else
+    capok=0
+fi
+rm -f "$CAPEMB"
+if [ "$capok" -eq 1 ]; then
+    echo "selfhost serializer: 🎉 the self-hosted compiler serializes ITSELF to a runnable .emb that compiles identically to emberc.em from source"
+    pass=$((pass + 1))
+else
+    echo "FAIL    the self-hosted emberc.em .emb does not run identically to emberc.em from source"
+    fail=$((fail + 1))
+fi
+
 echo "selfhost: passed $pass, failed $fail"
 [ "$fail" -eq 0 ]
