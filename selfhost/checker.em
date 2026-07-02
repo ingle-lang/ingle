@@ -1964,7 +1964,7 @@ struct Checker {
     // diagnostic rather than a wrong one.
     fn check_expr(mut self, e: ps.Expr) -> int {
         match e {
-            case EInt(v) {
+            case EInt(v, _) {
                 return TY_INT
             }
             case EFloat(v) {
@@ -2444,7 +2444,7 @@ fn method_decl_index(methods: [ps.FnDecl], name: string) -> int {
 // src/check.c:is_const_literal.
 fn is_const_literal(e: ps.Expr) -> bool {
     match e {
-        case EInt(v) {
+        case EInt(v, _) {
             return true
         }
         case EFloat(v) {
@@ -2459,7 +2459,7 @@ fn is_const_literal(e: ps.Expr) -> bool {
         case EUnary(op, operand) {
             if ps.unop_id(op) == 1 {
                 match operand.value {
-                    case EInt(v) {
+                    case EInt(v, _) {
                         return true
                     }
                     case EFloat(v) {
@@ -2481,7 +2481,7 @@ fn is_const_literal(e: ps.Expr) -> bool {
 
 fn is_int_literal(e: ps.Expr) -> bool {
     match e {
-        case EInt(v) {
+        case EInt(v, _) {
             return true
         }
         case _ {

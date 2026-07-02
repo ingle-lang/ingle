@@ -1517,7 +1517,7 @@ fn build_const_tab(decls: [ps.Decl]) -> ConstTab {
         match decls[i] {
             case DLet(is_var, name, ty, value) {
                 match value.value {
-                    case EInt(v) {
+                    case EInt(v, _) {
                         names.append(name)
                         vals.append(v)
                     }
@@ -2070,7 +2070,7 @@ struct CgcGen {
     // `INT_VAL((int64_t)vN)`; a Value binding/param is its C name as-is.
     fn emit_expr(mut self, e: ps.Expr) -> string {
         match e {
-            case EInt(v) {
+            case EInt(v, _) {
                 return "INT_VAL({v}LL)"
             }
             case EBool(b) {
@@ -2533,6 +2533,9 @@ struct CgcGen {
         match e {
             case EFloat(v) {
                 return 9
+            }
+            case EInt(v, kind) {
+                return kind
             }
             case EBool(b) {
                 return 10
@@ -3104,8 +3107,8 @@ struct CgcGen {
     // subset), or -1 if it is not a known scalar (a string/struct/Value). Drives the `let` storage choice.
     fn scalar_kind_of(self, e: ps.Expr) -> int {
         match e {
-            case EInt(v) {
-                return 0
+            case EInt(v, kind) {
+                return kind
             }
             case EBinary(op, l, r) {
                 let bid = ps.binop_id(op)

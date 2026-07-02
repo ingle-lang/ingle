@@ -41,7 +41,7 @@ struct StrPart {
 
 
 enum Expr {
-    EInt(v: int)
+    EInt(v: int, kind: int)
     EFloat(v: float)
     EBool(v: bool)
     EStr(parts: [StrPart])
@@ -219,7 +219,7 @@ fn ty_str(t: Ty) -> string {
 fn p_expr(e: Expr, depth: int) {
     let pad = ind(depth)
     match e {
-        case EInt(v) {
+        case EInt(v, _) {
             println("{pad}Int {v}")
         }
         case EFloat(v) {
@@ -695,6 +695,68 @@ fn parse_int_lit(text: string) -> int {
         i = i + 1
     }
     return v
+}
+
+
+// int_suffix_kind maps an integer lexeme's `iN`/`uN` width suffix to the checker's numeric kind (int/i64=0,
+// i8/i16/i32=1/2/3, u8/u16/u32/u64=4/5/6/7). A suffixless literal (or `i64`) is 0. This is the width the
+// self-hosted codegen needs for a sized literal's WRAP_*/binary num_kind and TO_STRING render kind — the
+// parser drops the suffix from the VALUE (parse_int_lit) but the KIND must survive on the EInt node.
+fn int_suffix_kind(text: string) -> int {
+    let bs = text.bytes()
+    var i = 0
+    loop {
+        if i >= bs.len() {
+            break
+        }
+        let c = int(bs[i])
+        if c < 48 || c > 57 {
+            break
+        }
+        i = i + 1
+    }
+    if i >= bs.len() {
+        return 0
+    }
+    let sign = int(bs[i])                           // 'i' = 105, 'u' = 117
+    i = i + 1
+    var w = 0
+    loop {
+        if i >= bs.len() {
+            break
+        }
+        let c = int(bs[i])
+        if c < 48 || c > 57 {
+            break
+        }
+        w = w * 10 + (c - 48)
+        i = i + 1
+    }
+    if sign == 117 {
+        if w == 8 {
+            return 4
+        }
+        if w == 16 {
+            return 5
+        }
+        if w == 32 {
+            return 6
+        }
+        if w == 64 {
+            return 7
+        }
+        return 0
+    }
+    if w == 8 {
+        return 1
+    }
+    if w == 16 {
+        return 2
+    }
+    if w == 32 {
+        return 3
+    }
+    return 0
 }
 
 
@@ -1749,7 +1811,7 @@ struct Parser {
         match self.peek_kind() {
             case TInt {
                 let t = self.advance()
-                return EInt(parse_int_lit(t.text))
+                return EInt(parse_int_lit(t.text), int_suffix_kind(t.text))
             }
             case TFloat {
                 let t = self.advance()

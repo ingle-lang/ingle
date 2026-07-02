@@ -599,7 +599,7 @@ fn build_globals(decls: [ps.Decl]) -> GlobalConsts {
             case DLet(is_var, name, ty, value) {
                 names.append(name)
                 match value.value {
-                    case EInt(v) {
+                    case EInt(v, _) {
                         kind.append(0)
                         iv.append(v)
                         sv.append("")
@@ -1247,6 +1247,7 @@ struct Chunk {
     fn_ret_elem: [int]          // ...parallel: for an array-returning fn #i, its element type code, else -1
     fn_ret_sid: [int]           // ...parallel: struct id fn #i returns (else -1)
     fn_ret_enum: [bool]         // ...parallel: does fn #i return an enum?
+    fn_ret_kind: [int]          // ...parallel: fn #i's return scalar kind (int=0, sized 1..7, f32/f64=8/9, bool=10)
     cont_targets: [int]         // loop-context stack: each enclosing loop's continue target (its start)
     loop_bases: [int]           // ...and each loop's local count at body entry (break/continue unwind to it)
     break_jumps: [int]          // flat list of pending break-JUMP operand positions (per-loop slice)
@@ -2684,8 +2685,8 @@ struct Chunk {
             case EFloat(v) {
                 return 9
             }
-            case EInt(v) {
-                return 0
+            case EInt(v, kind) {
+                return kind
             }
             case EIdent(name) {
                 let slot = self.resolve_slot(name)
@@ -2700,6 +2701,28 @@ struct Chunk {
             }
             case EBinary(op, l, r) {
                 return self.scalar_kind_of(l.value)  // arithmetic preserves its operand kind
+            }
+            case ECall(callee, args) {
+                // a wrapping intrinsic preserves its first operand's width; any other call carries its
+                // declared return width (bool return -> 0 for a num_kind operand).
+                match callee.value {
+                    case EIdent(name) {
+                        if wrapping_opcode(name) >= 0 && args.len() > 0 {
+                            return self.scalar_kind_of(args[0])
+                        }
+                    }
+                    case _ {
+                    }
+                }
+                let idx = self.resolve_call_fn_index(callee.value)
+                if idx >= 0 {
+                    let k = self.fn_ret_kind[idx]
+                    if k == 10 {
+                        return 0
+                    }
+                    return k
+                }
+                return 0
             }
             case EGet(object, name) {
                 // a scalar field read `self.x` carries the field's width (a float field -> f64=9)
@@ -2727,6 +2750,9 @@ struct Chunk {
         match e {
             case EFloat(v) {
                 return 9
+            }
+            case EInt(v, kind) {
+                return kind
             }
             case EBool(v) {
                 return 10
@@ -2772,6 +2798,24 @@ struct Chunk {
             }
             case EUnary(op, operand) {
                 return self.render_kind_of(operand.value)
+            }
+            case ECall(callee, args) {
+                // a wrapping intrinsic hole `{wrapping_add(a, b)}` renders at its operand width; any other
+                // call renders at its declared return width (`{fnv1a(s)}` where fnv1a -> u32 renders as 6).
+                match callee.value {
+                    case EIdent(name) {
+                        if wrapping_opcode(name) >= 0 && args.len() > 0 {
+                            return self.render_kind_of(args[0])
+                        }
+                    }
+                    case _ {
+                    }
+                }
+                let idx = self.resolve_call_fn_index(callee.value)
+                if idx >= 0 {
+                    return self.fn_ret_kind[idx]
+                }
+                return 0
             }
             case _ {
                 return 0
@@ -3151,7 +3195,7 @@ struct Chunk {
     fn gen_expr(mut self, e: ps.Expr, line: int) {
         self.cur_line = line
         match e {
-            case EInt(v) {
+            case EInt(v, _) {
                 let idx = self.add_const_int(v)
                 self.emit(OP_CONST)
                 self.emit_idx(idx)
@@ -4097,6 +4141,18 @@ struct FnRets {
     sid: [int]
     enm: [bool]
     elem: [int]
+    kind: [int]
+}
+
+
+// ret_scalar_kind returns the render/num kind (int=0, sized 1..7, f32=8, f64=9, bool=10) of a `[Ty]` return
+// (unit = 0), so an interpolation hole `{f(x)}` (or a wrapping/binary operand) that is a call renders/widths
+// at the function's declared return width.
+fn ret_scalar_kind(ret: [ps.Ty]) -> int {
+    if ret.len() > 0 {
+        return ty_scalar_kind(ret[0])
+    }
+    return 0
 }
 
 
@@ -4106,6 +4162,7 @@ fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string]) -
     var rsid: [int] = []
     var ren: [bool] = []
     var rel: [int] = []
+    var rk: [int] = []
     var i = 0
     loop {
         if i >= decls.len() {
@@ -4124,6 +4181,7 @@ fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string]) -
                     rsid.append(r.sid)
                     ren.append(r.enm)
                     rel.append(r.elem)
+                    rk.append(ret_scalar_kind(methods[mi].ret))
                     mi = mi + 1
                 }
             }
@@ -4134,13 +4192,14 @@ fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string]) -
                 rsid.append(r.sid)
                 ren.append(r.enm)
                 rel.append(r.elem)
+                rk.append(ret_scalar_kind(f.ret))
             }
             case _ {
             }
         }
         i = i + 1
     }
-    return FnRets { str: rs, arr: ra, sid: rsid, enm: ren, elem: rel }
+    return FnRets { str: rs, arr: ra, sid: rsid, enm: ren, elem: rel, kind: rk }
 }
 
 
@@ -4231,7 +4290,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval) }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval) }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     if self_struct_id >= 0 {
         // a method receiver: `self` is a BOXED struct in slot 0 (so self.field is GET_FIELD even for an
