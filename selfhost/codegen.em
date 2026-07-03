@@ -4814,9 +4814,12 @@ struct Chunk {
     // are kept below the arg region and passed as a borrow alias via PICK, then DROP_UNDER'd from under the
     // single result — the builtin analogue of the OFI-027 call drop discipline (mirrors src/codegen.c:1017).
     fn gen_builtin_call(mut self, nid: int, args: [ps.Expr], line: int) {
-        // Only print/println/read_file/write_file (nids 0/1/3/4) require the caller to drop owning-temp
-        // object args; every other native releases its args internally (check.c:4361), so no PICK dance.
-        let does_mask = nid == 0 || nid == 1 || nid == 3 || nid == 4
+        // print/println/read_file/write_file (nids 0/1/3/4) AND every GRAPHICS native (id >= 100) require the
+        // caller to drop owning-temp object args — those natives pop their args without releasing them (a native
+        // adopts nothing), so a fresh string (`measure_text(str.cp_prefix(s,i), …)`, `draw_text(a+b, …)`) leaks
+        // one per call. A scalar-arg native (most gfx primitives) never has an owning temp, so mask stays 0. The
+        // remaining natives (char_code/parse_float/concat/…) release their args internally (check.c). (OFI-142)
+        let does_mask = nid == 0 || nid == 1 || nid == 3 || nid == 4 || nid >= 100
         var masked: [bool] = []
         var keep = 0
         var i = 0
