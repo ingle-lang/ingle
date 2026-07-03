@@ -482,8 +482,26 @@ rebuilt without itself is a trap; keeping stage 0 is what avoids it.
   `move Ptr` arg is move-consumed (slot zeroed, via a threaded `ext_pquals` per-param-qual table). A `Ptr`
   return binds a linear non-droppable slot; an extern's declared return kind (`ext_kinds`) drives its call's
   render/num width (i32 vs i64 are both `'i'` in the ABI). `to_int`/`to_float`→`FLOAT_TO_INT`/`INT_TO_FLOAT`.
-  Fixtures `ffi.em` (libm + string) + `ffi_ptr.em` (fopen/fwrite/fclose + move). **Remaining M4, ranked by the
-  corpus differential:** closures/generics (the `GET_LOCAL`/witness-passing bulk, incl. `spawn` of a generic);
+  Fixtures `ffi.em` (libm + string) + `ffi_ptr.em` (fopen/fwrite/fclose + move). **Closures are done**: free-var
+  capture analysis + lambda lifting (a `LambdaSpec` per encountered `|…|`, compiled after declared fns via a
+  two-pass driver), string-param inference, `MAKE_CLOSURE`/`CALL_CLOSURE`; `fn_values.em` + `lambdas.em`
+  byte-identical. **Generic FUNCTIONS — monomorphization, Tiers 1/1b/1.5 done**: every generic free-fn call
+  lowers to a per-instantiation fn-table slot (numbered after declared fns AND lifted lambdas, `inst_base +`
+  first-use index), keyed by `build_fn_instances` in stage-0's inference order. **Tier 1** (`generic_copy.em`,
+  Copy/borrow-T): an erased-T param is a 16-byte boxed Value, INCREF is a scalar no-op, and a Copy/borrow param
+  BORROWS an owning-temp object arg (kept+PICK+DROP_UNDER, like an extern) — `gen_user_call`'s `mask_obj` flag.
+  **Tier 1b** (`generic_fn.em`, move-T): a `move x: T` param (qual 2) is consuming — `return x` MOVES (zeroes the
+  slot), the slot is declared boxed+droppable, and arg-masking is PER-PARAM-QUAL (a `move` arg is NOT masked; a
+  Copy/borrow arg is). **Tier 1.5** (`generic_fn_infer.em`): a RETURN-type-inferred call with no value arg
+  (`let n: Option<int> = none_of()`) keys its instance off the `let` annotation's type-arg — a consume-once
+  `expected_key` threaded from the SLet into the `ECall` dispatch (`mono_ty_key`), registered pre-order in the
+  pre-pass so the instance NUMBERING matches stage-0. Corpus **232/595** byte-identical. **Remaining generics
+  (large, ranked):** Tier 2 arrays/HOFs (`map_array_value.em`, `std/list` map/filter/reduce — array-element
+  type keys + `own_into_slot` element cloning through erased bodies + closure-erasing through HOFs); Tier 3
+  **bounded witnesses** (`bounded_generic.em`, `hash_eq_bound.em`, … — a whole witness-dictionary subsystem:
+  `NEW_ENUM` witness dicts pushed as hidden leading args + `GET_FIELD` + `CALL_INDIRECT` dispatch, ZERO
+  machinery in the self-hosted codegen today — the real cliff). **Remaining M4 (non-generic), ranked by the
+  corpus differential:**
   the long tail of per-file INCREF/offset off-by-ones (incl. OFI-165 cross-module string-literal args) +
   OFI-163 generic Option/Result payload bindings; struct-by-value extern returns (`cvec2_*`, OFI-173's
   sibling — `op = rsid`, 1 file); the nested-inline flattening (deferred-low, 3 files). The VM + C-emit **fixed

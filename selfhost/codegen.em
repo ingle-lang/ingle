@@ -1105,6 +1105,47 @@ fn mono_arg_key(e: ps.Expr) -> string {
 }
 
 
+// mono_ty_key derives a monomorphization key from an EXPECTED type — the annotation on a `let x: Option<int> =
+// none_of()`. A return-type-inferred generic call (arity 0, or one whose type param appears only in the result)
+// has no value argument to key off, so the binding of its sole type param comes from the expected type's first
+// type-argument (Option<int> -> "int", Box<str> -> "str"). Falls back to the type's own name / "k0".
+fn mono_ty_key(t: ps.Ty) -> string {
+    match t {
+        case TyGeneric(qual, name, args) {
+            if args.len() > 0 {
+                return ty_key_name(args[0])
+            }
+            return name
+        }
+        case TyName(qual, name) {
+            return name
+        }
+        case _ {
+            return "k0"
+        }
+    }
+}
+
+
+// ty_key_name renders a type as a stable one-token mono key (its head name; an array becomes "[elem]").
+fn ty_key_name(t: ps.Ty) -> string {
+    match t {
+        case TyName(qual, name) {
+            return name
+        }
+        case TyGeneric(qual, name, args) {
+            return name
+        }
+        case TyArray(elem) {
+            return "[{ty_key_name(elem.value)}]"
+        }
+        case _ {
+            return "k0"
+        }
+    }
+}
+
+
 // GenFns lists every GENERIC free function: `names` (a call to one lowers to a monomorphized instance) and
 // the parallel `pquals` (per-param qual string '0'/'1'/'2'). A '2' (move) param takes OWNERSHIP of an
 // owning-temp arg (not masked); a '0'/'1' (Copy/borrow) erased-T param borrows it (kept + PICK + DROP_UNDER).
@@ -1256,6 +1297,26 @@ struct FnInstColl {
     fn walk_stmt(mut self, s: ps.Stmt) {
         match s {
             case SLet(v, n, ty, value) {
+                // A RETURN-type-inferred generic call — `let x: Option<int> = none_of()` — has no value arg
+                // to key off, so its instance is registered from the annotation's type-arg (pre-order, before
+                // the value's own nested calls), exactly where stage-0's inference monomorphizes it.
+                if ty.len() > 0 {
+                    match value.value {
+                        case ECall(callee, cargs) {
+                            match callee.value {
+                                case EIdent(name) {
+                                    if cargs.len() == 0 && cg_index_of(self.generic_fns, name) >= 0 {
+                                        self.register(name, mono_ty_key(ty[0]))
+                                    }
+                                }
+                                case _ {
+                                }
+                            }
+                        }
+                        case _ {
+                        }
+                    }
+                }
                 self.walk_expr(value.value)
             }
             case SReturn(value, line) {
@@ -1776,6 +1837,8 @@ struct Chunk {
     gc_sval: [string]
     gc_bval: [bool]
     gc_fval: [float]
+    expected_key: string        // consume-once: the annotation-derived mono key ("int") for a RETURN-type-inferred
+                                //   generic call in `let x: Option<int> = none_of()` — no value arg gives the key
 
 
     // variant_field_index returns the flat payload-field-table index of field position `b` of flat-variant
@@ -4143,8 +4206,16 @@ struct Chunk {
                                     if ix >= 0 {
                                         fi = self.inst_base + ix
                                     }
+                                } else if self.expected_key.len() > 0 {
+                                    // a RETURN-type-inferred generic call (`none_of()`): its type param binds
+                                    // from the enclosing `let`'s annotation, threaded in as expected_key.
+                                    let ix = cg_index_of(self.fn_inst_keys, "{name}<{self.expected_key}>")
+                                    if ix >= 0 {
+                                        fi = self.inst_base + ix
+                                    }
                                 }
                             }
+                            self.expected_key = ""   // consume-once: the annotation applies only to this call
                             self.gen_user_call(fi, args, line, is_gen, pq)
                         }
                     }
@@ -4341,8 +4412,14 @@ struct Chunk {
                 }
                 if self.is_enum_ctor(value.value) || self.call_returns_enum(value.value) {
                     // an enum is a heap/move value -> the owned binding is dropped at every exit (a variant
-                    // construction or an enum-returning call both land a fresh owned enum)
+                    // construction or an enum-returning call both land a fresh owned enum). If it's a RETURN-
+                    // type-inferred generic call (`let n: Option<int> = none_of()`), the annotation supplies the
+                    // mono key its call site otherwise lacks (consumed once, inside the ECall dispatch).
+                    if ty.len() > 0 {
+                        self.expected_key = mono_ty_key(ty[0])
+                    }
                     self.gen_expr(value.value, value.line)
+                    self.expected_key = ""
                     self.declare_binding(name, 1, -1, false, true, false, false)
                     return
                 }
@@ -5834,7 +5911,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval) }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "" }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     if self_struct_id >= 0 {
         // a method receiver: `self` is a BOXED struct in slot 0 (so self.field is GET_FIELD even for an
