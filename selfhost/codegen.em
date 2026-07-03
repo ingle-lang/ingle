@@ -547,11 +547,12 @@ fn array_elem_enum_payload_sid(fty: ps.Ty, struct_names: [string]) -> int {
 
 
 // ty_is_concrete_arg reports whether a generic type ARGUMENT is concrete (a scalar/string, an array, a known
-// struct, or a nested generic) rather than an erased bare type-parameter (`K` / `V`).
-fn ty_is_concrete_arg(ty: ps.Ty, struct_names: [string]) -> bool {
+// struct OR enum, or a nested generic) rather than an erased bare type-parameter (`K` / `V`). An enum arg
+// (`Box<Expr>`, `Box<Ty>`) is concrete — a genuine monomorphized instance — so enum_names must be consulted.
+fn ty_is_concrete_arg(ty: ps.Ty, struct_names: [string], enum_names: [string]) -> bool {
     match ty {
         case TyName(qual, name) {
-            return ty_is_scalar(ty) || ty_is_string(ty) || cg_index_of(struct_names, name) >= 0
+            return ty_is_scalar(ty) || ty_is_string(ty) || cg_index_of(struct_names, name) >= 0 || cg_index_of(enum_names, name) >= 0
         }
         case _ {
             return true
@@ -561,14 +562,14 @@ fn ty_is_concrete_arg(ty: ps.Ty, struct_names: [string]) -> bool {
 
 
 // ty_args_all_concrete reports whether every type argument is concrete — so a generic-struct construction is a
-// real monomorphized instance (`Map<string,[int]>`), not an erased one (`Bag<K>`, `MapEntry<K,V>`).
-fn ty_args_all_concrete(args: [ps.Ty], struct_names: [string]) -> bool {
+// real monomorphized instance (`Map<string,[int]>`, `Box<Expr>`), not an erased one (`Bag<K>`, `MapEntry<K,V>`).
+fn ty_args_all_concrete(args: [ps.Ty], struct_names: [string], enum_names: [string]) -> bool {
     var i = 0
     loop {
         if i >= args.len() {
             break
         }
-        if ty_is_concrete_arg(args[i], struct_names) == false {
+        if ty_is_concrete_arg(args[i], struct_names, enum_names) == false {
             return false
         }
         i = i + 1
@@ -1112,20 +1113,20 @@ fn ty_key(ty: ps.Ty) -> string {
 struct InstColl {
     keys: [string]
     snames: [string]
+    enames: [string]            // declared enum names — an enum type-arg (`Box<Expr>`) is a concrete instance
     bounded: [string]           // names of BOUNDED generic structs (Bag, Map) — erased of these use the base id
 
 
     fn register(mut self, ty: ps.Ty) {
         match ty {
             case TyGeneric(qual, name, args) {
-                // Register a generic-struct construction as a monomorphized instance UNLESS it is an ERASED
-                // construction of a BOUNDED struct (`Bag<K>` in new_bag<int>) — those reuse the witness-augmented
-                // BASE layout and have no per-instantiation instance. Concrete constructions (`Map<string,[int]>`)
-                // and any construction of an UNBOUNDED struct (`Box<T>`, even erased) DO get an instance (OFI-174).
+                // Register a generic-struct construction as a monomorphized instance ONLY when every type
+                // argument is CONCRETE (`Box<Expr>`, `Map<string,[int]>`). An ERASED construction — a bounded
+                // struct's `Bag<K>` or a bounded-struct method's `MapEntry<K,V>` (a bare type-param argument) —
+                // reuses the BASE layout and has no per-instantiation instance, so it is NOT registered here
+                // (lit_struct_id resolves it to the base id) (OFI-174).
                 if cg_index_of(self.snames, name) >= 0 {
-                    let concrete = ty_args_all_concrete(args, self.snames)
-                    let bounded = cg_index_of(self.bounded, name) >= 0
-                    if concrete || !bounded {
+                    if ty_args_all_concrete(args, self.snames, self.enames) {
                         let k = ty_key(ty)
                         if cg_index_of(self.keys, k) < 0 {
                             self.keys.append(k)
@@ -1302,8 +1303,30 @@ fn bounded_struct_names(decls: [ps.Decl]) -> [string] {
 // build_struct_instances returns the generic-struct INSTANCE keys in stage-0's monomorphization order — each
 // instance's runtime struct id is `declared_struct_count + its index here` (appended after the declared
 // structs, which include the generic base `Box<T>` itself).
+fn enum_decl_names(decls: [ps.Decl]) -> [string] {
+    var out: [string] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DEnum(name, generics, impls, variants) {
+                out.append(name)
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    out.append("Option")
+    out.append("Result")
+    return out
+}
+
+
 fn build_struct_instances(decls: [ps.Decl], snames: [string]) -> [string] {
-    var c = InstColl { keys: [], snames: snames, bounded: bounded_struct_names(decls) }
+    var c = InstColl { keys: [], snames: snames, enames: enum_decl_names(decls), bounded: bounded_struct_names(decls) }
     var i = 0
     loop {
         if i >= decls.len() {
@@ -3995,8 +4018,34 @@ struct Chunk {
     }
 
 
+    // is_erased_tparam_arg reports whether `e` reads a bare local slot typed as an ERASED type-parameter
+    // (`key: K`) — distinct from a string/enum borrow, which tp_slot_name leaves as "". Used to suppress the
+    // borrow-passthrough INCREF that a type-param arg does not need (OFI-165).
+    fn is_erased_tparam_arg(self, e: ps.Expr) -> bool {
+        match e {
+            case EIdent(name) {
+                let slot = self.resolve_slot(name)
+                if slot < 0 {
+                    return false
+                }
+                return self.tp_slot_name(slot) != ""
+            }
+            case _ {
+                return false
+            }
+        }
+    }
+
+
     // arg_needs_incref reports whether a call argument is a refcounted value whose owner the caller retains.
     fn arg_needs_incref(self, e: ps.Expr) -> bool {
+        if self.is_erased_tparam_arg(e) {
+            // A bare ERASED type-param read (`key: K`) passed into a callee that also borrows it
+            // (`self._index(key, cap)`) is a borrow-passthrough: the reference is not retained across the call,
+            // so no INCREF — matching stage-0's borrow convention for erased type-param args (OFI-165). A string
+            // borrow (`s: string`) is NOT excluded here: stage-0 DOES INCREF a string passed to an owned param.
+            return false
+        }
         if self.is_str_local_read(e) {
             return true
         }
@@ -5264,6 +5313,34 @@ struct Chunk {
     }
 
 
+    // ty_args_have_erased_struct_tparam reports whether any type argument is an ERASED type-parameter that is
+    // NOT the current fn's (monomorphized) type-param — i.e. a bare name that is not a known struct, enum, or
+    // scalar and is not in cur_tp_names. This is the STRUCT type-param `K`/`V` of a bounded-struct method
+    // (`MapEntry<K,V>` in `Map._put`, compiled once with K/V erased): its construction uses the BASE id, unlike
+    // a monomorphized fn's `Box<T>` (T bound to a concrete type, in cur_tp_names) which takes an instance.
+    fn ty_args_have_erased_struct_tparam(self, args: [ps.Ty]) -> bool {
+        var i = 0
+        loop {
+            if i >= args.len() {
+                break
+            }
+            match args[i] {
+                case TyName(qual, name) {
+                    if qual == "" && ty_is_scalar(args[i]) == false && ty_is_string(args[i]) == false {
+                        if cg_index_of(self.st_names, name) < 0 && cg_index_of(self.et_names, name) < 0 && cg_index_of(self.cur_tp_names, name) < 0 {
+                            return true
+                        }
+                    }
+                }
+                case _ {
+                }
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+
     fn lit_struct_id(self, ty: ps.Ty) -> int {
         match ty {
             case TyGeneric(qual, name, args) {
@@ -5275,6 +5352,12 @@ struct Chunk {
                 // struct id (its witness-augmented layout), not a monomorphized instance. An unbounded struct
                 // (`Box<T>`) still monomorphizes per instantiation (OFI-174).
                 if self.struct_is_bounded(name) && self.ty_args_have_tparam(args) {
+                    return base
+                }
+                // An unbounded struct built from an ERASED STRUCT type-param (`MapEntry<K,V>` in `Map._put`,
+                // where K/V are the receiver struct's type-params, compiled once) also uses the BASE id — there
+                // is no per-K/V monomorphized instance for a method compiled once over erased type-params.
+                if self.ty_args_have_erased_struct_tparam(args) {
                     return base
                 }
                 let ii = cg_index_of(self.inst_keys, ty_key(ty))
