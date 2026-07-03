@@ -286,7 +286,9 @@ struct Writer {
                                 gk = gk + 1
                             }
                             let gargs = type_args(instances[ii])
-                            self.emit_one_struct(name, fields, structs, gnames, gargs, 0)
+                            // A bounded generic struct's INSTANCE carries the same hidden witness fields as its
+                            // base (Map<string,int> is 4 fields: buckets, count, + Hash/Eq witnesses) (OFI-174).
+                            self.emit_one_struct(name, fields, structs, gnames, gargs, struct_witness_count(generics))
                         }
                     }
                     case _ {

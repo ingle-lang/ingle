@@ -324,6 +324,8 @@ struct StructTable {
     f_enum: [bool]             // ...is the field a known enum (a refcounted single Value — inline-packable)?
     f_kind: [int]              // ...for a scalar field: its num/render kind (int=0, sized 1..7, f32=8, f64=9, bool=10)
     f_tpname: [string]         // ...if the field's type is a bare type-param of the struct (`key: K`), its name; else ""
+    f_elem_payload: [int]      // ...for a `[Option<Struct>]`/`[Result<Struct>]` array field: the payload struct
+                               //   sid (so `case Some(e)` over `arr[i]` binds e as that struct), else -1
 }
 
 
@@ -363,6 +365,7 @@ fn build_structs(decls: [ps.Decl]) -> StructTable {
     var fen: [bool] = []
     var fkind: [int] = []
     var ftp: [string] = []
+    var fep: [int] = []
     var id = 0
     var i = 0
     loop {
@@ -386,6 +389,7 @@ fn build_structs(decls: [ps.Decl]) -> StructTable {
                     fen.append(ty_enum_id(fty, enames) >= 0)
                     fkind.append(ty_scalar_kind(fty))
                     ftp.append(field_tpname(fty, generics))
+                    fep.append(array_elem_enum_payload_sid(fty, names))
                     if ty_is_array(fty) {
                         fel.append(elem_type_code(elem_ty_of(fty), names, enames))
                         fak.append(array_elem_kind_from_ty(elem_ty_of(fty)))
@@ -419,6 +423,7 @@ fn build_structs(decls: [ps.Decl]) -> StructTable {
                         fel.append(0 - 1)
                         fak.append(0 - 1)
                         ftp.append("")
+                        fep.append(0 - 1)
                         bwi = bwi + 1
                     }
                     gwi = gwi + 1
@@ -430,7 +435,7 @@ fn build_structs(decls: [ps.Decl]) -> StructTable {
         }
         i = i + 1
     }
-    return StructTable { names: names, f_owner: fo, f_name: fn_, f_scalar: fsc, f_string: fst, f_array: far, f_struct: fsd, f_elem: fel, f_arrkind: fak, f_enum: fen, f_kind: fkind, f_tpname: ftp }
+    return StructTable { names: names, f_owner: fo, f_name: fn_, f_scalar: fsc, f_string: fst, f_array: far, f_struct: fsd, f_elem: fel, f_arrkind: fak, f_enum: fen, f_kind: fkind, f_tpname: ftp, f_elem_payload: fep }
 }
 
 
@@ -516,6 +521,62 @@ fn ty_enum_id(ty: ps.Ty, enum_names: [string]) -> int {
 // truth shared by array params, array `let`s, and `case V(arr)` bindings: a struct element -> its sid (>=0),
 // a string -> -3, an enum/refcounted single-Value element -> -4, anything else (scalar) -> -1. The -4 code
 // makes `arr[i]` of an enum array INCREF when read into a new owner, like a string element.
+// array_elem_enum_payload_sid returns the payload struct id of a `[Option<Struct>]` / `[Result<Struct>]` array
+// type (the element is a generic enum whose first type-argument is a struct), or -1. Lets a `case Some(e)` over
+// such an array element bind `e` as the concrete payload struct — nested-generic enum-payload typing (OFI-174).
+fn array_elem_enum_payload_sid(fty: ps.Ty, struct_names: [string]) -> int {
+    match fty {
+        case TyArray(elem) {
+            match elem.value {
+                case TyGeneric(qual, name, args) {
+                    if name == "Option" || name == "Result" {
+                        if args.len() > 0 {
+                            return ty_struct_id_g(args[0], struct_names)
+                        }
+                    }
+                }
+                case _ {
+                }
+            }
+        }
+        case _ {
+        }
+    }
+    return 0 - 1
+}
+
+
+// ty_is_concrete_arg reports whether a generic type ARGUMENT is concrete (a scalar/string, an array, a known
+// struct, or a nested generic) rather than an erased bare type-parameter (`K` / `V`).
+fn ty_is_concrete_arg(ty: ps.Ty, struct_names: [string]) -> bool {
+    match ty {
+        case TyName(qual, name) {
+            return ty_is_scalar(ty) || ty_is_string(ty) || cg_index_of(struct_names, name) >= 0
+        }
+        case _ {
+            return true
+        }
+    }
+}
+
+
+// ty_args_all_concrete reports whether every type argument is concrete — so a generic-struct construction is a
+// real monomorphized instance (`Map<string,[int]>`), not an erased one (`Bag<K>`, `MapEntry<K,V>`).
+fn ty_args_all_concrete(args: [ps.Ty], struct_names: [string]) -> bool {
+    var i = 0
+    loop {
+        if i >= args.len() {
+            break
+        }
+        if ty_is_concrete_arg(args[i], struct_names) == false {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+
 fn elem_type_code(elem_ty: ps.Ty, struct_names: [string], enum_names: [string]) -> int {
     let sid = ty_struct_id_g(elem_ty, struct_names)   // generic-aware: a `[Box<Expr>]` element resolves to base Box
     if sid >= 0 {
@@ -1051,17 +1112,24 @@ fn ty_key(ty: ps.Ty) -> string {
 struct InstColl {
     keys: [string]
     snames: [string]
-    bounded: [string]           // BOUNDED generic struct names — NOT monomorphized to instances (witnesses live
-                                //   in the base struct's hidden fields, so there is no per-instantiation layout)
+    bounded: [string]           // names of BOUNDED generic structs (Bag, Map) — erased of these use the base id
 
 
     fn register(mut self, ty: ps.Ty) {
         match ty {
             case TyGeneric(qual, name, args) {
-                if cg_index_of(self.snames, name) >= 0 && cg_index_of(self.bounded, name) < 0 {
-                    let k = ty_key(ty)
-                    if cg_index_of(self.keys, k) < 0 {
-                        self.keys.append(k)
+                // Register a generic-struct construction as a monomorphized instance UNLESS it is an ERASED
+                // construction of a BOUNDED struct (`Bag<K>` in new_bag<int>) — those reuse the witness-augmented
+                // BASE layout and have no per-instantiation instance. Concrete constructions (`Map<string,[int]>`)
+                // and any construction of an UNBOUNDED struct (`Box<T>`, even erased) DO get an instance (OFI-174).
+                if cg_index_of(self.snames, name) >= 0 {
+                    let concrete = ty_args_all_concrete(args, self.snames)
+                    let bounded = cg_index_of(self.bounded, name) >= 0
+                    if concrete || !bounded {
+                        let k = ty_key(ty)
+                        if cg_index_of(self.keys, k) < 0 {
+                            self.keys.append(k)
+                        }
                     }
                 }
             }
@@ -2492,6 +2560,7 @@ struct Chunk {
     st_fenum: [bool]            // ...is the field a known enum (a refcounted single Value)?
     st_fkind: [int]             // ...for a scalar field: its num/render kind (int=0, sized 1..7, f32=8, f64=9, bool=10)
     st_ftpname: [string]        // ...if the field's type is a bare struct type-param (`key: K`), its name; else ""
+    st_felem_payload: [int]      // ...for a [Option<Struct>] array field: the payload struct sid (for case Some(e))
     inst_keys: [string]         // generic-struct INSTANCE keys (cloned): id = st_names.len() + index here
     et_names: [string]          // the enum table (cloned): enum id -> name
     ev_owner: [int]             // ...flat variant table: owning enum id
@@ -2578,6 +2647,47 @@ struct Chunk {
                 return self.st_felem[i]
             }
             i = i + 1
+        }
+        return 0 - 1
+    }
+
+
+    // field_elem_payload returns the payload struct sid of a `[Option<Struct>]` array field `fname` of struct
+    // `id` (its element enum's struct type argument), or -1 (OFI-174).
+    fn field_elem_payload(self, id: int, fname: string) -> int {
+        var i = 0
+        loop {
+            if i >= self.st_fowner.len() {
+                break
+            }
+            if self.st_fowner[i] == id && self.st_fname[i] == fname {
+                return self.st_felem_payload[i]
+            }
+            i = i + 1
+        }
+        return 0 - 1
+    }
+
+
+    // scrutinee_payload_sid returns the concrete struct a `case Some(e)` binding should take when the matched
+    // scrutinee is an element of a `[Option<Struct>]` field array (`match self.buckets[i]`) — nested-generic
+    // enum-payload typing so `e.key.eq(..)` / `e.val` dispatch (OFI-174), else -1.
+    fn scrutinee_payload_sid(self, e: ps.Expr) -> int {
+        match e {
+            case EIndex(object, index) {
+                match object.value {
+                    case EGet(inner, fname) {
+                        let osid = self.expr_type_kind(inner.value)
+                        if osid >= 0 {
+                            return self.field_elem_payload(osid, fname)
+                        }
+                    }
+                    case _ {
+                    }
+                }
+            }
+            case _ {
+            }
         }
         return 0 - 1
     }
@@ -5161,8 +5271,9 @@ struct Chunk {
                 if base < 0 {
                     return base
                 }
-                // An ERASED construction of a bounded generic struct (`Bag<K>` in new_bag<int>) uses the BASE
-                // struct id (its witness-augmented layout), not a monomorphized instance (OFI-174).
+                // An ERASED construction of a BOUNDED generic struct (`Bag<K>` in new_bag<int>) uses the BASE
+                // struct id (its witness-augmented layout), not a monomorphized instance. An unbounded struct
+                // (`Box<T>`) still monomorphizes per instantiation (OFI-174).
                 if self.struct_is_bounded(name) && self.ty_args_have_tparam(args) {
                     return base
                 }
@@ -6271,7 +6382,13 @@ struct Chunk {
                             // type drives the discipline: a string binding INCREFs when consumed; a struct
                             // binding resolves `.field`; an array binding resolves `[i]`/`.len()`.
                             let fidx = self.variant_field_index(vi, b)
-                            if fidx >= 0 && self.ev_fstring[fidx] {
+                            let scpay = self.scrutinee_payload_sid(value.value)
+                            if scpay >= 0 && (fidx < 0 || self.ev_fstruct[fidx] < 0) {
+                                // Nested-generic enum-payload typing: `case Some(e)` over a `[Option<Struct>]`
+                                // field element binds e as the concrete payload struct, so `e.key.eq(..)` / `e.val`
+                                // resolve — even though the prelude Option's payload type is the abstract T (OFI-174).
+                                self.declare_binding(cases[ci].pattern.bindings[b], 1, scpay, false, false, true, false)
+                            } else if fidx >= 0 && self.ev_fstring[fidx] {
                                 self.declare_binding(cases[ci].pattern.bindings[b], 1, -1, true, false, false, false)
                             } else if fidx >= 0 && self.ev_fstruct[fidx] >= 0 {
                                 self.declare_binding(cases[ci].pattern.bindings[b], 1, self.ev_fstruct[fidx], false, false, true, false)
@@ -7516,7 +7633,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [] }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), st_felem_payload: clone_ints(structs.f_elem_payload), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [] }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     // Bind this fn's type params to concrete types for baking witnesses in a bounded generic-struct
     // construction (`Bag<K>{}` in new_bag bakes K=int's Hash/Eq). Derived from the fn's monomorphized instance
