@@ -67,6 +67,8 @@ let OP_INDEX: int = 56
 let OP_SET_INDEX: int = 57
 let OP_ARRAY_LEN: int = 58
 let OP_ARRAY_APPEND: int = 59
+let OP_ARRAY_POP: int = 60
+let OP_ARRAY_REMOVE_AT: int = 61
 let OP_STR_LEN: int = 64
 let OP_STR_CHARS: int = 65
 let OP_STR_CHAR_COUNT: int = 66
@@ -4064,6 +4066,11 @@ struct Chunk {
                     } else if mname == "append" {
                         self.gen_append_value(args[0], line)
                         self.emit(OP_ARRAY_APPEND)
+                    } else if mname == "remove_last" {
+                        self.emit(OP_ARRAY_POP)
+                    } else if mname == "remove_at" {
+                        self.gen_expr(args[0], line)
+                        self.emit(OP_ARRAY_REMOVE_AT)
                     }
                     return
                 }
@@ -4122,6 +4129,11 @@ struct Chunk {
                     } else if mname == "append" {
                         self.gen_append_value(args[0], line)
                         self.emit(OP_ARRAY_APPEND)
+                    } else if mname == "remove_last" {
+                        self.emit(OP_ARRAY_POP)              // `.remove_last()` -> pop + return the last element
+                    } else if mname == "remove_at" {
+                        self.gen_expr(args[0], line)         // `.remove_at(i)` -> remove + return element i
+                        self.emit(OP_ARRAY_REMOVE_AT)
                     }
                 } else if tk >= 0 {
                     // A boxed-struct receiver that is an OWNING TEMP (a field read / call result increfs):
