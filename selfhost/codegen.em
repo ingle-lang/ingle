@@ -4278,6 +4278,18 @@ struct Chunk {
     // Lets `let x = arr[i]` / `f(arr[i])` know x's type (boxed struct / string / enum / scalar) without a
     // separate type pass. Delegates to the shared free classifier so params + bindings agree.
     fn array_elem_type_code(self, elem_ty: ps.Ty) -> int {
+        // An erased type-parameter element (`[T]` in a generic fn) is REFCOUNTED at runtime — a read INCREFs
+        // (a runtime-conditional retain, a no-op for a scalar element). Classify it like an enum element (-4)
+        // so an erased element store `out[j] = out[j-1]` retains the value (OFI-174 / OFI-015).
+        match elem_ty {
+            case TyName(qual, name) {
+                if qual == "" && cg_index_of(self.cur_tp_names, name) >= 0 {
+                    return 0 - 4
+                }
+            }
+            case _ {
+            }
+        }
         return elem_type_code(elem_ty, self.st_names, self.et_names)
     }
 
@@ -7243,29 +7255,34 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
     // key ("new_bag<int>"); a single-instantiation bounded generic bakes the same witnesses in base + instance,
     // matching stage-0 (OFI-174).
     if f.generics.len() > 0 {
+        // cur_tp_names is ALWAYS this fn's type-param names (so an erased `[T]` array element is recognised as
+        // refcounted even for a fn with no monomorphized instance); cur_tp_types binds them to concrete types
+        // from a matching instance key when one exists (for witness baking). Find the instance types first,
+        // then append in one pass (an element-into-element SET_INDEX would trip the cgen_c own_into_slot gap).
+        var types: [string] = []
         var ki = 0
         loop {
             if ki >= ch.fn_inst_keys.len() {
                 break
             }
             if str_starts_with(ch.fn_inst_keys[ki], "{f.name}<") {
-                let types = parse_inst_types(ch.fn_inst_keys[ki], f.name)
-                var gi = 0
-                loop {
-                    if gi >= f.generics.len() {
-                        break
-                    }
-                    ch.cur_tp_names.append(f.generics[gi].name)
-                    if gi < types.len() {
-                        ch.cur_tp_types.append(types[gi])
-                    } else {
-                        ch.cur_tp_types.append("")
-                    }
-                    gi = gi + 1
-                }
+                types = parse_inst_types(ch.fn_inst_keys[ki], f.name)
                 break
             }
             ki = ki + 1
+        }
+        var gi = 0
+        loop {
+            if gi >= f.generics.len() {
+                break
+            }
+            ch.cur_tp_names.append(f.generics[gi].name)
+            if gi < types.len() {
+                ch.cur_tp_types.append(types[gi])
+            } else {
+                ch.cur_tp_types.append("")
+            }
+            gi = gi + 1
         }
     }
     if self_struct_id >= 0 {
