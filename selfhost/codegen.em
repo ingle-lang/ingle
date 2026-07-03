@@ -3753,14 +3753,16 @@ struct Chunk {
                     // A field holds a single value, never a multi-slot spread, so a struct field value is
                     // stored BOXED: a nested struct LITERAL is built via NEW_STRUCT (even when all-scalar),
                     // and a struct-returning CALL that lands its result MULTI-SLOT (an all-scalar return) is
-                    // BOX_STRUCT'd. Any other value consumes normally (a string field INCREFs).
+                    // BOX_STRUCT'd. Any other value consumes normally (a string field INCREFs). Each field value
+                    // is attributed to ITS OWN source line (a multi-line struct literal like `dark()` spans many).
                     let fv = fields[li].value
+                    let fline = fields[li].line
                     if self.struct_value_info(fv) >= 0 {
-                        self.gen_struct_construct(fv, line, true)
+                        self.gen_struct_construct(fv, fline, true)
                     } else if array_lit_is_empty(fv) {
                         // an empty `[]` field value carries no element kind — take it from the FIELD's declared
                         // `[T]` (a boxed `[Stmt]`/`[Expr]` element is AEK 0, not the context-free int default).
-                        self.cur_line = line
+                        self.cur_line = fline
                         let esid = self.field_elem_code(sid, fname)
                         let etpi = self.field_elem_tpidx(sid, fname)
                         if esid >= 0 && self.struct_array_inline(esid) {
@@ -3781,13 +3783,13 @@ struct Chunk {
                     } else {
                         let rk = self.expr_ret_kind(fv)
                         if rk >= 0 {
-                            self.gen_expr(fv, line)
+                            self.gen_expr(fv, fline)
                             if self.struct_all_scalar(rk) {
                                 self.emit(OP_BOX_STRUCT)
                                 self.emit_idx(rk)
                             }
                         } else {
-                            self.gen_consume(fv, line)
+                            self.gen_consume(fv, fline)
                         }
                     }
                     break

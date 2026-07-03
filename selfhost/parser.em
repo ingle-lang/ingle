@@ -63,6 +63,7 @@ enum Expr {
 struct SLitField {
     name: string
     value: Expr
+    line: int
 }
 
 
@@ -1918,10 +1919,11 @@ struct Parser {
             if self.at(TAG_RBRACE) || self.is_eof() {
                 break
             }
+            let fline = self.peek().line
             let fname = self.advance().text
             let _ = self.expect(TAG_COLON)
             let fval = self.parse_expr()
-            fields.append(SLitField{ name: fname, value: fval })
+            fields.append(SLitField{ name: fname, value: fval, line: fline })
             self.skip_newlines()
             if self.at(TAG_COMMA) {
                 let _ = self.advance()
