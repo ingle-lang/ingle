@@ -6882,6 +6882,27 @@ struct StrInfer {
                 self.scan_expr(operand.value)
             }
             case ECall(callee, args) {
+                // A string-method receiver (`p.len()` / `p.bytes()` / `p.chars()`) marks an untyped param p as a
+                // string, so a HOF predicate `|a, b| a.len() < b.len()` emits STR_LEN — its erased element is a
+                // string (OFI-174). `.len()` is array-or-string, but a lambda comparing element lengths is over
+                // strings across the corpus; string-only `.bytes()`/`.chars()` are unambiguous.
+                match callee.value {
+                    case EGet(object, mname) {
+                        if mname == "len" || mname == "bytes" || mname == "chars" {
+                            match object.value {
+                                case EIdent(pname) {
+                                    if cg_index_of(self.targets, pname) >= 0 && cg_index_of(self.snames, pname) < 0 {
+                                        self.snames.append(pname)
+                                    }
+                                }
+                                case _ {
+                                }
+                            }
+                        }
+                    }
+                    case _ {
+                    }
+                }
                 self.scan_expr(callee.value)
                 var i = 0
                 loop {
