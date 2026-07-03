@@ -479,6 +479,7 @@ rt_case tests/selfhost/codegen/contracts.em
 rt_case tests/selfhost/codegen/sized_scalar_kinds.em
 rt_case tests/selfhost/codegen/concurrency.em
 rt_case tests/selfhost/codegen/ffi.em
+rt_case tests/selfhost/codegen/ffi_ptr.em
 rt_case examples/13_interfaces.em
 # The flagship: the self-hosted compiler drivers, run over a real module (multi-module program + args).
 rt_case selfhost/lex_dump.em selfhost/lexer.em

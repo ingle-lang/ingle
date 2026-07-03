@@ -1395,8 +1395,9 @@ struct Chunk {
     fn_ret_sid: [int]           // ...parallel: struct id fn #i returns (else -1)
     fn_ret_enum: [bool]         // ...parallel: does fn #i return an enum?
     fn_ret_kind: [int]          // ...parallel: fn #i's return scalar kind (int=0, sized 1..7, f32/f64=8/9, bool=10)
-    ext_names: [string]         // every `extern "c"` fn name (parallel to ext_kinds)
+    ext_names: [string]         // every `extern "c"` fn name (parallel to ext_kinds/ext_pquals)
     ext_kinds: [int]            // ...its DECLARED return scalar kind, for an extern call's render/num width
+    ext_pquals: [string]        // ...per-param qual string ('0'/'1'/'2'): a '2' (move) Ptr arg is move-consumed
     cont_targets: [int]         // loop-context stack: each enclosing loop's continue target (its start)
     loop_bases: [int]           // ...and each loop's local count at body entry (break/continue unwind to it)
     break_jumps: [int]          // flat list of pending break-JUMP operand positions (per-loop slice)
@@ -2384,12 +2385,65 @@ struct Chunk {
     }
 
 
+    // extern_param_is_move reports whether param `i` of extern `name` is declared `move` (qual '2') — a
+    // linear Ptr the callee CONSUMES (e.g. fclose(move f: Ptr)), so the arg is move-consumed at the call site.
+    fn extern_param_is_move(self, name: string, i: int) -> bool {
+        var j = 0
+        loop {
+            if j >= self.ext_names.len() {
+                break
+            }
+            if self.ext_names[j] == name {
+                let qs = self.ext_pquals[j]              // bind first: `.bytes()` on an indexed field element
+                let q = qs.bytes()                       // isn't lowered by the C-emit backend (INT_VAL(0))
+                if i < q.len() {
+                    return int(q[i]) == 50               // '2' = move
+                }
+                return false
+            }
+            j = j + 1
+        }
+        return false
+    }
+
+
+    // gen_extern_arg pushes one extern argument. A `move` param whose arg is a LOCAL is move-consumed: load the
+    // value, then ZERO the slot (CONST 0; SET_LOCAL; POP) so the linear Ptr isn't reachable — and thus not
+    // double-consumed — after the call (mirrors the array/struct move discipline). Every other arg is a plain
+    // BORROW pushed raw (no INCREF — the foreign callee adopts nothing).
+    fn gen_extern_arg(mut self, name: string, i: int, e: ps.Expr, line: int) {
+        if self.extern_param_is_move(name, i) {
+            match e {
+                case EIdent(vn) {
+                    let slot = self.resolve_slot(vn)
+                    if slot >= 0 {
+                        self.cur_line = line
+                        self.emit(OP_GET_LOCAL)
+                        self.emit_idx(slot)
+                        let z = self.add_const_int(0)
+                        self.emit(OP_CONST)
+                        self.emit_idx(z)
+                        self.emit(OP_SET_LOCAL)
+                        self.emit_idx(slot)
+                        self.emit(OP_POP)
+                        return
+                    }
+                }
+                case _ {
+                }
+            }
+        }
+        self.gen_expr(e, line)
+    }
+
+
     // gen_call_c emits a hosted `extern "c"` call: CALL_C <registry index> <op>, where op = 0xFFFF (65535) for
     // a non-struct return (every hosted scalar/Ptr/string extern). An extern BORROWS its heap args (§5h — Ember
     // keeps ownership across the borrow), so a fresh owning-temp OBJECT arg (a string/array literal, e.g. the
     // "r" in fopen(path, "r")) is kept below the args, PICK'd as a borrow alias, and DROP_UNDER'd from under the
     // single result — the same discipline as gen_builtin_call, but the mask applies to EVERY extern (not just
-    // nids 0/1/3/4). Struct-by-value returns (op = rsid) are deferred.
+    // nids 0/1/3/4). A `move Ptr` arg is move-consumed (gen_extern_arg). Struct-by-value returns (op = rsid)
+    // are deferred.
     fn gen_call_c(mut self, name: string, args: [ps.Expr], line: int) {
         var masked: [bool] = []
         var keep = 0
@@ -2407,14 +2461,14 @@ struct Chunk {
         }
         if keep == 0 {
             // Extern args are BORROWED — the foreign callee adopts nothing (stage-0 gates consume on
-            // !is_extern), so push each arg RAW with gen_expr (NOT gen_one_arg, which would INCREF a string
-            // place-read and over-retain a borrowed local).
+            // !is_extern), so push each arg RAW (NOT gen_one_arg, which would INCREF a string place-read and
+            // over-retain a borrowed local); a `move Ptr` arg is move-consumed by gen_extern_arg.
             var a = 0
             loop {
                 if a >= args.len() {
                     break
                 }
-                self.gen_expr(args[a], line)
+                self.gen_extern_arg(name, a, args[a], line)
                 a = a + 1
             }
             self.cur_line = line
@@ -2445,7 +2499,7 @@ struct Chunk {
                 self.emit_idx(keep + built - 1 - t_seen)
                 t_seen = t_seen + 1
             } else {
-                self.gen_expr(args[b], line)         // borrowed extern arg: raw push, no INCREF
+                self.gen_extern_arg(name, b, args[b], line)   // borrowed (or move-consumed) extern arg
             }
             built = built + 1
             b = b + 1
@@ -4521,8 +4575,9 @@ struct FnRets {
     enm: [bool]
     elem: [int]
     kind: [int]
-    ext_names: [string]     // every `extern "c"` fn name (parallel to ext_kinds)
+    ext_names: [string]     // every `extern "c"` fn name (parallel to ext_kinds/ext_pquals)
     ext_kinds: [int]        // ...its DECLARED return scalar kind (i32=3, i64=0, f64=9, …) for a call's render/num kind
+    ext_pquals: [string]    // ...one char per param: '0' none / '1' mut / '2' move (a `move Ptr` arg is move-consumed)
 }
 
 
@@ -4546,6 +4601,7 @@ fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string]) -
     var rk: [int] = []
     var exn: [string] = []
     var exk: [int] = []
+    var exq: [string] = []
     var i = 0
     loop {
         if i >= decls.len() {
@@ -4588,6 +4644,16 @@ fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string]) -
                     }
                     exn.append(fns[ei].name)
                     exk.append(ret_scalar_kind(fns[ei].ret))
+                    var q = ""
+                    var pi = 0
+                    loop {
+                        if pi >= fns[ei].params.len() {
+                            break
+                        }
+                        q = q + "{fns[ei].params[pi].qual}"
+                        pi = pi + 1
+                    }
+                    exq.append(q)
                     ei = ei + 1
                 }
             }
@@ -4596,7 +4662,7 @@ fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string]) -
         }
         i = i + 1
     }
-    return FnRets { str: rs, arr: ra, sid: rsid, enm: ren, elem: rel, kind: rk, ext_names: exn, ext_kinds: exk }
+    return FnRets { str: rs, arr: ra, sid: rsid, enm: ren, elem: rel, kind: rk, ext_names: exn, ext_kinds: exk, ext_pquals: exq }
 }
 
 
@@ -4687,7 +4753,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval) }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval) }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     if self_struct_id >= 0 {
         // a method receiver: `self` is a BOXED struct in slot 0 (so self.field is GET_FIELD even for an
