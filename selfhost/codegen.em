@@ -2116,6 +2116,16 @@ struct FnInstColl {
                     bta = ty_args_key(ty[0])
                 } else {
                     bt = arg_type_name_scope(value.value, self.snames, self.stypes)
+                    // a `var s = Stack<int>{...}` struct literal carries its own type-args -> record them so a
+                    // later `s.push()` registers the Stack.push<int> method instance (unbounded generic struct).
+                    match value.value {
+                        case EStructLit(sty, sfields) {
+                            bt = ty_key_name(sty.value)
+                            bta = ty_args_key(sty.value)
+                        }
+                        case _ {
+                        }
+                    }
                 }
                 self.snames.append(n)
                 self.stypes.append(bt)
@@ -6421,6 +6431,20 @@ struct Chunk {
                     } else {
                         self.gen_struct_construct(value.value, value.line, true)    // boxed: NEW_STRUCT
                         self.declare_binding(name, 1, sid, false, true, true, false)
+                    }
+                    // A generic-struct literal `var s = Stack<int>{...}` records its type-args so `s.method(..)`
+                    // retargets to the monomorphized method instance (`Stack.push<int>`) — unbounded generic-
+                    // struct method monomorphization, the struct-literal analogue of the bounded-call branch.
+                    match value.value {
+                        case EStructLit(sty, sfields) {
+                            let ta = ty_args_key(sty.value)
+                            if ta != "" {
+                                self.mrecv_name.append(name)
+                                self.mrecv_args.append(ta)
+                            }
+                        }
+                        case _ {
+                        }
                     }
                 } else if is_array_lit(value.value) {
                     var done = false
