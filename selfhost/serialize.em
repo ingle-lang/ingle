@@ -683,13 +683,16 @@ fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
         }
         j = j + 1
     }
-    // Pass 3: the monomorphized generic-fn instances, in first-use order (each = the base body under a new slot).
+    // Pass 3: the monomorphized instances, in first-use order (each = the base body under a new slot). A free-fn
+    // instance re-emits its base DFn; a generic-struct METHOD instance (base "Struct.method") re-emits the
+    // struct's method with its self struct id.
     var xi = 0
     loop {
         if xi >= insts.keys.len() {
             break
         }
         var di = 0
+        var sidp = 0
         loop {
             if di >= decls.len() {
                 break
@@ -703,6 +706,23 @@ fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
                         let ich = cg.compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, inst_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit)
                         w.emit_chunk(ich)
                     }
+                }
+                case DStruct(name, generics, impls, fields, methods, kind) {
+                    var mi = 0
+                    loop {
+                        if mi >= methods.len() {
+                            break
+                        }
+                        if methods[mi].has_body && "{name}.{methods[mi].name}" == insts.bases[xi] {
+                            w.emit_str(name + "." + methods[mi].name)
+                            w.emit_optstr(sources[di])
+                            w.emit_uvarint(methods[mi].params.len())
+                            let ich = cg.compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sidp, inst_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit)
+                            w.emit_chunk(ich)
+                        }
+                        mi = mi + 1
+                    }
+                    sidp = sidp + 1
                 }
                 case _ {
                 }

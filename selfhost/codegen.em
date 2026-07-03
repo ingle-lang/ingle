@@ -1301,6 +1301,35 @@ fn ty_key_name(t: ps.Ty) -> string {
 }
 
 
+// ty_args_key renders a generic type's type-ARGUMENTS as a "_"-joined key (Bag<int> -> "int", Map<string,
+// [int]> -> "string_[int]"), or "" for a non-generic type. Keys a generic-struct METHOD instance by its
+// receiver's concrete type arguments (Bag.add on a Bag<int> -> "Bag.add<int>").
+fn ty_args_key(ty: ps.Ty) -> string {
+    match ty {
+        case TyGeneric(qual, name, args) {
+            var parts = ""
+            var i = 0
+            loop {
+                if i >= args.len() {
+                    break
+                }
+                let k = ty_key_name(args[i])
+                if i == 0 {
+                    parts = k
+                } else {
+                    parts = "{parts}_{k}"
+                }
+                i = i + 1
+            }
+            return parts
+        }
+        case _ {
+            return ""
+        }
+    }
+}
+
+
 // GenFns lists every GENERIC free function: `names` (a call to one lowers to a monomorphized instance) and
 // the parallel `pquals` (per-param qual string '0'/'1'/'2'). A '2' (move) param takes OWNERSHIP of an
 // owning-temp arg (not masked); a '0'/'1' (Copy/borrow) erased-T param borrows it (kept + PICK + DROP_UNDER).
@@ -1588,6 +1617,8 @@ struct FnInstColl {
     gb_argidx: [int]
     snames: [string]            // let-binding scope: name -> concrete type (for keying identifier args)
     stypes: [string]
+    styargs: [string]           // ...parallel: the binding's type-ARGUMENTS key (`b: Bag<int>` -> "int"), for
+                                //   keying a generic-struct METHOD instance (`b.add(..)` -> "Bag.add<int>")
 
 
     fn register(mut self, name: string, argkey: string) {
@@ -1664,6 +1695,22 @@ struct FnInstColl {
                             self.register(name, self.bounded_key(name, args))
                         } else if cg_index_of(self.generic_fns, name) >= 0 && args.len() > 0 {
                             self.register(name, mono_arg_key(args[0]))   // register BEFORE args (pre-order)
+                        }
+                    }
+                    case EGet(obj, mname) {
+                        // A METHOD call on a generic-struct instance (`b.add(..)` with b: Bag<int>) monomorphizes
+                        // to `Struct.mname<typeargs>` — registered in first-use order, interleaved with the free
+                        // instances, matching stage-0's numbering (OFI-174).
+                        match obj.value {
+                            case EIdent(rname) {
+                                let rty = scope_type(self.snames, self.stypes, rname)
+                                let rargs = scope_type(self.snames, self.styargs, rname)
+                                if rty != "" && rargs != "" {
+                                    self.register("{rty}.{mname}", rargs)
+                                }
+                            }
+                            case _ {
+                            }
                         }
                     }
                     case _ {
@@ -1770,15 +1817,19 @@ struct FnInstColl {
                 }
                 self.walk_expr(value.value)
                 // Track this binding's concrete type (annotation first, else inferred from the initialiser) so a
-                // later bounded generic call can key an identifier argument by its type.
+                // later bounded generic call can key an identifier argument by its type; and its type-ARGUMENTS
+                // (`b: Bag<int>` -> "int") so a method call on it keys a generic-struct method instance.
                 var bt = ""
+                var bta = ""
                 if ty.len() > 0 {
                     bt = ty_key_name(ty[0])
+                    bta = ty_args_key(ty[0])
                 } else {
                     bt = arg_type_name_scope(value.value, self.snames, self.stypes)
                 }
                 self.snames.append(n)
                 self.stypes.append(bt)
+                self.styargs.append(bta)
             }
             case SReturn(value, line) {
                 if value.len() > 0 {
@@ -1847,7 +1898,7 @@ struct FnInstColl {
 // (walking declared fns + methods in decl order) — the fn analogue of build_struct_instances. Instance i is
 // numbered fn_names.len() + total_lambdas + i (appended after declared fns AND lifted lambdas).
 fn build_fn_instances(decls: [ps.Decl], generic_fns: [string], wit: WitInfo) -> FnInsts {
-    var c = FnInstColl { keys: [], bases: [], generic_fns: generic_fns, gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), snames: [], stypes: [] }
+    var c = FnInstColl { keys: [], bases: [], generic_fns: generic_fns, gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), snames: [], stypes: [], styargs: [] }
     var i = 0
     loop {
         if i >= decls.len() {
@@ -1858,6 +1909,7 @@ fn build_fn_instances(decls: [ps.Decl], generic_fns: [string], wit: WitInfo) -> 
                 if f.has_body {
                     c.snames = []       // per-function let-binding scope (for keying identifier args by type)
                     c.stypes = []
+                    c.styargs = []
                     c.walk_body(f.body)
                 }
             }
@@ -1870,6 +1922,7 @@ fn build_fn_instances(decls: [ps.Decl], generic_fns: [string], wit: WitInfo) -> 
                     if methods[mi].has_body {
                         c.snames = []
                         c.stypes = []
+                        c.styargs = []
                         c.walk_body(methods[mi].body)
                     }
                     mi = mi + 1
@@ -2327,6 +2380,8 @@ struct Chunk {
     mwit_tpname: [string]       // THIS method's struct-witness fields (a method of a bounded generic struct):
     mwit_bound: [string]        // ...(type-param, bound) whose witness lives in self's FIELD mwit_field
     mwit_field: [int]           // ...the self field index of that witness (declared fields, then witness fields)
+    mrecv_name: [string]        // generic-struct binding -> its type-ARGUMENTS key (`b: Bag<int>` -> "int"), so a
+    mrecv_args: [string]        // ...method call `b.add(..)` retargets to the monomorphized `Bag.add<int>` instance
     cur_tp_names: [string]      // THIS fn's own type-param names (`K` for new_bag<K>) — for baking witnesses in
     cur_tp_types: [string]      // ...parallel: the concrete type each binds to in this compilation (`int`)
 
@@ -3468,6 +3523,29 @@ struct Chunk {
     }
 
 
+    // resolve_method_index returns the fn-table index of `struct_name.mname`, retargeting to a monomorphized
+    // METHOD instance (`Bag.add<int>`) when the receiver binding `recv_name` carries concrete type-args (OFI-174).
+    fn resolve_method_index(self, recv_name: string, struct_name: string, mname: string) -> int {
+        var i = self.mrecv_name.len() - 1
+        loop {
+            if i < 0 {
+                break
+            }
+            if self.mrecv_name[i] == recv_name {
+                if self.mrecv_args[i] != "" {
+                    let ix = cg_index_of(self.fn_inst_keys, "{struct_name}.{mname}<{self.mrecv_args[i]}>")
+                    if ix >= 0 {
+                        return self.inst_base + ix
+                    }
+                }
+                break
+            }
+            i = i - 1
+        }
+        return cg_index_of(self.fn_names, "{struct_name}.{mname}")
+    }
+
+
     fn gen_method_call(mut self, object: ps.Expr, mname: string, args: [ps.Expr], line: int) {
         // A bound-method call on a type-param receiver (`key.hash()`, `e.key.eq(..)`) dispatches through a
         // witness (OFI-174) — handled uniformly for a type-param local/param OR a type-param field receiver.
@@ -3521,7 +3599,7 @@ struct Chunk {
                 if sid < 0 {
                     return
                 }
-                let midx = cg_index_of(self.fn_names, self.st_names[sid] + "." + mname)
+                let midx = self.resolve_method_index(recv, self.st_names[sid], mname)
                 self.cur_line = line
                 if self.slot_boxed[slot] {
                     self.emit(OP_GET_LOCAL)
@@ -5639,6 +5717,10 @@ struct Chunk {
                     if annsid >= 0 {
                         self.gen_expr(value.value, value.line)
                         self.declare_binding(name, 1, annsid, false, true, true, false)
+                        // Record the receiver's concrete type-args so `b.method(..)` retargets to the
+                        // monomorphized method instance (`Bag.add<int>`) (OFI-174).
+                        self.mrecv_name.append(name)
+                        self.mrecv_args.append(ty_args_key(ty[0]))
                         return
                     }
                 }
@@ -7034,14 +7116,16 @@ fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, st
         }
         j = j + 1
     }
-    // Pass 3: the monomorphized generic-fn instances, in first-use order (each = the base body under a new
-    // slot; erased ⇒ byte-identical to the base). Find each instance's base FnDecl by name and re-emit it.
+    // Pass 3: the monomorphized instances, in first-use order (each = the base body under a new slot; erased ⇒
+    // byte-identical to the base). A free-fn instance re-emits its base DFn; a generic-struct METHOD instance
+    // (base "Struct.method") re-emits the struct's method with its self struct id.
     var xi = 0
     loop {
         if xi >= insts.keys.len() {
             break
         }
         var di = 0
+        var sidp = 0
         loop {
             if di >= decls.len() {
                 break
@@ -7053,6 +7137,21 @@ fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, st
                         let ich = compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, inst_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit)
                         disassemble(ich)
                     }
+                }
+                case DStruct(name, generics, impls, fields, methods, kind) {
+                    var mi = 0
+                    loop {
+                        if mi >= methods.len() {
+                            break
+                        }
+                        if methods[mi].has_body && "{name}.{methods[mi].name}" == insts.bases[xi] {
+                            println("== fn {name}.{methods[mi].name} (arity {methods[mi].params.len()}) ==")
+                            let ich = compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sidp, inst_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit)
+                            disassemble(ich)
+                        }
+                        mi = mi + 1
+                    }
+                    sidp = sidp + 1
                 }
                 case _ {
                 }
@@ -7104,7 +7203,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], mwit_tpname: [], mwit_bound: [], mwit_field: [] }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [] }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     // Bind this fn's type params to concrete types for baking witnesses in a bounded generic-struct
     // construction (`Bag<K>{}` in new_bag bakes K=int's Hash/Eq). Derived from the fn's monomorphized instance
