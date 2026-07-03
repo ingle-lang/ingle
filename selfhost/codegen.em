@@ -5059,6 +5059,207 @@ fn lambda_captures(params: [ps.Param], body: [ps.Stmt]) -> [string] {
 }
 
 
+// StrInfer infers which UNTYPED lambda params are STRINGS from the body: a param that appears as an operand of
+// a string `+` (concat) — where the other operand is a known string (a string capture, a string literal, or a
+// string `+`-chain) — is itself a string, so the lifted lambda gives it the INCREF-on-consume + drop-at-exit
+// discipline. `snames` seeds with the string captures and grows as params are confirmed (a re-scan reaches
+// chained cases). Only the string case matters — a scalar param needs no drop.
+struct StrInfer {
+    snames: [string]
+    targets: [string]
+
+
+    fn is_str(self, e: ps.Expr) -> bool {
+        match e {
+            case EStr(parts) {
+                return true
+            }
+            case EIdent(name) {
+                return cg_index_of(self.snames, name) >= 0
+            }
+            case EBinary(op, l, r) {
+                if ps.binop_id(op) == 1 {
+                    return self.is_str(l.value) || self.is_str(r.value)
+                }
+                return false
+            }
+            case _ {
+                return false
+            }
+        }
+    }
+
+
+    fn mark(mut self, cand: ps.Expr, other: ps.Expr) {
+        match cand {
+            case EIdent(name) {
+                if cg_index_of(self.targets, name) >= 0 && cg_index_of(self.snames, name) < 0 {
+                    if self.is_str(other) {
+                        self.snames.append(name)
+                    }
+                }
+            }
+            case _ {
+            }
+        }
+    }
+
+
+    fn scan_expr(mut self, e: ps.Expr) {
+        match e {
+            case EBinary(op, l, r) {
+                if ps.binop_id(op) == 1 {
+                    self.mark(l.value, r.value)
+                    self.mark(r.value, l.value)
+                }
+                self.scan_expr(l.value)
+                self.scan_expr(r.value)
+            }
+            case EUnary(op, operand) {
+                self.scan_expr(operand.value)
+            }
+            case ECall(callee, args) {
+                self.scan_expr(callee.value)
+                var i = 0
+                loop {
+                    if i >= args.len() {
+                        break
+                    }
+                    self.scan_expr(args[i])
+                    i = i + 1
+                }
+            }
+            case EGet(object, name) {
+                self.scan_expr(object.value)
+            }
+            case EIndex(object, index) {
+                self.scan_expr(object.value)
+                self.scan_expr(index.value)
+            }
+            case ETry(operand) {
+                self.scan_expr(operand.value)
+            }
+            case EStr(parts) {
+                var i = 0
+                loop {
+                    if i >= parts.len() {
+                        break
+                    }
+                    if parts[i].hole.len() > 0 {
+                        self.scan_expr(parts[i].hole[0])
+                    }
+                    i = i + 1
+                }
+            }
+            case _ {
+            }
+        }
+    }
+
+
+    fn scan_stmt(mut self, s: ps.Stmt) {
+        match s {
+            case SLet(is_var, name, ty, value) {
+                self.scan_expr(value.value)
+            }
+            case SReturn(value, line) {
+                if value.len() > 0 {
+                    self.scan_expr(value[0].value)
+                }
+            }
+            case SExpr(expr) {
+                self.scan_expr(expr.value)
+            }
+            case SAssign(target, value) {
+                self.scan_expr(value.value)
+            }
+            case SIf(cond, then_blk, els) {
+                self.scan_expr(cond.value)
+                self.scan_block(then_blk)
+                self.scan_block(els)
+            }
+            case SFor(vname, index_var, iter, body) {
+                self.scan_block(body)
+            }
+            case SLoop(body) {
+                self.scan_block(body)
+            }
+            case SMatch(value, cases) {
+                var ci = 0
+                loop {
+                    if ci >= cases.len() {
+                        break
+                    }
+                    self.scan_block(cases[ci].body)
+                    ci = ci + 1
+                }
+            }
+            case SBlock(body) {
+                self.scan_block(body)
+            }
+            case _ {
+            }
+        }
+    }
+
+
+    fn scan_block(mut self, body: [ps.Stmt]) {
+        var i = 0
+        loop {
+            if i >= body.len() {
+                break
+            }
+            self.scan_stmt(body[i])
+            i = i + 1
+        }
+    }
+}
+
+
+// infer_str_params returns the untyped lambda params that are strings (used in a string concat). Seeded with
+// the string captures; two scans reach chained cases (`a + b + suffix`).
+fn infer_str_params(caps: [CaptureFlag], params: [ps.Param], body: [ps.Stmt]) -> [string] {
+    var snames: [string] = []
+    var ci = 0
+    loop {
+        if ci >= caps.len() {
+            break
+        }
+        if caps[ci].is_str {
+            snames.append(caps[ci].name)
+        }
+        ci = ci + 1
+    }
+    var targets: [string] = []
+    var pi = 0
+    loop {
+        if pi >= params.len() {
+            break
+        }
+        if params[pi].ty.len() == 0 {                // only UNTYPED params need inference
+            targets.append(params[pi].name)
+        }
+        pi = pi + 1
+    }
+    var ctx = StrInfer { snames: snames, targets: targets }
+    ctx.scan_block(body)
+    ctx.scan_block(body)                             // second pass for chained concats
+    // return only the confirmed TARGET params (drop the seed captures)
+    var out: [string] = []
+    var k = 0
+    loop {
+        if k >= ctx.targets.len() {
+            break
+        }
+        if cg_index_of(ctx.snames, ctx.targets[k]) >= 0 {
+            out.append(ctx.targets[k])
+        }
+        k = k + 1
+    }
+    return out
+}
+
+
 // emit_lifted_disasm compiles + disassembles each lifted lambda of `ch` (reading spec.fn/spec.caps IN PLACE —
 // a whole-struct move out of the array is rejected), as `== fn <lambda> (arity C+P) ==`. Nested lambdas
 // (a lambda inside a lambda) are a documented gap — flat lambdas cover the corpus.
@@ -5218,13 +5419,20 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         ch.slot_kind[ch.slot_kind.len() - 1] = caps[cx].kind
         cx = cx + 1
     }
+    // An UNTYPED lambda param used as a string (`|s| s + suffix`) is declared as an owned/droppable string so
+    // it INCREFs on consume + drops at exit (regular fns have typed params, so this is empty for them).
+    let str_params = infer_str_params(caps, f.params, f.body)
     var p = 0
     loop {
         if p >= f.params.len() {
             break
         }
         if f.params[p].is_self == false {
-            ch.declare_param(f.params[p])
+            if cg_index_of(str_params, f.params[p].name) >= 0 {
+                ch.declare_binding(f.params[p].name, 1, 0 - 1, true, true, false, false)
+            } else {
+                ch.declare_param(f.params[p])
+            }
         }
         p = p + 1
     }
