@@ -475,12 +475,20 @@ rebuilt without itself is a trap; keeping stage 0 is what avoids it.
   `Option<T>`), `close`→`CLOSE`, and `nursery { spawn f(a) }`→`NURSERY_BEGIN`/`SPAWN <fn> <argslots>`/
   `NURSERY_END`; a `Channel<T>` `let`/param is an owned refcounted handle (dropped at exit, INCREF'd into a
   spawn/call). Fixture `tests/selfhost/codegen/concurrency.em`; surfaced+fixed OFI-172 (a duplicate prelude
-  `Option` when the program redeclares it — only the `.emb` enum table showed it). **Remaining M4, ranked by
-  the corpus differential:** closures/generics (the `GET_LOCAL`/witness-passing bulk, incl. `spawn` of a
-  generic); FFI (`CALL_C`); the long tail of per-file INCREF/offset off-by-ones (incl. OFI-165 cross-module
-  string-literal args) + OFI-163 generic Option/Result payload bindings; the nested-inline flattening
-  (deferred-low, 3 files). The VM + C-emit **fixed points are already DONE** (the compiler reproduces its own
-  source on both backends); the corpus is breadth. The dev loop for all of this is **`tools/cgdiff.sh`** (below).
+  `Option` when the program redeclares it — only the `.emb` enum table showed it). **`extern "c"` FFI is done**
+  (except struct-by-value returns): a declared-extern call (name in the `cextern_index` registry table AND
+  absent from `fn_names`) lowers to `CALL_C <registry index> <0xFFFF>`; extern args are BORROWED (pushed raw,
+  no INCREF — an extern adopts nothing), a fresh owning-temp object arg is kept+PICK'd+DROP_UNDER'd, and a
+  `move Ptr` arg is move-consumed (slot zeroed, via a threaded `ext_pquals` per-param-qual table). A `Ptr`
+  return binds a linear non-droppable slot; an extern's declared return kind (`ext_kinds`) drives its call's
+  render/num width (i32 vs i64 are both `'i'` in the ABI). `to_int`/`to_float`→`FLOAT_TO_INT`/`INT_TO_FLOAT`.
+  Fixtures `ffi.em` (libm + string) + `ffi_ptr.em` (fopen/fwrite/fclose + move). **Remaining M4, ranked by the
+  corpus differential:** closures/generics (the `GET_LOCAL`/witness-passing bulk, incl. `spawn` of a generic);
+  the long tail of per-file INCREF/offset off-by-ones (incl. OFI-165 cross-module string-literal args) +
+  OFI-163 generic Option/Result payload bindings; struct-by-value extern returns (`cvec2_*`, OFI-173's
+  sibling — `op = rsid`, 1 file); the nested-inline flattening (deferred-low, 3 files). The VM + C-emit **fixed
+  points are already DONE** (the compiler reproduces its own source on both backends); the corpus is breadth.
+  The dev loop for all of this is **`tools/cgdiff.sh`** (below).
 - **M5** *(follow-on)* — self-hosted C-emit backend; native self-hosted binaries; `tests/native`
   green with the self-hosted compiler producing the C.
 
