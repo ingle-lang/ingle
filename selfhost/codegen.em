@@ -2886,7 +2886,7 @@ struct Chunk {
     // like gen_builtin_call) to array-object args: each kept temp is pushed BELOW the args, PICK'd as a borrow
     // alias for the call, then DROP_UNDER'd from under the single result. Non-masked args go through gen_one_arg
     // (so a string/enum place-read still INCREFs and a multi-slot struct still spreads).
-    fn gen_user_call(mut self, fn_idx: int, args: [ps.Expr], line: int) {
+    fn gen_user_call(mut self, fn_idx: int, args: [ps.Expr], line: int, mask_obj: bool) {
         var masked: [bool] = []
         var keep = 0
         var i = 0
@@ -2894,7 +2894,12 @@ struct Chunk {
             if i >= args.len() {
                 break
             }
-            let m = self.user_arg_masked(args[i])
+            // A GENERIC call's params are erased-T (borrow-consume): a fresh owning-temp OBJECT arg is kept +
+            // PICK'd + DROP_UNDER'd (like an extern). A normal user call masks only owning-temp ARRAYS.
+            var m = self.user_arg_masked(args[i])
+            if mask_obj {
+                m = self.arg_is_owning_object(args[i])
+            }
             masked.append(m)
             if m {
                 keep = keep + 1
@@ -4104,13 +4109,14 @@ struct Chunk {
                             // a free-function call: index by name, no self. A GENERIC call retargets to its
                             // monomorphized INSTANCE slot (inst_base + the first-use index of its arg-0 key).
                             var fi = cg_index_of(self.fn_names, name)
-                            if cg_index_of(self.generic_fns, name) >= 0 && args.len() > 0 {
+                            let is_gen = cg_index_of(self.generic_fns, name) >= 0
+                            if is_gen && args.len() > 0 {
                                 let ix = cg_index_of(self.fn_inst_keys, "{name}<{mono_arg_key(args[0])}>")
                                 if ix >= 0 {
                                     fi = self.inst_base + ix
                                 }
                             }
-                            self.gen_user_call(fi, args, line)
+                            self.gen_user_call(fi, args, line, is_gen)
                         }
                     }
                     case _ {
