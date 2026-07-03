@@ -2274,6 +2274,9 @@ struct Chunk {
     wit_slot: [int]             // ...and the actual local slot each witness occupies (leading, before value params)
     tp_pslot: [int]             // THIS fn's value-param slots that are typed as a bare type-param
     tp_pname: [string]          // ...parallel: the type-param name that slot is typed as
+    mwit_tpname: [string]       // THIS method's struct-witness fields (a method of a bounded generic struct):
+    mwit_bound: [string]        // ...(type-param, bound) whose witness lives in self's FIELD mwit_field
+    mwit_field: [int]           // ...the self field index of that witness (declared fields, then witness fields)
     cur_tp_names: [string]      // THIS fn's own type-param names (`K` for new_bag<K>) — for baking witnesses in
     cur_tp_types: [string]      // ...parallel: the concrete type each binds to in this compilation (`int`)
 
@@ -3018,6 +3021,7 @@ struct Chunk {
     // to a witness dispatch: push the receiver + args (borrowed), then GET_FIELD the method-ref off the
     // matching witness and CALL_INDIRECT. Returns true if it handled the call (OFI-174).
     fn gen_witness_method_call(mut self, recv_slot: int, tpn: string, mname: string, args: [ps.Expr], line: int) -> bool {
+        // A free-fn / method's own witness PARAM (max<T: Ord>): the witness is a leading local slot.
         var k = 0
         loop {
             if k >= self.wit_tpname.len() {
@@ -3026,29 +3030,62 @@ struct Chunk {
             if self.wit_tpname[k] == tpn {
                 let midx = self.iface_method_index(self.wit_bound[k], mname)
                 if midx >= 0 {
-                    self.cur_line = line
-                    self.emit(OP_GET_LOCAL)             // push the receiver (borrow)
-                    self.emit_idx(recv_slot)
-                    var a = 0
-                    loop {
-                        if a >= args.len() {
-                            break
-                        }
-                        self.gen_expr(args[a], line)   // push each arg (borrow)
-                        a = a + 1
-                    }
-                    self.emit(OP_GET_LOCAL)             // push the witness dict
+                    self.gen_witness_dispatch_head(recv_slot, args, line)
+                    self.emit(OP_GET_LOCAL)             // push the witness dict (a leading param)
                     self.emit_idx(self.wit_slot[k])
-                    self.emit(OP_GET_FIELD)             // extract the concrete method-ref
-                    self.emit_idx(midx)
-                    self.emit(OP_CALL_INDIRECT)
-                    self.emit_idx(1 + args.len())      // argc includes the receiver
+                    self.gen_witness_dispatch_tail(midx, args.len())
                     return true
                 }
             }
             k = k + 1
         }
+        // A method of a bounded generic struct (Map<K:Hash+Eq,V>.set): the witness lives in SELF's field.
+        var m = 0
+        loop {
+            if m >= self.mwit_tpname.len() {
+                break
+            }
+            if self.mwit_tpname[m] == tpn {
+                let midx = self.iface_method_index(self.mwit_bound[m], mname)
+                if midx >= 0 {
+                    self.gen_witness_dispatch_head(recv_slot, args, line)
+                    self.emit(OP_GET_LOCAL)             // push self...
+                    self.emit_idx(0)
+                    self.emit(OP_GET_FIELD)             // ...and read its witness field (the Some dict)
+                    self.emit_idx(self.mwit_field[m])
+                    self.gen_witness_dispatch_tail(midx, args.len())
+                    return true
+                }
+            }
+            m = m + 1
+        }
         return false
+    }
+
+
+    // gen_witness_dispatch_head pushes the receiver + call arguments (borrowed), before the witness dict.
+    fn gen_witness_dispatch_head(mut self, recv_slot: int, args: [ps.Expr], line: int) {
+        self.cur_line = line
+        self.emit(OP_GET_LOCAL)                        // push the receiver (borrow)
+        self.emit_idx(recv_slot)
+        var a = 0
+        loop {
+            if a >= args.len() {
+                break
+            }
+            self.gen_expr(args[a], line)               // push each arg (borrow)
+            a = a + 1
+        }
+    }
+
+
+    // gen_witness_dispatch_tail extracts the concrete method-ref from the witness dict (already on top) and
+    // dispatches through it: GET_FIELD <method-index>; CALL_INDIRECT <argc incl receiver>.
+    fn gen_witness_dispatch_tail(mut self, midx: int, nargs: int) {
+        self.emit(OP_GET_FIELD)
+        self.emit_idx(midx)
+        self.emit(OP_CALL_INDIRECT)
+        self.emit_idx(1 + nargs)
     }
 
 
@@ -4562,6 +4599,24 @@ struct Chunk {
             i = i + 1
         }
         return false
+    }
+
+
+    // struct_declared_field_count returns a struct's DECLARED field count (excluding the hidden witness fields
+    // a bounded generic struct carries) — the index where its witness fields begin.
+    fn struct_declared_field_count(self, sid: int) -> int {
+        var n = 0
+        var i = 0
+        loop {
+            if i >= self.st_fowner.len() {
+                break
+            }
+            if self.st_fowner[i] == sid && self.st_fname[i] != "$wit" {
+                n = n + 1
+            }
+            i = i + 1
+        }
+        return n
     }
 
 
@@ -6871,7 +6926,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [] }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], mwit_tpname: [], mwit_bound: [], mwit_field: [] }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     // Bind this fn's type params to concrete types for baking witnesses in a bounded generic-struct
     // construction (`Bag<K>{}` in new_bag bakes K=int's Hash/Eq). Derived from the fn's monomorphized instance
@@ -6962,6 +7017,36 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
                 erased_gnames.append(ch.sg_tparam[sgx])
             }
             sgx = sgx + 1
+        }
+    }
+    // For a method of a bounded generic struct (Map<K:Hash+Eq,V>.set), map each (struct type-param, bound) to
+    // its witness FIELD index in self, so a bound-method call in the body (`key.hash()`) dispatches through
+    // self's witness field. Witness fields follow the declared fields, in (type-param, bound) order (OFI-174).
+    if self_struct_id >= 0 && ch.struct_is_bounded(ch.st_names[self_struct_id]) {
+        let sname = ch.st_names[self_struct_id]
+        var widx = ch.struct_declared_field_count(self_struct_id)
+        var mgx = 0
+        loop {
+            if mgx >= ch.sg_struct.len() {
+                break
+            }
+            if ch.sg_struct[mgx] == sname {
+                let mb = split_plus(ch.sg_bound[mgx])
+                var mbi = 0
+                loop {
+                    if mbi >= mb.len() {
+                        break
+                    }
+                    if mb[mbi] != "" {
+                        ch.mwit_tpname.append(ch.sg_tparam[mgx])
+                        ch.mwit_bound.append(mb[mbi])
+                        ch.mwit_field.append(widx)
+                        widx = widx + 1
+                    }
+                    mbi = mbi + 1
+                }
+            }
+            mgx = mgx + 1
         }
     }
     var p = 0
