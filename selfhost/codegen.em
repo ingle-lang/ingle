@@ -3339,16 +3339,10 @@ struct Chunk {
     }
 
 
-    // gen_bounded_call lowers a call to a BOUNDED generic function (OFI-174): build one witness per
-    // (type-param, bound) as a hidden leading arg, then the value args (erased/boxed), then CALL the
-    // monomorphized instance with (witness-count + value-arg-count) arguments.
-    fn gen_bounded_call(mut self, name: string, args: [ps.Expr], line: int) {
-        let key = self.bounded_call_key(name, args)
-        var fi = cg_index_of(self.fn_names, name)
-        let ix = cg_index_of(self.fn_inst_keys, "{name}<{key}>")
-        if ix >= 0 {
-            fi = self.inst_base + ix
-        }
+    // emit_bounded_witnesses pushes one witness per (type-param, bound) of a bounded generic call, in order,
+    // returning the count. The concrete type for each row is its determining arg's type, or expected_key for a
+    // return-inferred row. Shared by a direct CALL and a SPAWN of a bounded generic (OFI-174).
+    fn emit_bounded_witnesses(mut self, name: string, args: [ps.Expr], line: int) -> int {
         var n_wit = 0
         var gwi = 0
         loop {
@@ -3366,6 +3360,27 @@ struct Chunk {
             }
             gwi = gwi + 1
         }
+        return n_wit
+    }
+
+
+    // bounded_inst_index returns the monomorphized instance fn-table index for a bounded generic call, or the
+    // base fn-index if no instance is registered.
+    fn bounded_inst_index(self, name: string, args: [ps.Expr]) -> int {
+        let ix = cg_index_of(self.fn_inst_keys, "{name}<{self.bounded_call_key(name, args)}>")
+        if ix >= 0 {
+            return self.inst_base + ix
+        }
+        return cg_index_of(self.fn_names, name)
+    }
+
+
+    // gen_bounded_call lowers a call to a BOUNDED generic function (OFI-174): build one witness per
+    // (type-param, bound) as a hidden leading arg, then the value args (erased/boxed), then CALL the
+    // monomorphized instance with (witness-count + value-arg-count) arguments.
+    fn gen_bounded_call(mut self, name: string, args: [ps.Expr], line: int) {
+        let fi = self.bounded_inst_index(name, args)
+        let n_wit = self.emit_bounded_witnesses(name, args, line)
         var a = 0
         loop {
             if a >= args.len() {
@@ -5438,8 +5453,22 @@ struct Chunk {
     fn gen_spawn(mut self, call: ps.Expr, line: int) {
         match call {
             case ECall(callee, args) {
-                let fi = self.resolve_call_fn_index(callee.value)
                 self.cur_line = line
+                var fi = self.resolve_call_fn_index(callee.value)
+                // A SPAWN of a bounded generic (`spawn tally(ch, 5, 5)`) shares the direct-call convention:
+                // push the bound witnesses as hidden leading args + retarget to the monomorphized instance,
+                // so the fiber can dispatch a.eq / a.hash (OFI-174).
+                var n_wit = 0
+                match callee.value {
+                    case EIdent(name) {
+                        if cg_index_of(self.gb_fn, name) >= 0 {
+                            fi = self.bounded_inst_index(name, args)
+                            n_wit = self.emit_bounded_witnesses(name, args, line)
+                        }
+                    }
+                    case _ {
+                    }
+                }
                 var built = 0
                 var i = 0
                 loop {
@@ -5452,7 +5481,7 @@ struct Chunk {
                 self.cur_line = line
                 self.emit(OP_SPAWN)
                 self.emit_idx(fi)
-                self.emit_idx(built)
+                self.emit_idx(n_wit + built)
             }
             case _ {
             }
