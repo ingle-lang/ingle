@@ -1416,6 +1416,8 @@ struct Chunk {
     ext_names: [string]         // every `extern "c"` fn name (parallel to ext_kinds/ext_pquals)
     ext_kinds: [int]            // ...its DECLARED return scalar kind, for an extern call's render/num width
     ext_pquals: [string]        // ...per-param qual string ('0'/'1'/'2'): a '2' (move) Ptr arg is move-consumed
+    lambda_base: int            // fn-table index of THIS function's first lifted lambda (declared fns come first)
+    lifted: [LambdaSpec]        // lambdas encountered in THIS function, in source order (compiled after decls)
     cont_targets: [int]         // loop-context stack: each enclosing loop's continue target (its start)
     loop_bases: [int]           // ...and each loop's local count at body entry (break/continue unwind to it)
     break_jumps: [int]          // flat list of pending break-JUMP operand positions (per-loop slice)
@@ -3850,6 +3852,33 @@ struct Chunk {
                 self.emit(OP_RETURN)
                 self.patch_jump(jend)
             }
+            case ELambda(params, body) {
+                // Capture the free enclosing locals (push each GET_LOCAL), then MAKE_CLOSURE <lifted index>
+                // <capture count>. The lifted fn (captures as leading params, then the lambda's own params) is
+                // recorded as a LambdaSpec (a pre-built FnDecl + capture flags) and compiled after all decls.
+                let caps = lambda_captures(params, body)
+                var cflags: [CaptureFlag] = []
+                var ci = 0
+                loop {
+                    if ci >= caps.len() {
+                        break
+                    }
+                    let s = self.resolve_slot(caps[ci])
+                    if s >= 0 {                          // a real capture (an enclosing local, not a global/fn)
+                        self.emit(OP_GET_LOCAL)
+                        self.emit_idx(s)
+                        cflags.append(CaptureFlag { name: caps[ci], is_str: self.local_str[s], droppable: self.local_drop[s], struct_id: self.slot_struct[s], boxed: self.slot_boxed[s], is_array: self.slot_array[s], elem: self.slot_elem[s], kind: self.slot_kind[s] })
+                    }
+                    ci = ci + 1
+                }
+                let lidx = self.lambda_base + self.lifted.len()
+                self.cur_line = line
+                self.emit(OP_MAKE_CLOSURE)
+                self.emit_idx(lidx)
+                self.emit_idx(cflags.len())
+                let synth = ps.FnDecl { name: "<lambda>", generics: [], params: params, ret: [], has_body: true, body: body, reqs: [], req_lines: [], enss: [], ens_lines: [] }
+                self.lifted.append(LambdaSpec { decl: synth, caps: cflags })
+            }
             case _ {
             }
         }
@@ -4796,9 +4825,345 @@ fn param_is_string(p: ps.Param) -> bool {
 }
 
 
+// FvCtx drives a lambda's FREE-VARIABLE walk: `bound` = names bound INSIDE the lambda (params + inner
+// let/for/match bindings, scoped), `free` = distinct outer names referenced (the capture candidates, in
+// traversal order). A name is captured iff referenced, NOT bound inside, and (checked at the MAKE_CLOSURE
+// site) resolves to an enclosing local. Scope is saved/restored around each block by copying `bound`.
+struct FvCtx {
+    bound: [string]
+    free: [string]
+
+
+    fn note(mut self, name: string) {
+        if cg_index_of(self.bound, name) >= 0 {
+            return
+        }
+        if cg_index_of(self.free, name) >= 0 {
+            return
+        }
+        self.free.append(name)
+    }
+
+
+    fn walk_expr(mut self, e: ps.Expr) {
+        match e {
+            case EIdent(name) {
+                self.note(name)
+            }
+            case EUnary(op, operand) {
+                self.walk_expr(operand.value)
+            }
+            case EBinary(op, l, r) {
+                self.walk_expr(l.value)
+                self.walk_expr(r.value)
+            }
+            case ECall(callee, args) {
+                self.walk_expr(callee.value)
+                self.walk_args(args)
+            }
+            case EGet(object, name) {
+                self.walk_expr(object.value)
+            }
+            case EIndex(object, index) {
+                self.walk_expr(object.value)
+                self.walk_expr(index.value)
+            }
+            case EArray(elems, lines) {
+                self.walk_args(elems)
+            }
+            case EStructLit(ty, fields) {
+                var i = 0
+                loop {
+                    if i >= fields.len() {
+                        break
+                    }
+                    self.walk_expr(fields[i].value)
+                    i = i + 1
+                }
+            }
+            case ETry(operand) {
+                self.walk_expr(operand.value)
+            }
+            case ERange(lo, hi) {
+                self.walk_expr(lo.value)
+                self.walk_expr(hi.value)
+            }
+            case EStr(parts) {
+                var i = 0
+                loop {
+                    if i >= parts.len() {
+                        break
+                    }
+                    if parts[i].hole.len() > 0 {
+                        self.walk_expr(parts[i].hole[0])
+                    }
+                    i = i + 1
+                }
+            }
+            case ELambda(params, body) {
+                let saved = clone_strs(self.bound)
+                var p = 0
+                loop {
+                    if p >= params.len() {
+                        break
+                    }
+                    self.bound.append(params[p].name)
+                    p = p + 1
+                }
+                self.walk_block(body)
+                self.bound = saved
+            }
+            case _ {
+            }
+        }
+    }
+
+
+    fn walk_args(mut self, args: [ps.Expr]) {
+        var i = 0
+        loop {
+            if i >= args.len() {
+                break
+            }
+            self.walk_expr(args[i])
+            i = i + 1
+        }
+    }
+
+
+    fn walk_stmt(mut self, s: ps.Stmt) {
+        match s {
+            case SLet(is_var, name, ty, value) {
+                self.walk_expr(value.value)
+                self.bound.append(name)
+            }
+            case SReturn(value, line) {
+                if value.len() > 0 {
+                    self.walk_expr(value[0].value)
+                }
+            }
+            case SExpr(expr) {
+                self.walk_expr(expr.value)
+            }
+            case SAssign(target, value) {
+                self.walk_expr(target.value)
+                self.walk_expr(value.value)
+            }
+            case SIf(cond, then_blk, els) {
+                self.walk_expr(cond.value)
+                self.walk_block(then_blk)
+                self.walk_block(els)
+            }
+            case SFor(vname, index_var, iter, body) {
+                self.walk_expr(iter.value)
+                let saved = clone_strs(self.bound)
+                self.bound.append(vname)
+                if index_var != "" {
+                    self.bound.append(index_var)
+                }
+                self.walk_block(body)
+                self.bound = saved
+            }
+            case SLoop(body) {
+                self.walk_block(body)
+            }
+            case SMatch(value, cases) {
+                self.walk_expr(value.value)
+                var ci = 0
+                loop {
+                    if ci >= cases.len() {
+                        break
+                    }
+                    let saved = clone_strs(self.bound)
+                    var bi = 0
+                    loop {
+                        if bi >= cases[ci].pattern.bindings.len() {
+                            break
+                        }
+                        self.bound.append(cases[ci].pattern.bindings[bi])
+                        bi = bi + 1
+                    }
+                    self.walk_block(cases[ci].body)
+                    self.bound = saved
+                    ci = ci + 1
+                }
+            }
+            case SBlock(body) {
+                self.walk_block(body)
+            }
+            case SSpawn(call) {
+                self.walk_expr(call.value)
+            }
+            case SNursery(body, line) {
+                self.walk_block(body)
+            }
+            case _ {
+            }
+        }
+    }
+
+
+    fn walk_block(mut self, body: [ps.Stmt]) {
+        let saved = clone_strs(self.bound)
+        var i = 0
+        loop {
+            if i >= body.len() {
+                break
+            }
+            self.walk_stmt(body[i])
+            i = i + 1
+        }
+        self.bound = saved
+    }
+}
+
+
+// CaptureFlag records ONE capture's binding flags, copied from the enclosing local at the MAKE_CLOSURE site,
+// so the lifted lambda can re-declare it (as a leading param) with the exact refcount/drop discipline.
+struct CaptureFlag {
+    name: string
+    is_str: bool
+    droppable: bool
+    struct_id: int
+    boxed: bool
+    is_array: bool
+    elem: int
+    kind: int
+}
+
+
+// LambdaSpec is a lifted lambda pending compilation: a pre-built synthetic FnDecl (params = the lambda's own
+// params, body = the lambda body) plus the capture flags resolved at its MAKE_CLOSURE site. Stored on the
+// Chunk (`lifted`) and compiled AFTER all declared functions by the driver, reading `.fn`/`.caps` IN PLACE
+// (a whole-struct move out of an array is rejected; the FnDecl is built here where params/body are values).
+struct LambdaSpec {
+    decl: ps.FnDecl
+    caps: [CaptureFlag]
+}
+
+
+// lambda_captures returns the free-variable NAMES of a lambda, in traversal order (capture candidates).
+fn lambda_captures(params: [ps.Param], body: [ps.Stmt]) -> [string] {
+    var seed: [string] = []
+    var p = 0
+    loop {
+        if p >= params.len() {
+            break
+        }
+        seed.append(params[p].name)
+        p = p + 1
+    }
+    var ctx = FvCtx { bound: seed, free: [] }
+    ctx.walk_block(body)
+    return clone_strs(ctx.free)
+}
+
+
+// emit_lifted_disasm compiles + disassembles each lifted lambda of `ch` (reading spec.fn/spec.caps IN PLACE —
+// a whole-struct move out of the array is rejected), as `== fn <lambda> (arity C+P) ==`. Nested lambdas
+// (a lambda inside a lambda) are a documented gap — flat lambdas cover the corpus.
+fn emit_lifted_disasm(ch: Chunk, fn_names: [string], fn_rets: FnRets, structs: StructTable, enums: EnumTable, globals: GlobalConsts, instances: [string]) {
+    var li = 0
+    loop {
+        if li >= ch.lifted.len() {
+            break
+        }
+        println("== fn <lambda> (arity {ch.lifted[li].caps.len() + ch.lifted[li].decl.params.len()}) ==")
+        let lch = compile_fn(ch.lifted[li].decl, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, 0, ch.lifted[li].caps)
+        disassemble(lch)
+        li = li + 1
+    }
+}
+
+
+// disassemble_program prints the whole program in stage-0's `--emit=bytecode` format: ALL declared functions
+// first (pass 1), THEN the lifted lambdas (pass 2), so the fn-table numbering matches. Lambda indices are
+// assigned at each MAKE_CLOSURE site as `lambda_base + ordinal`; the two passes recompute the same base per
+// function (declared fns re-compiled in pass 2 only to re-derive their `lifted` specs — Ember's ownership
+// model forbids holding the specs across the passes).
+fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, structs: StructTable, enums: EnumTable, globals: GlobalConsts, instances: [string]) {
+    var no_caps: [CaptureFlag] = []              // a declared local (annotation drives the empty-array elem kind;
+    var lambda_base = fn_names.len()             // an inline `[]` arg mis-emits NEW_ARRAY vs stage-0 NEW_STRUCT_ARRAY)
+    var sid = 0
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        println("== fn {name}.{methods[mi].name} (arity {methods[mi].params.len()}) ==")
+                        let ch = compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid, lambda_base, no_caps)
+                        disassemble(ch)
+                        lambda_base = lambda_base + ch.lifted.len()
+                    }
+                    mi = mi + 1
+                }
+                sid = sid + 1
+            }
+            case DFn(f) {
+                if f.has_body {
+                    println("== fn {f.name} (arity {f.params.len()}) ==")
+                    let ch = compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, lambda_base, no_caps)
+                    disassemble(ch)
+                    lambda_base = lambda_base + ch.lifted.len()
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    // Pass 2: the lifted lambdas, in the same fn order (recompute each fn's lambda_base identically).
+    var lb2 = fn_names.len()
+    var sid2 = 0
+    var j = 0
+    loop {
+        if j >= decls.len() {
+            break
+        }
+        match decls[j] {
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        let ch = compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid2, lb2, no_caps)
+                        emit_lifted_disasm(ch, fn_names, fn_rets, structs, enums, globals, instances)
+                        lb2 = lb2 + ch.lifted.len()
+                    }
+                    mi = mi + 1
+                }
+                sid2 = sid2 + 1
+            }
+            case DFn(f) {
+                if f.has_body {
+                    let ch = compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, lb2, no_caps)
+                    emit_lifted_disasm(ch, fn_names, fn_rets, structs, enums, globals, instances)
+                    lb2 = lb2 + ch.lifted.len()
+                }
+            }
+            case _ {
+            }
+        }
+        j = j + 1
+    }
+}
+
+
 // compile_fn lowers one function body to a Chunk. Params occupy slots 0..arity-1; every function ends with
 // the implicit trailing `CONST <0>; <drops>; RETURN` stage-0 appends (the drops release string locals).
-fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: StructTable, enums: EnumTable, globals: GlobalConsts, instances: [string], self_struct_id: int) -> Chunk {
+// A lifted lambda passes its capture flags as `caps` (declared as leading slots before the lambda's params);
+// `lambda_base` is the fn-table index of this function's first lambda (used for MAKE_CLOSURE operands).
+fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: StructTable, enums: EnumTable, globals: GlobalConsts, instances: [string], self_struct_id: int, lambda_base: int, caps: [CaptureFlag]) -> Chunk {
     var code: [int] = []
     var lines: [int] = []
     var cif: [bool] = []
@@ -4834,12 +5199,24 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval) }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval) }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     if self_struct_id >= 0 {
         // a method receiver: `self` is a BOXED struct in slot 0 (so self.field is GET_FIELD even for an
         // all-scalar struct), and a BORROW — not dropped at exit.
         ch.declare_binding("self", 1, self_struct_id, false, false, true, false)
+    }
+    // A lifted lambda's CAPTURES are its leading params (slots 0..C-1), re-declared with the exact flags they
+    // had in the enclosing scope (so a string/enum capture INCREFs-on-consume + drops, a scalar copies).
+    var cx = 0
+    loop {
+        if cx >= caps.len() {
+            break
+        }
+        ch.declare_binding(caps[cx].name, 1, caps[cx].struct_id, caps[cx].is_str, caps[cx].droppable, caps[cx].boxed, caps[cx].is_array)
+        ch.slot_elem[ch.slot_elem.len() - 1] = caps[cx].elem
+        ch.slot_kind[ch.slot_kind.len() - 1] = caps[cx].kind
+        cx = cx + 1
     }
     var p = 0
     loop {

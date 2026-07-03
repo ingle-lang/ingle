@@ -145,40 +145,7 @@ fn emit_program(decls: [ps.Decl]) {
     let fn_rets = cg.build_fn_rets(decls, structs, enums.e_names)
     let globals = cg.build_globals(decls)
     let instances = cg.build_struct_instances(decls, structs.names)
-    var sid = 0
-    var i = 0
-    loop {
-        if i >= decls.len() {
-            break
-        }
-        match decls[i] {
-            case DStruct(name, generics, impls, fields, methods, kind) {
-                var mi = 0
-                loop {
-                    if mi >= methods.len() {
-                        break
-                    }
-                    if methods[mi].has_body {
-                        println("== fn {name}.{methods[mi].name} (arity {methods[mi].params.len()}) ==")
-                        let ch = cg.compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid)
-                        cg.disassemble(ch)
-                    }
-                    mi = mi + 1
-                }
-                sid = sid + 1
-            }
-            case DFn(f) {
-                if f.has_body {
-                    println("== fn {f.name} (arity {f.params.len()}) ==")
-                    let ch = cg.compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1)
-                    cg.disassemble(ch)
-                }
-            }
-            case _ {
-            }
-        }
-        i = i + 1
-    }
+    cg.disassemble_program(decls, fn_names, fn_rets, structs, enums, globals, instances)
 }
 
 
