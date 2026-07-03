@@ -12,9 +12,13 @@
 //   ./emberc-self <file.em> <out.emb> && emberc --run-bytecode out.emb  # emit + run a bytecode image
 //
 // The checker is single-module and lenient about imports (mirrors check_dump.em); codegen + serialize run
-// multi-module over the merged declaration list. The emitted image runs identically to the source (it is
-// byte-identical to stage 0 wherever the self-hosted codegen is; generic-method monomorphization is the
-// one residual numbering difference — internally consistent, so the image still runs correctly).
+// multi-module over the merged declaration list. The emitted image is byte-identical to stage 0 across the
+// language subset the self-hosted backend covers — which includes generic FUNCTIONS up to Tier 1.5 (Copy/
+// move type params, return-type inference), where the only divergence is internally-consistent instance
+// numbering, so those images still run correctly. It does NOT yet cover BOUNDED/WITNESS generics (Tier 3 —
+// `T: Ord`/`Hash+Eq`: no `CALL_INDIRECT` witness dispatch is emitted, so the image RUNS BUT COMPUTES WRONG
+// RESULTS) or higher-order-fn / array-through-erased-generic code (Tier 2 — erased-body retain/drop +
+// aggregate value-semantics gaps that CRASH the image). Those are the OFI-174 completeness campaign.
 
 import "parser" as ps
 import "checker" as ck
