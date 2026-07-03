@@ -42,7 +42,8 @@ let OP_FOR_ARRAY: int = 34
 let OP_CALL: int = 35
 let OP_CALL_NATIVE: int = 36
 let OP_CALL_C: int = 37
-let OP_CALL_INDIRECT: int = 39
+let OP_CALL_INDIRECT: int = 38
+let OP_MAKE_DYN: int = 39
 let OP_CALL_DYN: int = 40
 let OP_MAKE_CLOSURE: int = 41
 let OP_CALL_CLOSURE: int = 42
@@ -161,6 +162,19 @@ fn param_is_erased_tparam(p: ps.Param, generics: [ps.GenericParam]) -> bool {
             return false
         }
     }
+}
+
+
+// erased_tparam_name returns the type-parameter name a param is typed as (`x: T` -> "T"), or "" if the param
+// is not a bare type parameter. Companion to param_is_erased_tparam. Implemented via param_is_erased_tparam +
+// ty_key_name (both byte-identical on both backends) rather than returning a match-pattern-bound string from
+// inside a loop — the latter is a construct the self-hosted C-emit backend doesn't clone (own_into_slot), an
+// OFI-173 sibling that would break the C-emit reproduction fixed point.
+fn erased_tparam_name(p: ps.Param, generics: [ps.GenericParam]) -> string {
+    if param_is_erased_tparam(p, generics) {
+        return ty_key_name(p.ty[0])
+    }
+    return ""
 }
 
 
@@ -1188,6 +1202,140 @@ fn build_generic_fns(decls: [ps.Decl]) -> GenFns {
 }
 
 
+// WitInfo carries the interface + bounded-generic tables the witness codegen needs (OFI-174). All GLOBAL,
+// built once from the decls and cloned into every Chunk. A bounded generic call builds one witness per
+// (type-param, bound): a `Some(method-ref)` enum passed as a hidden LEADING arg; inside the body a bound-
+// method call reads `GET_FIELD <method-index>` off that witness and dispatches with CALL_INDIRECT.
+struct WitInfo {
+    if_names: [string]      // interface id -> name
+    ifm_iface: [int]        // interface-method table: owning interface index (parallel to ifm_name)
+    ifm_name: [string]      // ...required method name, in declaration order within the interface
+    gb_fn: [string]         // generic-fn bound table: fn name (one row per (type-param, bound))
+    gb_tpname: [string]     // ...the type-parameter name
+    gb_bound: [string]      // ...the bound interface name
+    gb_argidx: [int]        // ...index of the first value param typed as this type-param (-1 = return-inferred)
+    impl_struct: [string]   // struct-implements table: struct name (one row per implemented interface)
+    impl_iface: [string]    // ...an interface it declares it implements
+}
+
+
+// param_tparam_index returns the index of the first value parameter whose type is exactly the bare type
+// parameter `tpname` (so a call's concrete type argument for `tpname` is read off that argument), or -1.
+fn param_tparam_index(params: [ps.Param], tpname: string) -> int {
+    var i = 0
+    loop {
+        if i >= params.len() {
+            break
+        }
+        if params[i].is_self == false && params[i].ty.len() > 0 {
+            match params[i].ty[0] {
+                case TyName(qual, name) {
+                    if qual == "" && name == tpname {
+                        return i
+                    }
+                }
+                case _ {
+                }
+            }
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+
+// build_wit_info collects every interface's method list and every generic free function's per-type-param
+// bounds. The bound rows are ordered (type-param, then bound) exactly as stage-0 prepends witness params.
+fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
+    var if_names: [string] = []
+    var ifm_iface: [int] = []
+    var ifm_name: [string] = []
+    var gb_fn: [string] = []
+    var gb_tpname: [string] = []
+    var gb_bound: [string] = []
+    var gb_argidx: [int] = []
+    var impl_struct: [string] = []
+    var impl_iface: [string] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DInterface(name, generics, methods) {
+                let iid = if_names.len()
+                if_names.append(name)
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    ifm_iface.append(iid)
+                    ifm_name.append(methods[mi].name)
+                    mi = mi + 1
+                }
+            }
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var ii = 0
+                loop {
+                    if ii >= impls.len() {
+                        break
+                    }
+                    impl_struct.append(name)
+                    impl_iface.append(impls[ii])
+                    ii = ii + 1
+                }
+            }
+            case DFn(f) {
+                if f.generics.len() > 0 {
+                    var gi = 0
+                    loop {
+                        if gi >= f.generics.len() {
+                            break
+                        }
+                        let ai = param_tparam_index(f.params, f.generics[gi].name)
+                        var bi = 0
+                        loop {
+                            if bi >= f.generics[gi].bounds.len() {
+                                break
+                            }
+                            gb_fn.append(f.name)
+                            gb_tpname.append(f.generics[gi].name)
+                            gb_bound.append(f.generics[gi].bounds[bi])
+                            gb_argidx.append(ai)
+                            bi = bi + 1
+                        }
+                        gi = gi + 1
+                    }
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    // Seed the PRELUDE interfaces (Hash/Eq/Ord) — they are built-in, not declared in the source, so the decl
+    // walk never sees their method lists; a bounded generic over a prelude bound still needs them (OFI-174). A
+    // user program that redeclares one (e.g. bounded_generic.em declares `Ord`) already has it, so skip.
+    if cg_index_of(if_names, "Hash") < 0 {
+        ifm_iface.append(if_names.len())
+        ifm_name.append("hash")
+        if_names.append("Hash")
+    }
+    if cg_index_of(if_names, "Eq") < 0 {
+        ifm_iface.append(if_names.len())
+        ifm_name.append("eq")
+        if_names.append("Eq")
+    }
+    if cg_index_of(if_names, "Ord") < 0 {
+        ifm_iface.append(if_names.len())
+        ifm_name.append("compare")
+        if_names.append("Ord")
+    }
+    return WitInfo { if_names: if_names, ifm_iface: ifm_iface, ifm_name: ifm_name, gb_fn: gb_fn, gb_tpname: gb_tpname, gb_bound: gb_bound, gb_argidx: gb_argidx, impl_struct: impl_struct, impl_iface: impl_iface }
+}
+
+
 // FnInsts holds the collected generic-function instances: `keys` are full instance keys ("id<str>") in
 // first-use pre-order (the dedup identity + numbering order), `bases` the parallel base fn names ("id").
 struct FnInsts {
@@ -1197,10 +1345,62 @@ struct FnInsts {
 
 
 // FnInstColl walks call sites collecting generic-function instances (pre-order, first-use), mirroring InstColl.
+// scope_type looks up a name's tracked concrete type (last binding wins, for shadowing), or "".
+fn scope_type(snames: [string], stypes: [string], name: string) -> string {
+    var i = snames.len() - 1
+    loop {
+        if i < 0 {
+            break
+        }
+        if snames[i] == name {
+            return stypes[i]
+        }
+        i = i - 1
+    }
+    return ""
+}
+
+
+// arg_type_name_scope is the pre-pass (no-Chunk) analogue of Chunk.arg_type_name: the concrete type NAME of an
+// argument expression, using the let-binding scope tracker for identifiers. Must agree with arg_type_name so a
+// bounded generic's instance key registered here matches the one resolved at the call site.
+fn arg_type_name_scope(e: ps.Expr, snames: [string], stypes: [string]) -> string {
+    match e {
+        case EStructLit(ty, fields) {
+            return ty_key_name(ty.value)
+        }
+        case EInt(v, kind) {
+            return "int"
+        }
+        case EStr(parts) {
+            return "string"
+        }
+        case EBool(v) {
+            return "bool"
+        }
+        case EFloat(v) {
+            return "float"
+        }
+        case EIdent(name) {
+            return scope_type(snames, stypes, name)
+        }
+        case _ {
+            return ""
+        }
+    }
+}
+
+
 struct FnInstColl {
     keys: [string]
     bases: [string]
     generic_fns: [string]
+    gb_fn: [string]             // bounded-generic tables (parallel), so a bounded call keys by concrete type
+    gb_tpname: [string]
+    gb_bound: [string]
+    gb_argidx: [int]
+    snames: [string]            // let-binding scope: name -> concrete type (for keying identifier args)
+    stypes: [string]
 
 
     fn register(mut self, name: string, argkey: string) {
@@ -1212,12 +1412,44 @@ struct FnInstColl {
     }
 
 
+    // bounded_key builds a bounded generic call's instance key from its (type-param, bound) rows' determining
+    // arguments — the pre-pass mirror of Chunk.bounded_call_key.
+    fn bounded_key(self, name: string, args: [ps.Expr]) -> string {
+        var parts = ""
+        var first = true
+        var gwi = 0
+        loop {
+            if gwi >= self.gb_fn.len() {
+                break
+            }
+            if self.gb_fn[gwi] == name {
+                var tn = ""
+                let ai = self.gb_argidx[gwi]
+                if ai >= 0 && ai < args.len() {
+                    tn = arg_type_name_scope(args[ai], self.snames, self.stypes)
+                }
+                if first {
+                    parts = tn
+                    first = false
+                } else {
+                    parts = "{parts}_{tn}"
+                }
+            }
+            gwi = gwi + 1
+        }
+        return parts
+    }
+
+
     fn walk_expr(mut self, e: ps.Expr) {
         match e {
             case ECall(callee, args) {
                 match callee.value {
                     case EIdent(name) {
-                        if cg_index_of(self.generic_fns, name) >= 0 && args.len() > 0 {
+                        if cg_index_of(self.gb_fn, name) >= 0 {
+                            // a BOUNDED generic call keys by concrete type(s), matching the call-site resolution.
+                            self.register(name, self.bounded_key(name, args))
+                        } else if cg_index_of(self.generic_fns, name) >= 0 && args.len() > 0 {
                             self.register(name, mono_arg_key(args[0]))   // register BEFORE args (pre-order)
                         }
                     }
@@ -1318,6 +1550,16 @@ struct FnInstColl {
                     }
                 }
                 self.walk_expr(value.value)
+                // Track this binding's concrete type (annotation first, else inferred from the initialiser) so a
+                // later bounded generic call can key an identifier argument by its type.
+                var bt = ""
+                if ty.len() > 0 {
+                    bt = ty_key_name(ty[0])
+                } else {
+                    bt = arg_type_name_scope(value.value, self.snames, self.stypes)
+                }
+                self.snames.append(n)
+                self.stypes.append(bt)
             }
             case SReturn(value, line) {
                 if value.len() > 0 {
@@ -1385,8 +1627,8 @@ struct FnInstColl {
 // build_fn_instances collects every generic-function instantiation in the program, in first-use pre-order
 // (walking declared fns + methods in decl order) — the fn analogue of build_struct_instances. Instance i is
 // numbered fn_names.len() + total_lambdas + i (appended after declared fns AND lifted lambdas).
-fn build_fn_instances(decls: [ps.Decl], generic_fns: [string]) -> FnInsts {
-    var c = FnInstColl { keys: [], bases: [], generic_fns: generic_fns }
+fn build_fn_instances(decls: [ps.Decl], generic_fns: [string], wit: WitInfo) -> FnInsts {
+    var c = FnInstColl { keys: [], bases: [], generic_fns: generic_fns, gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), snames: [], stypes: [] }
     var i = 0
     loop {
         if i >= decls.len() {
@@ -1395,6 +1637,8 @@ fn build_fn_instances(decls: [ps.Decl], generic_fns: [string]) -> FnInsts {
         match decls[i] {
             case DFn(f) {
                 if f.has_body {
+                    c.snames = []       // per-function let-binding scope (for keying identifier args by type)
+                    c.stypes = []
                     c.walk_body(f.body)
                 }
             }
@@ -1405,6 +1649,8 @@ fn build_fn_instances(decls: [ps.Decl], generic_fns: [string]) -> FnInsts {
                         break
                     }
                     if methods[mi].has_body {
+                        c.snames = []
+                        c.stypes = []
                         c.walk_body(methods[mi].body)
                     }
                     mi = mi + 1
@@ -1839,6 +2085,21 @@ struct Chunk {
     gc_fval: [float]
     expected_key: string        // consume-once: the annotation-derived mono key ("int") for a RETURN-type-inferred
                                 //   generic call in `let x: Option<int> = none_of()` — no value arg gives the key
+    // ---- Witness / bounded-generic tables (OFI-174) ----
+    if_names: [string]          // interface id -> name (GLOBAL, cloned)
+    ifm_iface: [int]            // interface-method table: owning interface index (parallel to ifm_name)
+    ifm_name: [string]          // ...required method name, in interface declaration order
+    gb_fn: [string]             // generic-fn bound table: fn name (one row per (type-param, bound), GLOBAL)
+    gb_tpname: [string]         // ...type-parameter name
+    gb_bound: [string]          // ...bound interface name
+    gb_argidx: [int]            // ...value-arg index determining this type-param's concrete type (-1 = from return)
+    impl_struct: [string]       // struct-implements table (GLOBAL): struct name -> interface it implements
+    impl_iface: [string]        // ...parallel: the interface name
+    wit_tpname: [string]        // THIS fn's witness slots, in order: slot k's type-param name (k = 0..n_wit-1)
+    wit_bound: [string]         // ...and slot k's bound interface name (the leading hidden params)
+    wit_slot: [int]             // ...and the actual local slot each witness occupies (leading, before value params)
+    tp_pslot: [int]             // THIS fn's value-param slots that are typed as a bare type-param
+    tp_pname: [string]          // ...parallel: the type-param name that slot is typed as
 
 
     // variant_field_index returns the flat payload-field-table index of field position `b` of flat-variant
@@ -2498,10 +2759,336 @@ struct Chunk {
     // gen_method_call emits `recv.method(args)`. A method takes a BOXED `self`, so a boxed receiver (self,
     // a boxed-struct local) is just pushed and CALL'd; a MULTI-SLOT receiver is first boxed (push its slots,
     // BOX_STRUCT), PICK'd (a copy for the call vs the owned temp to drop), then CALL'd and DROP_UNDER'd.
+    // iface_method_index returns the position of method `mname` within interface `iface`'s declared method
+    // list — the GET_FIELD index into the witness `Some(method-ref)` — or -1 if unknown (OFI-174).
+    fn iface_method_index(self, iface: string, mname: string) -> int {
+        let iid = cg_index_of(self.if_names, iface)
+        if iid < 0 {
+            return 0 - 1
+        }
+        var pos = 0
+        var i = 0
+        loop {
+            if i >= self.ifm_iface.len() {
+                break
+            }
+            if self.ifm_iface[i] == iid {
+                if self.ifm_name[i] == mname {
+                    return pos
+                }
+                pos = pos + 1
+            }
+            i = i + 1
+        }
+        return 0 - 1
+    }
+
+
+    // method_is_iface_impl reports whether method `mname` of struct `sname` implements an interface method (the
+    // struct declares `implements <I>` and `I` requires `mname`). Such a method is reachable via a witness's
+    // CALL_INDIRECT, which passes its receiver + Self-typed args BOXED, so those params compile as boxed. (OFI-174)
+    fn method_is_iface_impl(self, sname: string, mname: string) -> bool {
+        var i = 0
+        loop {
+            if i >= self.impl_struct.len() {
+                break
+            }
+            if self.impl_struct[i] == sname {
+                if self.iface_method_index(self.impl_iface[i], mname) >= 0 {
+                    return true
+                }
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+
+    // param_is_self_typed reports whether a parameter's declared type is the struct itself (`other: Version`
+    // in `Version.compare`, the `Self` of the interface method) — the params a witness call boxes.
+    fn param_is_self_typed(self, p: ps.Param, sid: int) -> bool {
+        if p.is_self || p.ty.len() == 0 {
+            return false
+        }
+        match p.ty[0] {
+            case TyName(qual, name) {
+                return qual == "" && name == self.st_names[sid]
+            }
+            case _ {
+                return false
+            }
+        }
+    }
+
+
+    // tp_slot_name returns the type-parameter name a receiver slot is typed as (a bound type-param param),
+    // or "" if the slot is an ordinary value.
+    fn tp_slot_name(self, slot: int) -> string {
+        var i = 0
+        loop {
+            if i >= self.tp_pslot.len() {
+                break
+            }
+            if self.tp_pslot[i] == slot {
+                return self.tp_pname[i]
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+
+    // gen_witness_method_call lowers a bound-method call on a type-param receiver (`a.compare(b)`, `x.name()`)
+    // to a witness dispatch: push the receiver + args (borrowed), then GET_FIELD the method-ref off the
+    // matching witness and CALL_INDIRECT. Returns true if it handled the call (OFI-174).
+    fn gen_witness_method_call(mut self, recv_slot: int, tpn: string, mname: string, args: [ps.Expr], line: int) -> bool {
+        var k = 0
+        loop {
+            if k >= self.wit_tpname.len() {
+                break
+            }
+            if self.wit_tpname[k] == tpn {
+                let midx = self.iface_method_index(self.wit_bound[k], mname)
+                if midx >= 0 {
+                    self.cur_line = line
+                    self.emit(OP_GET_LOCAL)             // push the receiver (borrow)
+                    self.emit_idx(recv_slot)
+                    var a = 0
+                    loop {
+                        if a >= args.len() {
+                            break
+                        }
+                        self.gen_expr(args[a], line)   // push each arg (borrow)
+                        a = a + 1
+                    }
+                    self.emit(OP_GET_LOCAL)             // push the witness dict
+                    self.emit_idx(self.wit_slot[k])
+                    self.emit(OP_GET_FIELD)             // extract the concrete method-ref
+                    self.emit_idx(midx)
+                    self.emit(OP_CALL_INDIRECT)
+                    self.emit_idx(1 + args.len())      // argc includes the receiver
+                    return true
+                }
+            }
+            k = k + 1
+        }
+        return false
+    }
+
+
+    // witness_method_ref resolves the concrete method-ref stored in a witness for `typename`'s implementation
+    // of interface method `mname`: a USER struct method -> its fn-table index; a built-in (int/string) Hash/Eq
+    // method -> the native sentinel (WITNESS_NATIVE_BASE + native id: hash=20, eq=21). (OFI-174)
+    fn witness_method_ref(self, typename: string, mname: string) -> int {
+        let fi = cg_index_of(self.fn_names, "{typename}.{mname}")
+        if fi >= 0 {
+            return fi
+        }
+        if mname == "hash" {
+            return 1000000 + 20
+        }
+        if mname == "eq" {
+            return 1000000 + 21
+        }
+        return 0
+    }
+
+
+    // arg_type_name returns the concrete type NAME of a call argument (struct name / "int" / "string" / "bool"
+    // / "float", or "" if unknown) — the per-type-param key component for monomorphizing a bounded generic.
+    fn arg_type_name(self, e: ps.Expr) -> string {
+        match e {
+            case EStructLit(ty, fields) {
+                return ty_key_name(ty.value)
+            }
+            case EInt(v, kind) {
+                return "int"
+            }
+            case EStr(parts) {
+                return "string"
+            }
+            case EBool(v) {
+                return "bool"
+            }
+            case EFloat(v) {
+                return "float"
+            }
+            case EIdent(name) {
+                let slot = self.resolve_slot(name)
+                if slot >= 0 {
+                    if self.slot_struct[slot] >= 0 {
+                        return self.st_names[self.slot_struct[slot]]
+                    }
+                    if self.local_str[slot] {
+                        return "string"
+                    }
+                    return "int"
+                }
+                return ""
+            }
+            case _ {
+                return ""
+            }
+        }
+    }
+
+
+    // emit_witness builds one witness dictionary for `typename`'s implementation of interface `bound` and
+    // leaves it on the stack: push each interface method's concrete ref (in declaration order), then wrap them
+    // in a `Some(...)` enum (NEW_ENUM Option/Some <method-count>) — the hidden leading arg of a bounded call.
+    fn emit_witness(mut self, bound: string, typename: string, line: int) {
+        let iid = cg_index_of(self.if_names, bound)
+        var count = 0
+        var i = 0
+        loop {
+            if i >= self.ifm_iface.len() {
+                break
+            }
+            if self.ifm_iface[i] == iid {
+                let ref = self.witness_method_ref(typename, self.ifm_name[i])
+                let ci = self.add_const_int(ref)
+                self.cur_line = line
+                self.emit(OP_CONST)
+                self.emit_idx(ci)
+                count = count + 1
+            }
+            i = i + 1
+        }
+        let vsome = cg_index_of(self.ev_name, "Some")
+        self.emit(OP_NEW_ENUM)
+        self.emit_idx(self.ev_owner[vsome])
+        self.emit_idx(self.ev_tag[vsome])
+        self.emit_idx(count)
+    }
+
+
+    // gen_bounded_arg pushes one value argument of a bounded generic call as a single erased Value: a struct
+    // literal is built boxed (NEW_STRUCT); an all-scalar struct local is BOX_STRUCT'd from its slots; an
+    // already-boxed struct local / scalar is pushed as-is.
+    fn gen_bounded_arg(mut self, e: ps.Expr, line: int) {
+        match e {
+            case EIdent(name) {
+                let slot = self.resolve_slot(name)
+                if slot >= 0 && self.slot_struct[slot] >= 0 {
+                    let sid = self.slot_struct[slot]
+                    if self.slot_boxed[slot] {
+                        self.cur_line = line
+                        self.emit(OP_GET_LOCAL)          // already a boxed struct value
+                        self.emit_idx(slot)
+                    } else {
+                        let span = self.struct_field_count(sid)
+                        var s = 0
+                        loop {
+                            if s >= span {
+                                break
+                            }
+                            self.cur_line = line
+                            self.emit(OP_GET_LOCAL)      // push each multi-slot field, then box
+                            self.emit_idx(slot + s)
+                            s = s + 1
+                        }
+                        self.emit(OP_BOX_STRUCT)
+                        self.emit_idx(sid)
+                    }
+                    return
+                }
+                self.gen_expr(e, line)
+            }
+            case EStructLit(ty, fields) {
+                self.gen_struct_construct(e, line, true)   // build boxed (NEW_STRUCT)
+            }
+            case _ {
+                self.gen_expr(e, line)
+            }
+        }
+    }
+
+
+    // bounded_call_key builds the monomorphization key for a bounded generic call: the concrete type of each
+    // (type-param, bound) row's determining argument, joined by "_" — matching build_fn_instances' registration
+    // so the call resolves to the right instance slot. A return-inferred row (argidx -1) uses expected_key.
+    fn bounded_call_key(self, name: string, args: [ps.Expr]) -> string {
+        var parts = ""
+        var first = true
+        var gwi = 0
+        loop {
+            if gwi >= self.gb_fn.len() {
+                break
+            }
+            if self.gb_fn[gwi] == name {
+                var tn = self.expected_key
+                let ai = self.gb_argidx[gwi]
+                if ai >= 0 && ai < args.len() {
+                    tn = self.arg_type_name(args[ai])
+                }
+                if first {
+                    parts = tn
+                    first = false
+                } else {
+                    parts = "{parts}_{tn}"
+                }
+            }
+            gwi = gwi + 1
+        }
+        return parts
+    }
+
+
+    // gen_bounded_call lowers a call to a BOUNDED generic function (OFI-174): build one witness per
+    // (type-param, bound) as a hidden leading arg, then the value args (erased/boxed), then CALL the
+    // monomorphized instance with (witness-count + value-arg-count) arguments.
+    fn gen_bounded_call(mut self, name: string, args: [ps.Expr], line: int) {
+        let key = self.bounded_call_key(name, args)
+        var fi = cg_index_of(self.fn_names, name)
+        let ix = cg_index_of(self.fn_inst_keys, "{name}<{key}>")
+        if ix >= 0 {
+            fi = self.inst_base + ix
+        }
+        var n_wit = 0
+        var gwi = 0
+        loop {
+            if gwi >= self.gb_fn.len() {
+                break
+            }
+            if self.gb_fn[gwi] == name {
+                var tn = self.expected_key
+                let ai = self.gb_argidx[gwi]
+                if ai >= 0 && ai < args.len() {
+                    tn = self.arg_type_name(args[ai])
+                }
+                self.emit_witness(self.gb_bound[gwi], tn, line)
+                n_wit = n_wit + 1
+            }
+            gwi = gwi + 1
+        }
+        var a = 0
+        loop {
+            if a >= args.len() {
+                break
+            }
+            self.gen_bounded_arg(args[a], line)
+            a = a + 1
+        }
+        self.cur_line = line
+        self.emit(OP_CALL)
+        self.emit_idx(fi)
+        self.emit_idx(n_wit + args.len())
+    }
+
+
     fn gen_method_call(mut self, object: ps.Expr, mname: string, args: [ps.Expr], line: int) {
         match object {
             case EIdent(recv) {
                 let slot = self.resolve_slot(recv)
+                if slot >= 0 {
+                    // A bound-method call on a type-param receiver dispatches through its witness (OFI-174).
+                    let tpn = self.tp_slot_name(slot)
+                    if tpn != "" {
+                        if self.gen_witness_method_call(slot, tpn, mname, args, line) {
+                            return
+                        }
+                    }
+                }
                 if slot < 0 {
                     // the receiver is not a value: a MODULE-QUALIFIED free-function call (`ps.parse(x)`) — the
                     // alias is inert and `mname` names a (merged) function, so emit a plain CALL by name.
@@ -3219,7 +3806,57 @@ struct Chunk {
     // gen_field_access emits a struct field read `obj.name`: an all-scalar (multi-slot) struct is
     // GET_LOCAL(base + index); a boxed struct is GET_LOCAL(base) then GET_FIELD(index). Returns true if
     // handled. (A `var`/mutated all-scalar struct is boxed too, but that case is deferred.)
+    // generic_call_ret_sid returns the concrete struct id a bounded generic call yields when its result is a
+    // boxed erased value of a type argument (`max<T>()->T` with T=Version returns a boxed Version), or -1.
+    // Used so `f(...).field` on such a result reads GET_FIELD_OWNED off the boxed struct even when that struct
+    // is all-scalar (erased returns are always boxed).
+    fn generic_call_ret_sid(self, e: ps.Expr) -> int {
+        match e {
+            case ECall(callee, args) {
+                match callee.value {
+                    case EIdent(name) {
+                        if cg_index_of(self.gb_fn, name) >= 0 {
+                            var gwi = 0
+                            loop {
+                                if gwi >= self.gb_fn.len() {
+                                    break
+                                }
+                                if self.gb_fn[gwi] == name {
+                                    let ai = self.gb_argidx[gwi]
+                                    if ai >= 0 && ai < args.len() {
+                                        return cg_index_of(self.st_names, self.arg_type_name(args[ai]))
+                                    }
+                                    return 0 - 1
+                                }
+                                gwi = gwi + 1
+                            }
+                        }
+                        return 0 - 1
+                    }
+                    case _ {
+                        return 0 - 1
+                    }
+                }
+            }
+            case _ {
+                return 0 - 1
+            }
+        }
+    }
+
+
     fn gen_field_access(mut self, object: ps.Expr, name: string) -> bool {
+        // A bounded/erased generic call returns a BOXED value of its concrete type argument (even an all-scalar
+        // struct is boxed when erased), so `f(...).field` evaluates the call and GET_FIELD_OWNEDs it (OFI-174).
+        let gsid = self.generic_call_ret_sid(object)
+        if gsid >= 0 {
+            let ln = self.cur_line
+            self.gen_expr(object, ln)
+            self.cur_line = ln
+            self.emit(OP_GET_FIELD_OWNED)
+            self.emit_idx(self.struct_field_index(gsid, name))
+            return true
+        }
         match object {
             case EIdent(oname) {
                 let slot = self.resolve_slot(oname)
@@ -4192,6 +4829,10 @@ struct Chunk {
                             self.emit_idx(self.ev_owner[vi])
                             self.emit_idx(self.ev_tag[vi])
                             self.emit_idx(self.ev_arity[vi])
+                        } else if cg_index_of(self.gb_fn, name) >= 0 {
+                            // a BOUNDED generic call: build witnesses + boxed args + CALL the instance (OFI-174).
+                            self.gen_bounded_call(name, args, line)
+                            self.expected_key = ""
                         } else {
                             // a free-function call: index by name, no self. A GENERIC call retargets to its
                             // monomorphized INSTANCE slot (inst_base + the first-use index of its arg-0 key).
@@ -5707,14 +6348,14 @@ fn infer_str_params(caps: [CaptureFlag], params: [ps.Param], body: [ps.Stmt]) ->
 // emit_lifted_disasm compiles + disassembles each lifted lambda of `ch` (reading spec.fn/spec.caps IN PLACE —
 // a whole-struct move out of the array is rejected), as `== fn <lambda> (arity C+P) ==`. Nested lambdas
 // (a lambda inside a lambda) are a documented gap — flat lambdas cover the corpus.
-fn emit_lifted_disasm(ch: Chunk, fn_names: [string], fn_rets: FnRets, structs: StructTable, enums: EnumTable, globals: GlobalConsts, instances: [string], generic_fns: [string], generic_pquals: [string], fn_inst_keys: [string], inst_base: int) {
+fn emit_lifted_disasm(ch: Chunk, fn_names: [string], fn_rets: FnRets, structs: StructTable, enums: EnumTable, globals: GlobalConsts, instances: [string], generic_fns: [string], generic_pquals: [string], fn_inst_keys: [string], inst_base: int, wit: WitInfo) {
     var li = 0
     loop {
         if li >= ch.lifted.len() {
             break
         }
         println("== fn <lambda> (arity {ch.lifted[li].caps.len() + ch.lifted[li].decl.params.len()}) ==")
-        let lch = compile_fn(ch.lifted[li].decl, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, 0, ch.lifted[li].caps, generic_fns, generic_pquals, fn_inst_keys, inst_base)
+        let lch = compile_fn(ch.lifted[li].decl, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, 0, ch.lifted[li].caps, generic_fns, generic_pquals, fn_inst_keys, inst_base, wit)
         disassemble(lch)
         li = li + 1
     }
@@ -5730,6 +6371,7 @@ fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, st
     var no_caps: [CaptureFlag] = []
     var no_keys: [string] = []
     let gf = build_generic_fns(decls)
+    let wit = build_wit_info(decls)
     // Pass 0: count lifted lambdas (compile with a dummy instance context; read only ch.lifted.len()) so the
     // instance base (= after declared fns AND lambdas) is known before pass 1 resolves any generic call.
     var total_lambdas = 0
@@ -5747,7 +6389,7 @@ fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, st
                         break
                     }
                     if methods[mi].has_body {
-                        let ch = compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid0, fn_names.len(), no_caps, gf.names, gf.pquals, no_keys, fn_names.len())
+                        let ch = compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid0, fn_names.len(), no_caps, gf.names, gf.pquals, no_keys, fn_names.len(), wit)
                         total_lambdas = total_lambdas + ch.lifted.len()
                     }
                     mi = mi + 1
@@ -5756,7 +6398,7 @@ fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, st
             }
             case DFn(f) {
                 if f.has_body {
-                    let ch = compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, fn_names.len(), no_caps, gf.names, gf.pquals, no_keys, fn_names.len())
+                    let ch = compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, fn_names.len(), no_caps, gf.names, gf.pquals, no_keys, fn_names.len(), wit)
                     total_lambdas = total_lambdas + ch.lifted.len()
                 }
             }
@@ -5766,7 +6408,7 @@ fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, st
         i0 = i0 + 1
     }
     let inst_base = fn_names.len() + total_lambdas
-    let insts = build_fn_instances(decls, gf.names)
+    let insts = build_fn_instances(decls, gf.names, wit)
     // Pass 1: declared functions (generic calls in their bodies now resolve to instance slots).
     var lambda_base = fn_names.len()
     var sid = 0
@@ -5784,7 +6426,7 @@ fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, st
                     }
                     if methods[mi].has_body {
                         println("== fn {name}.{methods[mi].name} (arity {methods[mi].params.len()}) ==")
-                        let ch = compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid, lambda_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base)
+                        let ch = compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid, lambda_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit)
                         disassemble(ch)
                         lambda_base = lambda_base + ch.lifted.len()
                     }
@@ -5795,7 +6437,7 @@ fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, st
             case DFn(f) {
                 if f.has_body {
                     println("== fn {f.name} (arity {f.params.len()}) ==")
-                    let ch = compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, lambda_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base)
+                    let ch = compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, lambda_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit)
                     disassemble(ch)
                     lambda_base = lambda_base + ch.lifted.len()
                 }
@@ -5821,8 +6463,8 @@ fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, st
                         break
                     }
                     if methods[mi].has_body {
-                        let ch = compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid2, lb2, no_caps, gf.names, gf.pquals, insts.keys, inst_base)
-                        emit_lifted_disasm(ch, fn_names, fn_rets, structs, enums, globals, instances, gf.names, gf.pquals, insts.keys, inst_base)
+                        let ch = compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid2, lb2, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit)
+                        emit_lifted_disasm(ch, fn_names, fn_rets, structs, enums, globals, instances, gf.names, gf.pquals, insts.keys, inst_base, wit)
                         lb2 = lb2 + ch.lifted.len()
                     }
                     mi = mi + 1
@@ -5831,8 +6473,8 @@ fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, st
             }
             case DFn(f) {
                 if f.has_body {
-                    let ch = compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, lb2, no_caps, gf.names, gf.pquals, insts.keys, inst_base)
-                    emit_lifted_disasm(ch, fn_names, fn_rets, structs, enums, globals, instances, gf.names, gf.pquals, insts.keys, inst_base)
+                    let ch = compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, lb2, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit)
+                    emit_lifted_disasm(ch, fn_names, fn_rets, structs, enums, globals, instances, gf.names, gf.pquals, insts.keys, inst_base, wit)
                     lb2 = lb2 + ch.lifted.len()
                 }
             }
@@ -5857,7 +6499,7 @@ fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, st
                 case DFn(f) {
                     if f.has_body && f.name == insts.bases[xi] {
                         println("== fn {f.name} (arity {f.params.len()}) ==")
-                        let ich = compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, inst_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base)
+                        let ich = compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, inst_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit)
                         disassemble(ich)
                     }
                 }
@@ -5875,7 +6517,7 @@ fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, st
 // the implicit trailing `CONST <0>; <drops>; RETURN` stage-0 appends (the drops release string locals).
 // A lifted lambda passes its capture flags as `caps` (declared as leading slots before the lambda's params);
 // `lambda_base` is the fn-table index of this function's first lambda (used for MAKE_CLOSURE operands).
-fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: StructTable, enums: EnumTable, globals: GlobalConsts, instances: [string], self_struct_id: int, lambda_base: int, caps: [CaptureFlag], generic_fns: [string], generic_pquals: [string], fn_inst_keys: [string], inst_base: int) -> Chunk {
+fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: StructTable, enums: EnumTable, globals: GlobalConsts, instances: [string], self_struct_id: int, lambda_base: int, caps: [CaptureFlag], generic_fns: [string], generic_pquals: [string], fn_inst_keys: [string], inst_base: int, wit: WitInfo) -> Chunk {
     var code: [int] = []
     var lines: [int] = []
     var cif: [bool] = []
@@ -5911,7 +6553,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "" }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [] }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     if self_struct_id >= 0 {
         // a method receiver: `self` is a BOXED struct in slot 0 (so self.field is GET_FIELD even for an
@@ -5929,6 +6571,23 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         ch.slot_elem[ch.slot_elem.len() - 1] = caps[cx].elem
         ch.slot_kind[ch.slot_kind.len() - 1] = caps[cx].kind
         cx = cx + 1
+    }
+    // Witness leading params (OFI-174): a bounded generic fn (`max<T: Ord>`) receives one hidden witness per
+    // (type-param, bound), in declaration order, BEFORE its value params. Each is a borrowed `Some(method-ref)`
+    // enum in a plain non-droppable slot (stage-0 never drops a witness). Record each slot's (type-param,
+    // bound) so a bound-method call in the body can find which witness to GET_FIELD its method-ref from.
+    var gwi = 0
+    loop {
+        if gwi >= ch.gb_fn.len() {
+            break
+        }
+        if ch.gb_fn[gwi] == f.name {
+            ch.declare_binding("$wit", 1, 0 - 1, false, false, false, false)
+            ch.wit_slot.append(ch.locals.len() - 1)
+            ch.wit_tpname.append(ch.gb_tpname[gwi])
+            ch.wit_bound.append(ch.gb_bound[gwi])
+        }
+        gwi = gwi + 1
     }
     // An UNTYPED lambda param used as a string (`|s| s + suffix`) is declared as an owned/droppable string so
     // it INCREFs on consume + drops at exit (regular fns have typed params, so this is empty for them).
@@ -5948,8 +6607,16 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
                     // a Copy/borrow erased type-param: INCREF on consume (local_str), NEVER dropped (over-retain)
                     ch.declare_binding(f.params[p].name, 1, 0 - 1, true, false, false, false)
                 }
+                // Record this param's slot + its type-param name so a bound-method call `p.method(..)` on it
+                // dispatches through the matching witness (OFI-174).
+                ch.tp_pslot.append(ch.locals.len() - 1)
+                ch.tp_pname.append(erased_tparam_name(f.params[p], f.generics))
             } else if cg_index_of(str_params, f.params[p].name) >= 0 {
                 ch.declare_binding(f.params[p].name, 1, 0 - 1, true, true, false, false)
+            } else if self_struct_id >= 0 && ch.method_is_iface_impl(ch.st_names[self_struct_id], f.name) && ch.param_is_self_typed(f.params[p], self_struct_id) {
+                // An interface-method param typed as the struct itself (Ord.compare's `other: Self`) arrives
+                // BOXED through the witness's CALL_INDIRECT, so declare it as a single boxed struct slot (OFI-174).
+                ch.declare_binding(f.params[p].name, 1, self_struct_id, false, false, true, false)
             } else {
                 ch.declare_param(f.params[p])
             }
