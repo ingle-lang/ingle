@@ -530,6 +530,7 @@ fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
 
     // Function table (methods interleaved with free functions, declaration order — CALL operands index it).
     var no_caps: [cg.CaptureFlag] = []           // declared local: an inline `[]` caps arg mis-emits its elem kind
+    var no_gen: [string] = []                    // generic-fn set / instance keys: empty (lambda + generic .emb deferred)
     var sid = 0
     var i = 0
     loop {
@@ -547,7 +548,7 @@ fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
                         w.emit_str(name + "." + methods[mi].name)
                         w.emit_optstr(sources[i])
                         w.emit_uvarint(methods[mi].params.len())
-                        let ch = cg.compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid, fn_names.len(), no_caps)
+                        let ch = cg.compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid, fn_names.len(), no_caps, no_gen, no_gen, fn_names.len())
                         w.emit_chunk(ch)
                     }
                     mi = mi + 1
@@ -559,7 +560,7 @@ fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
                     w.emit_str(f.name)
                     w.emit_optstr(sources[i])
                     w.emit_uvarint(f.params.len())
-                    let ch = cg.compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, fn_names.len(), no_caps)
+                    let ch = cg.compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, fn_names.len(), no_caps, no_gen, no_gen, fn_names.len())
                     w.emit_chunk(ch)
                 }
             }

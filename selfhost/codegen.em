@@ -132,6 +132,38 @@ fn ty_is_channel(ty: ps.Ty) -> bool {
 }
 
 
+// param_is_erased_tparam reports whether param `p`'s type is a bare generic TYPE PARAMETER (`x: T` where T is
+// one of the enclosing fn's `<...>` names). Such a value is ERASED — refcounted at run time if the concrete
+// type is (string/enum/...), a no-op INCREF if scalar — so it INCREFs on consume but is NEVER dropped
+// (over-retain, sound per OFI-009). Realized as local_str=true (INCREF via is_str_local_read) + droppable=false.
+fn param_is_erased_tparam(p: ps.Param, generics: [ps.GenericParam]) -> bool {
+    if p.ty.len() == 0 {
+        return false
+    }
+    match p.ty[0] {
+        case TyName(qual, name) {
+            if qual != "" {
+                return false
+            }
+            var i = 0
+            loop {
+                if i >= generics.len() {
+                    break
+                }
+                if generics[i].name == name {
+                    return true
+                }
+                i = i + 1
+            }
+            return false
+        }
+        case _ {
+            return false
+        }
+    }
+}
+
+
 // ty_is_fn reports whether a type is a function type `fn(...) -> ...` — a first-class CLOSURE value, which is
 // a refcounted heap object, so a fn-typed `let`/param is owned/droppable (dropped at every exit).
 fn ty_is_fn(ty: ps.Ty) -> bool {
@@ -1048,6 +1080,266 @@ fn build_struct_instances(decls: [ps.Decl], snames: [string]) -> [string] {
 }
 
 
+// mono_arg_key returns the monomorphization key of a generic call's FIRST argument — the type it instantiates
+// the bare type-param T to. The string need not equal stage-0's SemType int, only induce the SAME partition
+// (the key is never printed). Tier-1: LITERAL args (int/sized/float/bool/string); a non-literal falls to a
+// shared "k0" (variables/exprs — the Tier-1 corpus has none; general inference is Tier-2).
+fn mono_arg_key(e: ps.Expr) -> string {
+    match e {
+        case EInt(v, kind) {
+            return "k{kind}"
+        }
+        case EStr(parts) {
+            return "str"
+        }
+        case EFloat(v) {
+            return "k9"
+        }
+        case EBool(v) {
+            return "k10"
+        }
+        case _ {
+            return "k0"
+        }
+    }
+}
+
+
+// build_generic_fns returns the names of every GENERIC free function (generics.len() > 0) — a call to one
+// lowers to a monomorphized INSTANCE slot, not the base slot.
+fn build_generic_fns(decls: [ps.Decl]) -> [string] {
+    var out: [string] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.generics.len() > 0 {
+                    out.append(f.name)
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
+// FnInsts holds the collected generic-function instances: `keys` are full instance keys ("id<str>") in
+// first-use pre-order (the dedup identity + numbering order), `bases` the parallel base fn names ("id").
+struct FnInsts {
+    keys: [string]
+    bases: [string]
+}
+
+
+// FnInstColl walks call sites collecting generic-function instances (pre-order, first-use), mirroring InstColl.
+struct FnInstColl {
+    keys: [string]
+    bases: [string]
+    generic_fns: [string]
+
+
+    fn register(mut self, name: string, argkey: string) {
+        let k = "{name}<{argkey}>"
+        if cg_index_of(self.keys, k) < 0 {
+            self.keys.append(k)
+            self.bases.append(name)
+        }
+    }
+
+
+    fn walk_expr(mut self, e: ps.Expr) {
+        match e {
+            case ECall(callee, args) {
+                match callee.value {
+                    case EIdent(name) {
+                        if cg_index_of(self.generic_fns, name) >= 0 && args.len() > 0 {
+                            self.register(name, mono_arg_key(args[0]))   // register BEFORE args (pre-order)
+                        }
+                    }
+                    case _ {
+                    }
+                }
+                self.walk_expr(callee.value)
+                self.walk_args(args)
+            }
+            case EUnary(op, operand) {
+                self.walk_expr(operand.value)
+            }
+            case EBinary(op, l, r) {
+                self.walk_expr(l.value)
+                self.walk_expr(r.value)
+            }
+            case EGet(object, name) {
+                self.walk_expr(object.value)
+            }
+            case EIndex(object, index) {
+                self.walk_expr(object.value)
+                self.walk_expr(index.value)
+            }
+            case EArray(elems, lines) {
+                self.walk_args(elems)
+            }
+            case EStructLit(ty, fields) {
+                var i = 0
+                loop {
+                    if i >= fields.len() {
+                        break
+                    }
+                    self.walk_expr(fields[i].value)
+                    i = i + 1
+                }
+            }
+            case ETry(operand) {
+                self.walk_expr(operand.value)
+            }
+            case ERange(lo, hi) {
+                self.walk_expr(lo.value)
+                self.walk_expr(hi.value)
+            }
+            case EStr(parts) {
+                var i = 0
+                loop {
+                    if i >= parts.len() {
+                        break
+                    }
+                    if parts[i].hole.len() > 0 {
+                        self.walk_expr(parts[i].hole[0])
+                    }
+                    i = i + 1
+                }
+            }
+            case ELambda(params, body) {
+                self.walk_body(body)
+            }
+            case _ {
+            }
+        }
+    }
+
+
+    fn walk_args(mut self, args: [ps.Expr]) {
+        var i = 0
+        loop {
+            if i >= args.len() {
+                break
+            }
+            self.walk_expr(args[i])
+            i = i + 1
+        }
+    }
+
+
+    fn walk_stmt(mut self, s: ps.Stmt) {
+        match s {
+            case SLet(v, n, ty, value) {
+                self.walk_expr(value.value)
+            }
+            case SReturn(value, line) {
+                if value.len() > 0 {
+                    self.walk_expr(value[0].value)
+                }
+            }
+            case SExpr(expr) {
+                self.walk_expr(expr.value)
+            }
+            case SAssign(target, value) {
+                self.walk_expr(target.value)
+                self.walk_expr(value.value)
+            }
+            case SIf(cond, then_blk, els) {
+                self.walk_expr(cond.value)
+                self.walk_body(then_blk)
+                self.walk_body(els)
+            }
+            case SMatch(value, cases) {
+                self.walk_expr(value.value)
+                var i = 0
+                loop {
+                    if i >= cases.len() {
+                        break
+                    }
+                    self.walk_body(cases[i].body)
+                    i = i + 1
+                }
+            }
+            case SLoop(body) {
+                self.walk_body(body)
+            }
+            case SFor(vn, iv, iter, body) {
+                self.walk_expr(iter.value)
+                self.walk_body(body)
+            }
+            case SBlock(body) {
+                self.walk_body(body)
+            }
+            case SSpawn(call) {
+                self.walk_expr(call.value)
+            }
+            case SNursery(body, line) {
+                self.walk_body(body)
+            }
+            case _ {
+            }
+        }
+    }
+
+
+    fn walk_body(mut self, body: [ps.Stmt]) {
+        var i = 0
+        loop {
+            if i >= body.len() {
+                break
+            }
+            self.walk_stmt(body[i])
+            i = i + 1
+        }
+    }
+}
+
+
+// build_fn_instances collects every generic-function instantiation in the program, in first-use pre-order
+// (walking declared fns + methods in decl order) — the fn analogue of build_struct_instances. Instance i is
+// numbered fn_names.len() + total_lambdas + i (appended after declared fns AND lifted lambdas).
+fn build_fn_instances(decls: [ps.Decl], generic_fns: [string]) -> FnInsts {
+    var c = FnInstColl { keys: [], bases: [], generic_fns: generic_fns }
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.has_body {
+                    c.walk_body(f.body)
+                }
+            }
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        c.walk_body(methods[mi].body)
+                    }
+                    mi = mi + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return FnInsts { keys: clone_strs(c.keys), bases: clone_strs(c.bases) }
+}
+
+
 // string_method_op maps a built-in string method to its single opcode (`.len()` -> STR_LEN,
 // `.bytes()` -> STR_BYTES), or -1 if not a built-in single-opcode string method.
 fn string_method_op(mname: string) -> int {
@@ -1418,6 +1710,9 @@ struct Chunk {
     ext_pquals: [string]        // ...per-param qual string ('0'/'1'/'2'): a '2' (move) Ptr arg is move-consumed
     lambda_base: int            // fn-table index of THIS function's first lifted lambda (declared fns come first)
     lifted: [LambdaSpec]        // lambdas encountered in THIS function, in source order (compiled after decls)
+    generic_fns: [string]       // names of generic free fns — a call to one lowers to a monomorphized instance
+    fn_inst_keys: [string]      // every generic instance key ("id<str>") in order; slot = inst_base + index
+    inst_base: int              // fn-table index of the FIRST instance (= fn_names.len() + total lifted lambdas)
     cont_targets: [int]         // loop-context stack: each enclosing loop's continue target (its start)
     loop_bases: [int]           // ...and each loop's local count at body entry (break/continue unwind to it)
     break_jumps: [int]          // flat list of pending break-JUMP operand positions (per-loop slice)
@@ -1700,6 +1995,21 @@ struct Chunk {
         let idx = self.strings.len()
         self.strings.append(s)
         return idx
+    }
+
+
+    // is_erased_read reports whether `e` reads an ERASED type-param local (`x: T`) — a slot marked local_str
+    // (INCREF-on-consume) but NOT droppable (over-retain). `let a = x` of such a value stays erased (no drop).
+    fn is_erased_read(self, e: ps.Expr) -> bool {
+        match e {
+            case EIdent(name) {
+                let slot = self.resolve_slot(name)
+                return slot >= 0 && self.local_str[slot] && self.local_drop[slot] == false
+            }
+            case _ {
+                return false
+            }
+        }
     }
 
 
@@ -2317,6 +2627,17 @@ struct Chunk {
             case ECall(callee, args) {
                 if self.is_enum_ctor(e) {
                     return true
+                }
+                // a GENERIC call returning bare-T yields its arg-0's type: `id("copy")` (id<T>(x:T)->T) is a
+                // fresh owning-temp STRING, so `println(id("copy"))` masks + drops it.
+                match callee.value {
+                    case EIdent(name) {
+                        if cg_index_of(self.generic_fns, name) >= 0 && args.len() > 0 {
+                            return self.arg_is_owning_object(args[0])
+                        }
+                    }
+                    case _ {
+                    }
                 }
                 return self.expr_ret_kind(e) != 0 - 1   // a user call returning string/array/struct
             }
@@ -3780,9 +4101,16 @@ struct Chunk {
                             self.emit_idx(self.ev_tag[vi])
                             self.emit_idx(self.ev_arity[vi])
                         } else {
-                            // a free-function call: index by name, no self. An owning-temp ARRAY arg is kept +
-                            // dropped around the call (PICK/DROP_UNDER); the simple no-mask case is unchanged.
-                            self.gen_user_call(cg_index_of(self.fn_names, name), args, line)
+                            // a free-function call: index by name, no self. A GENERIC call retargets to its
+                            // monomorphized INSTANCE slot (inst_base + the first-use index of its arg-0 key).
+                            var fi = cg_index_of(self.fn_names, name)
+                            if cg_index_of(self.generic_fns, name) >= 0 && args.len() > 0 {
+                                let ix = cg_index_of(self.fn_inst_keys, "{name}<{mono_arg_key(args[0])}>")
+                                if ix >= 0 {
+                                    fi = self.inst_base + ix
+                                }
+                            }
+                            self.gen_user_call(fi, args, line)
                         }
                     }
                     case _ {
@@ -4080,6 +4408,10 @@ struct Chunk {
                     } else if rk == -3 {
                         self.gen_expr(value.value, value.line)       // CALL -> one owned string slot (fresh)
                         self.declare_binding(name, 1, -1, true, true, false, false)
+                    } else if self.is_erased_read(value.value) {
+                        // `let a = x` of an erased type-param: INCREF on consume, NEVER dropped (over-retain)
+                        self.gen_consume(value.value, value.line)
+                        self.declare_binding(name, 1, -1, true, false, false, false)
                     } else if self.expr_is_string(value.value) {
                         self.gen_consume(value.value, value.line)    // a string place-read INCREFs; owned/droppable
                         self.declare_binding(name, 1, -1, true, true, false, false)
@@ -5263,14 +5595,14 @@ fn infer_str_params(caps: [CaptureFlag], params: [ps.Param], body: [ps.Stmt]) ->
 // emit_lifted_disasm compiles + disassembles each lifted lambda of `ch` (reading spec.fn/spec.caps IN PLACE —
 // a whole-struct move out of the array is rejected), as `== fn <lambda> (arity C+P) ==`. Nested lambdas
 // (a lambda inside a lambda) are a documented gap — flat lambdas cover the corpus.
-fn emit_lifted_disasm(ch: Chunk, fn_names: [string], fn_rets: FnRets, structs: StructTable, enums: EnumTable, globals: GlobalConsts, instances: [string]) {
+fn emit_lifted_disasm(ch: Chunk, fn_names: [string], fn_rets: FnRets, structs: StructTable, enums: EnumTable, globals: GlobalConsts, instances: [string], generic_fns: [string], fn_inst_keys: [string], inst_base: int) {
     var li = 0
     loop {
         if li >= ch.lifted.len() {
             break
         }
         println("== fn <lambda> (arity {ch.lifted[li].caps.len() + ch.lifted[li].decl.params.len()}) ==")
-        let lch = compile_fn(ch.lifted[li].decl, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, 0, ch.lifted[li].caps)
+        let lch = compile_fn(ch.lifted[li].decl, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, 0, ch.lifted[li].caps, generic_fns, fn_inst_keys, inst_base)
         disassemble(lch)
         li = li + 1
     }
@@ -5283,8 +5615,48 @@ fn emit_lifted_disasm(ch: Chunk, fn_names: [string], fn_rets: FnRets, structs: S
 // function (declared fns re-compiled in pass 2 only to re-derive their `lifted` specs — Ember's ownership
 // model forbids holding the specs across the passes).
 fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, structs: StructTable, enums: EnumTable, globals: GlobalConsts, instances: [string]) {
-    var no_caps: [CaptureFlag] = []              // a declared local (annotation drives the empty-array elem kind;
-    var lambda_base = fn_names.len()             // an inline `[]` arg mis-emits NEW_ARRAY vs stage-0 NEW_STRUCT_ARRAY)
+    var no_caps: [CaptureFlag] = []
+    var no_keys: [string] = []
+    let generic_fns = build_generic_fns(decls)
+    // Pass 0: count lifted lambdas (compile with a dummy instance context; read only ch.lifted.len()) so the
+    // instance base (= after declared fns AND lambdas) is known before pass 1 resolves any generic call.
+    var total_lambdas = 0
+    var sid0 = 0
+    var i0 = 0
+    loop {
+        if i0 >= decls.len() {
+            break
+        }
+        match decls[i0] {
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        let ch = compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid0, fn_names.len(), no_caps, generic_fns, no_keys, fn_names.len())
+                        total_lambdas = total_lambdas + ch.lifted.len()
+                    }
+                    mi = mi + 1
+                }
+                sid0 = sid0 + 1
+            }
+            case DFn(f) {
+                if f.has_body {
+                    let ch = compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, fn_names.len(), no_caps, generic_fns, no_keys, fn_names.len())
+                    total_lambdas = total_lambdas + ch.lifted.len()
+                }
+            }
+            case _ {
+            }
+        }
+        i0 = i0 + 1
+    }
+    let inst_base = fn_names.len() + total_lambdas
+    let insts = build_fn_instances(decls, generic_fns)
+    // Pass 1: declared functions (generic calls in their bodies now resolve to instance slots).
+    var lambda_base = fn_names.len()
     var sid = 0
     var i = 0
     loop {
@@ -5300,7 +5672,7 @@ fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, st
                     }
                     if methods[mi].has_body {
                         println("== fn {name}.{methods[mi].name} (arity {methods[mi].params.len()}) ==")
-                        let ch = compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid, lambda_base, no_caps)
+                        let ch = compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid, lambda_base, no_caps, generic_fns, insts.keys, inst_base)
                         disassemble(ch)
                         lambda_base = lambda_base + ch.lifted.len()
                     }
@@ -5311,7 +5683,7 @@ fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, st
             case DFn(f) {
                 if f.has_body {
                     println("== fn {f.name} (arity {f.params.len()}) ==")
-                    let ch = compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, lambda_base, no_caps)
+                    let ch = compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, lambda_base, no_caps, generic_fns, insts.keys, inst_base)
                     disassemble(ch)
                     lambda_base = lambda_base + ch.lifted.len()
                 }
@@ -5337,8 +5709,8 @@ fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, st
                         break
                     }
                     if methods[mi].has_body {
-                        let ch = compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid2, lb2, no_caps)
-                        emit_lifted_disasm(ch, fn_names, fn_rets, structs, enums, globals, instances)
+                        let ch = compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid2, lb2, no_caps, generic_fns, insts.keys, inst_base)
+                        emit_lifted_disasm(ch, fn_names, fn_rets, structs, enums, globals, instances, generic_fns, insts.keys, inst_base)
                         lb2 = lb2 + ch.lifted.len()
                     }
                     mi = mi + 1
@@ -5347,8 +5719,8 @@ fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, st
             }
             case DFn(f) {
                 if f.has_body {
-                    let ch = compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, lb2, no_caps)
-                    emit_lifted_disasm(ch, fn_names, fn_rets, structs, enums, globals, instances)
+                    let ch = compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, lb2, no_caps, generic_fns, insts.keys, inst_base)
+                    emit_lifted_disasm(ch, fn_names, fn_rets, structs, enums, globals, instances, generic_fns, insts.keys, inst_base)
                     lb2 = lb2 + ch.lifted.len()
                 }
             }
@@ -5357,6 +5729,33 @@ fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, st
         }
         j = j + 1
     }
+    // Pass 3: the monomorphized generic-fn instances, in first-use order (each = the base body under a new
+    // slot; erased ⇒ byte-identical to the base). Find each instance's base FnDecl by name and re-emit it.
+    var xi = 0
+    loop {
+        if xi >= insts.keys.len() {
+            break
+        }
+        var di = 0
+        loop {
+            if di >= decls.len() {
+                break
+            }
+            match decls[di] {
+                case DFn(f) {
+                    if f.has_body && f.name == insts.bases[xi] {
+                        println("== fn {f.name} (arity {f.params.len()}) ==")
+                        let ich = compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, inst_base, no_caps, generic_fns, insts.keys, inst_base)
+                        disassemble(ich)
+                    }
+                }
+                case _ {
+                }
+            }
+            di = di + 1
+        }
+        xi = xi + 1
+    }
 }
 
 
@@ -5364,7 +5763,7 @@ fn disassemble_program(decls: [ps.Decl], fn_names: [string], fn_rets: FnRets, st
 // the implicit trailing `CONST <0>; <drops>; RETURN` stage-0 appends (the drops release string locals).
 // A lifted lambda passes its capture flags as `caps` (declared as leading slots before the lambda's params);
 // `lambda_base` is the fn-table index of this function's first lambda (used for MAKE_CLOSURE operands).
-fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: StructTable, enums: EnumTable, globals: GlobalConsts, instances: [string], self_struct_id: int, lambda_base: int, caps: [CaptureFlag]) -> Chunk {
+fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: StructTable, enums: EnumTable, globals: GlobalConsts, instances: [string], self_struct_id: int, lambda_base: int, caps: [CaptureFlag], generic_fns: [string], fn_inst_keys: [string], inst_base: int) -> Chunk {
     var code: [int] = []
     var lines: [int] = []
     var cif: [bool] = []
@@ -5400,7 +5799,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval) }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval) }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     if self_struct_id >= 0 {
         // a method receiver: `self` is a BOXED struct in slot 0 (so self.field is GET_FIELD even for an
@@ -5428,7 +5827,10 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
             break
         }
         if f.params[p].is_self == false {
-            if cg_index_of(str_params, f.params[p].name) >= 0 {
+            if param_is_erased_tparam(f.params[p], f.generics) {
+                // erased type-param: INCREF on consume (local_str), NEVER dropped (over-retain)
+                ch.declare_binding(f.params[p].name, 1, 0 - 1, true, false, false, false)
+            } else if cg_index_of(str_params, f.params[p].name) >= 0 {
                 ch.declare_binding(f.params[p].name, 1, 0 - 1, true, true, false, false)
             } else {
                 ch.declare_param(f.params[p])
