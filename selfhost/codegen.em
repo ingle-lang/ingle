@@ -1424,6 +1424,9 @@ struct WitInfo {
     sg_struct: [string]     // struct-generics table: struct name (one row per type parameter)
     sg_tparam: [string]     // ...the type-parameter name (so a method of a generic struct erases `K`/`V`)
     sg_bound: [string]      // ...that type-param's bound interfaces, joined by "+" ("" if none, "Copy" excluded)
+    gret_fn: [string]       // generic-return table: a generic fn whose RETURN is a bare type-param T or [T]
+    gret_arr: [bool]        // ...is the return `[T]` (true) or bare `T` (false)?
+    gret_argidx: [int]      // ...the value-param index (typed T or [T]) whose concrete type the result takes
 }
 
 
@@ -1462,6 +1465,107 @@ fn ty_ret_is_owning(ret: [ps.Ty]) -> bool {
 }
 
 
+// generic_has reports whether `name` is one of the type parameters in `generics`.
+fn generic_has(generics: [ps.GenericParam], name: string) -> bool {
+    var i = 0
+    loop {
+        if i >= generics.len() {
+            break
+        }
+        if generics[i].name == name {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+
+// ret_tparam_name returns the type-parameter name a return type IS — a bare `T` or an array `[T]` of a type
+// parameter — else "" (a concrete or non-type-param return, handled by the ordinary fn_rets kind).
+fn ret_tparam_name(ty: ps.Ty, generics: [ps.GenericParam]) -> string {
+    match ty {
+        case TyName(qual, name) {
+            if qual == "" && generic_has(generics, name) {
+                return name
+            }
+            return ""
+        }
+        case TyArray(elem) {
+            match elem.value {
+                case TyName(qual, name) {
+                    if qual == "" && generic_has(generics, name) {
+                        return name
+                    }
+                }
+                case _ {
+                }
+            }
+            return ""
+        }
+        case _ {
+            return ""
+        }
+    }
+}
+
+
+// ret_is_array_tparam reports whether a return type is an ARRAY (`[T]`) rather than a bare type parameter.
+fn ret_is_array_tparam(ty: ps.Ty) -> bool {
+    match ty {
+        case TyArray(elem) {
+            return true
+        }
+        case _ {
+            return false
+        }
+    }
+}
+
+
+// param_of_shape_index returns the index of the first value param typed as `tpname` (is_array=false) or as
+// `[tpname]` (is_array=true) — the argument whose concrete type a generic result of that shape takes.
+fn param_of_shape_index(params: [ps.Param], tpname: string, is_array: bool) -> int {
+    var i = 0
+    loop {
+        if i >= params.len() {
+            break
+        }
+        if params[i].is_self == false && params[i].ty.len() > 0 {
+            if is_array {
+                match params[i].ty[0] {
+                    case TyArray(elem) {
+                        match elem.value {
+                            case TyName(qual, name) {
+                                if qual == "" && name == tpname {
+                                    return i
+                                }
+                            }
+                            case _ {
+                            }
+                        }
+                    }
+                    case _ {
+                    }
+                }
+            } else {
+                match params[i].ty[0] {
+                    case TyName(qual, name) {
+                        if qual == "" && name == tpname {
+                            return i
+                        }
+                    }
+                    case _ {
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+
 // build_wit_info collects every interface's method list and every generic free function's per-type-param
 // bounds. The bound rows are ordered (type-param, then bound) exactly as stage-0 prepends witness params.
 fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
@@ -1478,6 +1582,9 @@ fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
     var sg_struct: [string] = []
     var sg_tparam: [string] = []
     var sg_bound: [string] = []
+    var gret_fn: [string] = []
+    var gret_arr: [bool] = []
+    var gret_argidx: [int] = []
     var i = 0
     loop {
         if i >= decls.len() {
@@ -1553,6 +1660,21 @@ fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
                         }
                         gi = gi + 1
                     }
+                    // Generic-RETURN shape (OFI-174): if the return is a bare type-param `T` or `[T]`, record the
+                    // value-param of the same shape whose concrete type the result takes — so `let x = sort(words)`
+                    // infers x:[string] and `let s = gtwice(f,"hi")` infers s:string (for STR_LEN on x[i]/.len()).
+                    if f.ret.len() > 0 {
+                        let rtp = ret_tparam_name(f.ret[0], f.generics)
+                        if rtp != "" {
+                            let ra = ret_is_array_tparam(f.ret[0])
+                            let ai = param_of_shape_index(f.params, rtp, ra)
+                            if ai >= 0 {
+                                gret_fn.append(f.name)
+                                gret_arr.append(ra)
+                                gret_argidx.append(ai)
+                            }
+                        }
+                    }
                 }
             }
             case _ {
@@ -1581,7 +1703,7 @@ fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
         ifm_owning.append(false)
         if_names.append("Ord")
     }
-    return WitInfo { if_names: if_names, ifm_iface: ifm_iface, ifm_name: ifm_name, ifm_owning: ifm_owning, gb_fn: gb_fn, gb_tpname: gb_tpname, gb_bound: gb_bound, gb_argidx: gb_argidx, impl_struct: impl_struct, impl_iface: impl_iface, sg_struct: sg_struct, sg_tparam: sg_tparam, sg_bound: sg_bound }
+    return WitInfo { if_names: if_names, ifm_iface: ifm_iface, ifm_name: ifm_name, ifm_owning: ifm_owning, gb_fn: gb_fn, gb_tpname: gb_tpname, gb_bound: gb_bound, gb_argidx: gb_argidx, impl_struct: impl_struct, impl_iface: impl_iface, sg_struct: sg_struct, sg_tparam: sg_tparam, sg_bound: sg_bound, gret_fn: gret_fn, gret_arr: gret_arr, gret_argidx: gret_argidx }
 }
 
 
@@ -2405,6 +2527,9 @@ struct Chunk {
     sg_struct: [string]         // struct-generics table (GLOBAL): struct name -> a type-param name
     sg_tparam: [string]         // ...parallel: the type-param name (so a generic-struct METHOD erases it)
     sg_bound: [string]          // ...parallel: that type-param's bounds joined by "+" ("" if none)
+    gret_fn: [string]           // generic-return table (GLOBAL): a generic fn returning a bare `T` / `[T]`
+    gret_arr: [bool]            // ...is the return `[T]` (true) or bare `T`?
+    gret_argidx: [int]          // ...the value-param whose concrete type the result takes
     wit_tpname: [string]        // THIS fn's witness slots, in order: slot k's type-param name (k = 0..n_wit-1)
     wit_bound: [string]         // ...and slot k's bound interface name (the leading hidden params)
     wit_slot: [int]             // ...and the actual local slot each witness occupies (leading, before value params)
@@ -4389,6 +4514,105 @@ struct Chunk {
     // boxed erased value of a type argument (`max<T>()->T` with T=Version returns a boxed Version), or -1.
     // Used so `f(...).field` on such a result reads GET_FIELD_OWNED off the boxed struct even when that struct
     // is all-scalar (erased returns are always boxed).
+    // gret_call_index returns the generic-return-table row for a call to a generic fn whose return is a bare
+    // type-param `T` or `[T]` (so the result's concrete type is inferred from an argument), or -1 (OFI-174).
+    fn gret_call_index(self, e: ps.Expr) -> int {
+        match e {
+            case ECall(callee, args) {
+                match callee.value {
+                    case EIdent(name) {
+                        return cg_index_of(self.gret_fn, name)
+                    }
+                    case EGet(obj, mname) {
+                        // a module-qualified free-fn call (`list.sort(...)`): the alias is inert, mname is the fn.
+                        match obj.value {
+                            case EIdent(mod) {
+                                if self.resolve_slot(mod) < 0 {
+                                    return cg_index_of(self.gret_fn, mname)
+                                }
+                            }
+                            case _ {
+                            }
+                        }
+                        return 0 - 1
+                    }
+                    case _ {
+                        return 0 - 1
+                    }
+                }
+            }
+            case _ {
+                return 0 - 1
+            }
+        }
+    }
+
+
+    // gret_arg_elem returns the array-element type code of a `[T]`-returning generic call's determining argument
+    // (`sort(words)` -> words's element, -3 for [string]), or -1.
+    fn gret_arg_elem(self, e: ps.Expr, gi: int) -> int {
+        match e {
+            case ECall(callee, args) {
+                let ai = self.gret_argidx[gi]
+                if ai >= 0 && ai < args.len() {
+                    match args[ai] {
+                        case EIdent(nm) {
+                            let s = self.resolve_slot(nm)
+                            if s >= 0 && self.slot_array[s] {
+                                return self.slot_elem[s]
+                            }
+                        }
+                        case _ {
+                        }
+                    }
+                }
+            }
+            case _ {
+            }
+        }
+        return 0 - 1
+    }
+
+
+    // array_lit_elem_code returns the element type code of an array LITERAL from its first element (a string
+    // element -> -3, a struct element -> its sid), or -1 (scalar / empty / unknown).
+    fn array_lit_elem_code(self, e: ps.Expr) -> int {
+        match e {
+            case EArray(elems, lines) {
+                if elems.len() > 0 {
+                    if self.expr_is_string(elems[0]) {
+                        return 0 - 3
+                    }
+                    let sid = self.struct_value_info(elems[0])
+                    if sid >= 0 {
+                        return sid
+                    }
+                }
+            }
+            case _ {
+            }
+        }
+        return 0 - 1
+    }
+
+
+    // gret_arg_is_string reports whether a bare-`T`-returning generic call's determining argument is a string
+    // (`gtwice(f, "hi")` -> the result is an owned string).
+    fn gret_arg_is_string(self, e: ps.Expr, gi: int) -> bool {
+        match e {
+            case ECall(callee, args) {
+                let ai = self.gret_argidx[gi]
+                if ai >= 0 && ai < args.len() {
+                    return self.expr_is_string(args[ai])
+                }
+            }
+            case _ {
+            }
+        }
+        return false
+    }
+
+
     fn generic_call_ret_sid(self, e: ps.Expr) -> int {
         match e {
             case ECall(callee, args) {
@@ -5714,6 +5938,22 @@ struct Chunk {
                     self.declare_binding(name, 1, -1, false, true, false, false)
                     return
                 }
+                let gci = self.gret_call_index(value.value)
+                if gci >= 0 {
+                    // A generic call whose return is a bare `T` / `[T]` (`let bylen = sort(words)` -> [string],
+                    // `let s = gtwice(f,"hi")` -> string): infer the concrete result type from the determining
+                    // argument so `bylen[i].len()` / `s.len()` know their element/value is a string (OFI-174).
+                    if self.gret_arr[gci] {
+                        self.gen_expr(value.value, value.line)                     // CALL -> one owned array slot
+                        self.declare_binding(name, 1, 0 - 1, false, true, false, true)
+                        self.slot_elem[self.slot_elem.len() - 1] = self.gret_arg_elem(value.value, gci)
+                        return
+                    } else if self.gret_arg_is_string(value.value, gci) {
+                        self.gen_expr(value.value, value.line)                     // CALL -> one owned string slot
+                        self.declare_binding(name, 1, 0 - 1, true, true, false, false)
+                        return
+                    }
+                }
                 if self.is_enum_ctor(value.value) || self.call_returns_enum(value.value) {
                     // an enum is a heap/move value -> the owned binding is dropped at every exit (a variant
                     // construction or an enum-returning call both land a fresh owned enum). If it's a RETURN-
@@ -5821,6 +6061,13 @@ struct Chunk {
                         // its element kind (e.g. `var q: [string] = []` -> `q[i]` is a refcounted place read
                         // that INCREFs when consumed). An empty literal has no element to infer it from.
                         self.slot_elem[self.slot_elem.len() - 1] = self.array_elem_type_code(elem_ty_of(ty[0]))
+                    } else {
+                        // No annotation: infer the element type from the first literal element (`["a", …]` ->
+                        // string, -3), so `words[i].len()` (and a generic call keyed on words's element) knows it.
+                        let ec = self.array_lit_elem_code(value.value)
+                        if ec != 0 - 1 {
+                            self.slot_elem[self.slot_elem.len() - 1] = ec
+                        }
                     }
                 } else {
                     // An initialiser that is a same-file call to a function returning an owned type lands an
@@ -7269,7 +7516,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [] }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [] }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     // Bind this fn's type params to concrete types for baking witnesses in a bounded generic-struct
     // construction (`Bag<K>{}` in new_bag bakes K=int's Hash/Eq). Derived from the fn's monomorphized instance
