@@ -196,11 +196,11 @@ struct Writer {
     // struct); a field whose type IS a type parameter takes the substituted argument's kind (so Box<int>'s
     // `value` packs as I64, not boxed).
     fn emit_one_struct(mut self, name: string, fields: [ps.Field], structs: cg.StructTable,
-                       gparams: [string], gargs: [string]) {
+                       gparams: [string], gargs: [string], nwit: int) {
         self.emit_str(name)
         self.emit_u8(0)             // flags: is_rc | is_resource<<1 (TODO)
         self.emit_svarint(0 - 1)    // drop_fn (TODO)
-        self.emit_uvarint(fields.len())
+        self.emit_uvarint(fields.len() + nwit)
         var fi = 0
         loop {
             if fi >= fields.len() {
@@ -227,6 +227,18 @@ struct Writer {
             self.emit_optstr(fields[fi].name)
             fi = fi + 1
         }
+        // A BOUNDED generic struct's hidden witness fields (OFI-174): each a boxed Some(ref) enum with a NULL
+        // name — AEK 0 (boxed), field_struct -1, name NULL — matching stage-0's append-model layout.
+        var wi = 0
+        loop {
+            if wi >= nwit {
+                break
+            }
+            self.emit_uvarint(0)        // AEK 0 (boxed)
+            self.emit_svarint(0 - 1)    // field_struct -1
+            self.emit_uvarint(0)        // name: NULL (optstr length 0)
+            wi = wi + 1
+        }
     }
 
 
@@ -243,7 +255,7 @@ struct Writer {
             match decls[i] {
                 case DStruct(name, generics, impls, fields, methods, kind) {
                     let none: [string] = []
-                    self.emit_one_struct(name, fields, structs, none, none)
+                    self.emit_one_struct(name, fields, structs, none, none, struct_witness_count(generics))
                 }
                 case _ {
                 }
@@ -274,7 +286,7 @@ struct Writer {
                                 gk = gk + 1
                             }
                             let gargs = type_args(instances[ii])
-                            self.emit_one_struct(name, fields, structs, gnames, gargs)
+                            self.emit_one_struct(name, fields, structs, gnames, gargs, 0)
                         }
                     }
                     case _ {
@@ -433,6 +445,22 @@ fn variant_tag(enums: cg.EnumTable, enum_id: int, name: string) -> int {
 
 // count_functions counts the function slots the container holds: every free function and struct method with
 // a body, in the order emit_program (and stage 0) walks them.
+// struct_witness_count returns the number of hidden witness fields a struct carries — one per (type-param,
+// bound) — so the serialized struct table's field count matches build_structs (OFI-174).
+fn struct_witness_count(generics: [ps.GenericParam]) -> int {
+    var n = 0
+    var i = 0
+    loop {
+        if i >= generics.len() {
+            break
+        }
+        n = n + generics[i].bounds.len()
+        i = i + 1
+    }
+    return n
+}
+
+
 fn count_functions(decls: [ps.Decl]) -> int {
     var n = 0
     var i = 0

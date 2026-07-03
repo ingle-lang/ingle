@@ -1051,12 +1051,14 @@ fn ty_key(ty: ps.Ty) -> string {
 struct InstColl {
     keys: [string]
     snames: [string]
+    bounded: [string]           // BOUNDED generic struct names — NOT monomorphized to instances (witnesses live
+                                //   in the base struct's hidden fields, so there is no per-instantiation layout)
 
 
     fn register(mut self, ty: ps.Ty) {
         match ty {
             case TyGeneric(qual, name, args) {
-                if cg_index_of(self.snames, name) >= 0 {
+                if cg_index_of(self.snames, name) >= 0 && cg_index_of(self.bounded, name) < 0 {
                     let k = ty_key(ty)
                     if cg_index_of(self.keys, k) < 0 {
                         self.keys.append(k)
@@ -1198,11 +1200,42 @@ struct InstColl {
 }
 
 
+// bounded_struct_names returns the names of every struct with a BOUNDED type parameter — those carry hidden
+// witness fields in the base and are not monomorphized to per-instantiation struct instances.
+fn bounded_struct_names(decls: [ps.Decl]) -> [string] {
+    var out: [string] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var gi = 0
+                loop {
+                    if gi >= generics.len() {
+                        break
+                    }
+                    if generics[gi].bounds.len() > 0 {
+                        out.append(name)
+                    }
+                    gi = gi + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
 // build_struct_instances returns the generic-struct INSTANCE keys in stage-0's monomorphization order — each
 // instance's runtime struct id is `declared_struct_count + its index here` (appended after the declared
 // structs, which include the generic base `Box<T>` itself).
 fn build_struct_instances(decls: [ps.Decl], snames: [string]) -> [string] {
-    var c = InstColl { keys: [], snames: snames }
+    var c = InstColl { keys: [], snames: snames, bounded: bounded_struct_names(decls) }
     var i = 0
     loop {
         if i >= decls.len() {
