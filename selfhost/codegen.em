@@ -2826,6 +2826,8 @@ struct Chunk {
     mwit_field: [int]           // ...the self field index of that witness (declared fields, then witness fields)
     mrecv_name: [string]        // generic-struct binding -> its type-ARGUMENTS key (`b: Bag<int>` -> "int"), so a
     mrecv_args: [string]        // ...method call `b.add(..)` retargets to the monomorphized `Bag.add<int>` instance
+    aei_name: [string]          // an array binding of INTERFACE elements (`shapes: [Shape]`) -> its element
+    aei_iface: [string]         // ...interface name, so `for s in shapes` types the loop var s as that interface
     cur_tp_names: [string]      // THIS fn's own type-param names (`K` for new_bag<K>) — for baking witnesses in
     cur_tp_types: [string]      // ...parallel: the concrete type each binds to in this compilation (`int`)
     copy_tparams: [string]      // type-param names bounded `T: Copy` — a Copy local is ALIASED (over-retain),
@@ -4191,6 +4193,56 @@ struct Chunk {
             i = i - 1
         }
         return cg_index_of(self.fn_names, "{struct_name}.{mname}")
+    }
+
+
+    // gen_iface_coerce lowers a struct value being UPCAST to an interface value: gen the receiver, push the
+    // impl's method fn-indices (in the interface's method order) as a vtable record (NEW_ENUM 0 0 N), then
+    // MAKE_DYN to box {receiver, vtable}. Mirrors stage-0's coerce_witness wrapping in gen_expr.
+    fn gen_iface_coerce(mut self, value: ps.Expr, iface: string, line: int) {
+        let sname = self.struct_lit_name(value)
+        // the receiver must be a single BOXED struct value (even an all-scalar one, which would otherwise
+        // multi-slot) so MAKE_DYN can box {receiver, vtable}.
+        if self.struct_value_info(value) >= 0 {
+            self.gen_struct_construct(value, line, true)
+        } else {
+            self.gen_expr(value, line)
+        }
+        let iid = cg_index_of(self.if_names, iface)
+        var n = 0
+        var i = 0
+        loop {
+            if i >= self.ifm_iface.len() {
+                break
+            }
+            if self.ifm_iface[i] == iid {
+                let fnidx = cg_index_of(self.fn_names, "{sname}.{self.ifm_name[i]}")
+                let ci = self.add_const_int(fnidx)
+                self.emit(OP_CONST)
+                self.emit_idx(ci)
+                n = n + 1
+            }
+            i = i + 1
+        }
+        self.cur_line = line
+        self.emit(OP_NEW_ENUM)                           // the vtable: an all-boxed record of fn-indices
+        self.emit_idx(0)
+        self.emit_idx(0)
+        self.emit_idx(n)
+        self.emit(OP_MAKE_DYN)                           // pops [receiver, vtable] -> interface value
+    }
+
+
+    // struct_lit_name returns the struct name a value expression constructs (`Circle{...}` -> "Circle"), or "".
+    fn struct_lit_name(self, e: ps.Expr) -> string {
+        match e {
+            case EStructLit(ty, fields) {
+                return ty_key_name(ty.value)
+            }
+            case _ {
+                return ""
+            }
+        }
     }
 
 
@@ -5838,6 +5890,45 @@ struct Chunk {
     // declare_binding adds a binding occupying `span` consecutive slots (a multi-slot all-scalar struct
     // uses filler slots after the base so slot == array index still holds). `droppable` marks an owned
     // refcounted value (a string, or an owned boxed-struct `let`) to DROP at function exit.
+    // declare_iface_local declares a single-slot INTERFACE-value binding (`s: Shape` param, or a `for s in
+    // shapes` loop var over `[Shape]`) — a BORROW carrying its interface name for CALL_DYN dispatch. Appends the
+    // slot fields directly (a post-hoc `slot_iface[last]=ifn` string element-assign trips cgen_c, OFI-166/173).
+    fn declare_iface_local(mut self, name: string, ifn: string) {
+        self.locals.append(name)
+        self.local_str.append(false)
+        self.local_drop.append(false)
+        self.slot_struct.append(0 - 1)
+        self.slot_boxed.append(false)
+        self.slot_array.append(false)
+        self.slot_elem.append(0 - 1)
+        self.slot_kind.append(0)
+        self.slot_iface.append(ifn)
+    }
+
+
+    // iter_elem_iface returns the element interface of a `for` loop's array iterator (`for s in shapes` where
+    // shapes: [Shape] -> "Shape"), or "" — so the loop var is typed as an interface value.
+    fn iter_elem_iface(self, iter: ps.Expr) -> string {
+        match iter {
+            case EIdent(name) {
+                var i = self.aei_name.len() - 1
+                loop {
+                    if i < 0 {
+                        break
+                    }
+                    if self.aei_name[i] == name {
+                        return self.aei_iface[i]
+                    }
+                    i = i - 1
+                }
+            }
+            case _ {
+            }
+        }
+        return ""
+    }
+
+
     fn declare_binding(mut self, name: string, span: int, struct_id: int, is_str: bool, droppable: bool, boxed: bool, is_array: bool) {
         self.locals.append(name)
         self.local_str.append(is_str)
@@ -5894,18 +5985,8 @@ struct Chunk {
         let ifn = self.type_iface_name(p.ty[0])
         if ifn != "" {
             // an INTERFACE-typed param (`s: Shape`) holds a boxed {receiver, vtable} value — a BORROW (the
-            // caller owns it, so not dropped here); record its interface so `s.method()` -> CALL_DYN. Append the
-            // slot directly (NOT declare_binding + `slot_iface[last]=ifn`: a string element-assign trips the
-            // cgen_c own_into_slot gap, OFI-166/173).
-            self.locals.append(p.name)
-            self.local_str.append(false)
-            self.local_drop.append(false)
-            self.slot_struct.append(0 - 1)
-            self.slot_boxed.append(false)
-            self.slot_array.append(false)
-            self.slot_elem.append(0 - 1)
-            self.slot_kind.append(0)
-            self.slot_iface.append(ifn)
+            // caller owns it, so not dropped here); record its interface so `s.method()` -> CALL_DYN.
+            self.declare_iface_local(p.name, ifn)
             return
         }
         let sid = self.type_struct_id(p.ty[0])
@@ -6697,13 +6778,39 @@ struct Chunk {
                     }
                 } else if is_array_lit(value.value) {
                     var done = false
-                    if ty.len() > 0 && array_lit_is_empty(value.value) {
+                    if ty.len() > 0 && self.type_iface_name(elem_ty_of(ty[0])) != "" {
+                        // a `[Shape]` array: each struct element is UPCAST to an interface value (vtable +
+                        // MAKE_DYN), then NEW_ARRAY of boxed interface values (AEK 0).
+                        let iface = self.type_iface_name(elem_ty_of(ty[0]))
+                        match value.value {
+                            case EArray(elems, lines) {
+                                var ci = 0
+                                loop {
+                                    if ci >= elems.len() {
+                                        break
+                                    }
+                                    self.gen_iface_coerce(elems[ci], iface, lines[ci])
+                                    ci = ci + 1
+                                }
+                                self.emit(OP_NEW_ARRAY)
+                                self.emit_idx(elems.len())
+                                self.emit(0)
+                                done = true
+                                // record the element interface so `for s in <name>` types s as an interface value.
+                                self.aei_name.append(name)
+                                self.aei_iface.append(iface)
+                            }
+                            case _ {
+                            }
+                        }
+                    }
+                    if done == false && ty.len() > 0 && array_lit_is_empty(value.value) {
                         // an empty `[]` has no element to infer the kind from; take it from the `[T]`
                         // annotation: an all-scalar struct element packs inline (NEW_STRUCT_ARRAY), else the
                         // element kind (e.g. `[string]` -> 0, not int).
                         self.emit_empty_array(elem_ty_of(ty[0]), value.line)
                         done = true
-                    } else if ty.len() > 0 {
+                    } else if done == false && ty.len() > 0 {
                         // a non-empty array with a SIZED-scalar annotation (`[u8]`/`[u64]`/`[f32]`) must pack
                         // at the annotation's width, not the first element's inferred kind (`[u8] = [1,2,3]`
                         // is bytes, not i64s). A boxed/inline-struct element (aek 0 / 12) falls to gen_expr.
@@ -7101,7 +7208,12 @@ struct Chunk {
                         self.emit(OP_CONST)
                         self.emit_idx(zero)
                         let var_slot = self.locals.len()
-                        self.declare_binding(vname, 1, -1, false, false, false, false)
+                        let loop_iface = self.iter_elem_iface(iter.value)
+                        if loop_iface != "" {
+                            self.declare_iface_local(vname, loop_iface)   // `for s in shapes` -> s: Shape (CALL_DYN)
+                        } else {
+                            self.declare_binding(vname, 1, -1, false, false, false, false)
+                        }
                         let start = self.code.len()
                         self.cont_targets.append(start)
                         self.loop_bases.append(self.locals.len())
@@ -8219,7 +8331,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, slot_iface: [], cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), st_felem_payload: clone_ints(structs.f_elem_payload), st_felem_payload_tp: clone_strs(structs.f_elem_payload_tp), st_felem_tpidx: clone_ints(structs.f_elem_tpidx), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), ifm_ret_str: clone_bools(wit.ifm_ret_str), ifm_ret_kind: clone_ints(wit.ifm_ret_kind), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], copy_tparams: [], at_base_generic: false, mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [] }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, slot_iface: [], cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), st_felem_payload: clone_ints(structs.f_elem_payload), st_felem_payload_tp: clone_strs(structs.f_elem_payload_tp), st_felem_tpidx: clone_ints(structs.f_elem_tpidx), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), ifm_ret_str: clone_bools(wit.ifm_ret_str), ifm_ret_kind: clone_ints(wit.ifm_ret_kind), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], copy_tparams: [], at_base_generic: false, mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [], aei_name: [], aei_iface: [] }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     // A generic fn's BASE (emitted-but-uncalled) resolves its own generic calls to BASE callees, matching
     // stage-0 (the base body is never in the mono worklist); only a monomorphized INSTANCE retargets its calls
