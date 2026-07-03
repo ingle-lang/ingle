@@ -178,6 +178,71 @@ fn erased_tparam_name(p: ps.Param, generics: [ps.GenericParam]) -> string {
 }
 
 
+// str_starts_with reports whether `s` begins with `prefix`.
+fn str_starts_with(s: string, prefix: string) -> bool {
+    if s.len() < prefix.len() {
+        return false
+    }
+    return byte_slice(s, 0, prefix.len()) == prefix
+}
+
+
+// parse_inst_types extracts the concrete type-argument names from a monomorphized instance key: "new_bag<int>"
+// with fn "new_bag" -> ["int"]; "pair_age<Person_Person>" -> ["Person", "Person"] (reversing the "_" join that
+// bounded_call_key/bounded_key produce). Used to bind a bounded generic fn's type params to concrete types.
+fn parse_inst_types(key: string, fnname: string) -> [string] {
+    var out: [string] = []
+    let pre = fnname.len() + 1                      // skip "fnname<"
+    if key.len() <= pre + 1 {
+        return out
+    }
+    let inner = byte_slice(key, pre, key.len() - 1)  // strip trailing ">"
+    let bs = inner.bytes()
+    var cur = ""
+    var i = 0
+    loop {
+        if i >= bs.len() {
+            break
+        }
+        if int(bs[i]) == 95 {                        // '_'
+            out.append(cur)
+            cur = ""
+        } else {
+            cur = cur + byte_slice(inner, i, i + 1)
+        }
+        i = i + 1
+    }
+    out.append(cur)
+    return out
+}
+
+
+// split_plus splits a "Hash+Eq" bound string into ["Hash", "Eq"] (the sg_bound encoding).
+fn split_plus(s: string) -> [string] {
+    var out: [string] = []
+    if s == "" {
+        return out
+    }
+    let bs = s.bytes()
+    var cur = ""
+    var i = 0
+    loop {
+        if i >= bs.len() {
+            break
+        }
+        if int(bs[i]) == 43 {                    // '+'
+            out.append(cur)
+            cur = ""
+        } else {
+            cur = cur + byte_slice(s, i, i + 1)
+        }
+        i = i + 1
+    }
+    out.append(cur)
+    return out
+}
+
+
 // ty_tparam_name_in returns the type name if `ty` is a bare (unqualified) type parameter listed in `names`,
 // else "". Used with the erased-type-param name list a function body carries (its own generics plus, for a
 // generic-struct method, the struct's type params — so `Bag.add(x: K)` sees K as erased).
@@ -326,6 +391,33 @@ fn build_structs(decls: [ps.Decl]) -> StructTable {
                         fak.append(0 - 1)
                     }
                     fi = fi + 1
+                }
+                // A BOUNDED generic struct carries one HIDDEN WITNESS FIELD per (type-param, bound) — the
+                // dictionary of that bound's methods for the concrete type argument (OFI-174). They follow the
+                // declared fields (so declared field indices are unchanged) and are `Some(ref)` enums.
+                var gwi = 0
+                loop {
+                    if gwi >= generics.len() {
+                        break
+                    }
+                    var bwi = 0
+                    loop {
+                        if bwi >= generics[gwi].bounds.len() {
+                            break
+                        }
+                        fo.append(id)
+                        fn_.append("$wit")
+                        fsc.append(false)
+                        fst.append(false)
+                        far.append(false)
+                        fsd.append(0 - 1)
+                        fen.append(true)           // a witness is a Some(method-ref) enum (refcounted single Value)
+                        fkind.append(0)
+                        fel.append(0 - 1)
+                        fak.append(0 - 1)
+                        bwi = bwi + 1
+                    }
+                    gwi = gwi + 1
                 }
                 id = id + 1
             }
@@ -1488,13 +1580,39 @@ struct FnInstColl {
     }
 
 
+    // bounded_ret_key builds a RETURN-type-inferred bounded generic call's key: the single concrete type
+    // `tyname` (from the `let`'s annotation) repeated per (type-param, bound) row — matching bounded_call_key
+    // when its rows read expected_key.
+    fn bounded_ret_key(self, name: string, tyname: string) -> string {
+        var parts = ""
+        var first = true
+        var gwi = 0
+        loop {
+            if gwi >= self.gb_fn.len() {
+                break
+            }
+            if self.gb_fn[gwi] == name {
+                if first {
+                    parts = tyname
+                    first = false
+                } else {
+                    parts = "{parts}_{tyname}"
+                }
+            }
+            gwi = gwi + 1
+        }
+        return parts
+    }
+
+
     fn walk_expr(mut self, e: ps.Expr) {
         match e {
             case ECall(callee, args) {
                 match callee.value {
                     case EIdent(name) {
-                        if cg_index_of(self.gb_fn, name) >= 0 {
-                            // a BOUNDED generic call keys by concrete type(s), matching the call-site resolution.
+                        if cg_index_of(self.gb_fn, name) >= 0 && args.len() > 0 {
+                            // a BOUNDED generic call keys by concrete type(s); a 0-arg (return-inferred) one is
+                            // registered in walk_stmt from the `let` annotation instead.
                             self.register(name, self.bounded_key(name, args))
                         } else if cg_index_of(self.generic_fns, name) >= 0 && args.len() > 0 {
                             self.register(name, mono_arg_key(args[0]))   // register BEFORE args (pre-order)
@@ -1585,7 +1703,13 @@ struct FnInstColl {
                             match callee.value {
                                 case EIdent(name) {
                                     if cargs.len() == 0 && cg_index_of(self.generic_fns, name) >= 0 {
-                                        self.register(name, mono_ty_key(ty[0]))
+                                        if cg_index_of(self.gb_fn, name) >= 0 {
+                                            // a BOUNDED return-inferred generic (`var b: Bag<int> = new_bag()`):
+                                            // key by the annotation's type-arg, repeated per (type-param, bound).
+                                            self.register(name, self.bounded_ret_key(name, mono_ty_key(ty[0])))
+                                        } else {
+                                            self.register(name, mono_ty_key(ty[0]))
+                                        }
                                     }
                                 }
                                 case _ {
@@ -2150,6 +2274,8 @@ struct Chunk {
     wit_slot: [int]             // ...and the actual local slot each witness occupies (leading, before value params)
     tp_pslot: [int]             // THIS fn's value-param slots that are typed as a bare type-param
     tp_pname: [string]          // ...parallel: the type-param name that slot is typed as
+    cur_tp_names: [string]      // THIS fn's own type-param names (`K` for new_bag<K>) — for baking witnesses in
+    cur_tp_types: [string]      // ...parallel: the concrete type each binds to in this compilation (`int`)
 
 
     // variant_field_index returns the flat payload-field-table index of field position `b` of flat-variant
@@ -3084,6 +3210,27 @@ struct Chunk {
     }
 
 
+    // let_value_is_bounded_call reports whether a `let`'s initialiser is a 0-arg (return-inferred) bounded
+    // generic call (`new_bag()`), so the SLet threads the annotation type in as expected_key.
+    fn let_value_is_bounded_call(self, e: ps.Expr) -> bool {
+        match e {
+            case ECall(callee, args) {
+                match callee.value {
+                    case EIdent(name) {
+                        return args.len() == 0 && cg_index_of(self.gb_fn, name) >= 0
+                    }
+                    case _ {
+                        return false
+                    }
+                }
+            }
+            case _ {
+                return false
+            }
+        }
+    }
+
+
     // gen_bounded_call lowers a call to a BOUNDED generic function (OFI-174): build one witness per
     // (type-param, bound) as a hidden leading arg, then the value args (erased/boxed), then CALL the
     // monomorphized instance with (witness-count + value-arg-count) arguments.
@@ -3738,11 +3885,69 @@ struct Chunk {
     // gen_struct_construct lowers a struct literal as either multi-slot (push fields) or boxed (push fields
     // + NEW_STRUCT) — the caller chooses, since a `var`/mutated all-scalar struct is boxed though its TYPE
     // is all-scalar (so a field assignment can mutate it via SET_FIELD).
+    // resolve_concrete_tyname maps a construction type-argument to its concrete type name, resolving a bare
+    // type parameter of the enclosing fn through its cur_tp binding (`Bag<K>{}` in new_bag<int> -> K = "int").
+    fn resolve_concrete_tyname(self, ty: ps.Ty) -> string {
+        match ty {
+            case TyName(qual, name) {
+                let i = cg_index_of(self.cur_tp_names, name)
+                if i >= 0 {
+                    return self.cur_tp_types[i]
+                }
+                return name
+            }
+            case _ {
+                return ty_key_name(ty)
+            }
+        }
+    }
+
+
+    // emit_struct_witnesses pushes a BOUNDED generic struct's hidden witness fields (one Some(method-ref) per
+    // (struct type-param, bound)) for the concrete type arguments, right after the declared fields and before
+    // NEW_STRUCT — so `Bag<K>{items,count}` in new_bag<int> appends int's Hash + Eq witnesses (OFI-174).
+    fn emit_struct_witnesses(mut self, sty: ps.Ty, line: int) {
+        match sty {
+            case TyGeneric(qual, sname, args) {
+                var pi = 0
+                var sgx = 0
+                loop {
+                    if sgx >= self.sg_struct.len() {
+                        break
+                    }
+                    if self.sg_struct[sgx] == sname {
+                        var tn = ""
+                        if pi < args.len() {
+                            tn = self.resolve_concrete_tyname(args[pi])
+                        }
+                        let bounds = split_plus(self.sg_bound[sgx])
+                        var bi = 0
+                        loop {
+                            if bi >= bounds.len() {
+                                break
+                            }
+                            if bounds[bi] != "" {
+                                self.emit_witness(bounds[bi], tn, line)
+                            }
+                            bi = bi + 1
+                        }
+                        pi = pi + 1
+                    }
+                    sgx = sgx + 1
+                }
+            }
+            case _ {
+            }
+        }
+    }
+
+
     fn gen_struct_construct(mut self, value: ps.Expr, line: int, boxed: bool) {
         match value {
             case EStructLit(ty, fields) {
                 let sid = self.type_struct_id(ty.value)
                 self.gen_struct_fields(sid, fields, line)
+                self.emit_struct_witnesses(ty.value, line)   // bake hidden witness fields (bounded generic struct)
                 if boxed {
                     self.emit(OP_NEW_STRUCT)
                     self.emit_idx(self.lit_struct_id(ty.value))
@@ -4343,11 +4548,56 @@ struct Chunk {
     // `ty`. A monomorphized generic instance (`Box<Expr>{…}`) gets its own id appended after the declared
     // structs (`struct_count + instance_index`, mirroring stage-0's struct_instance_id); a plain struct keeps
     // its declared id. The FIELD LAYOUT (count/order) is unchanged — only the box's type id differs.
+    // struct_is_bounded reports whether struct `sname` has a bounded type parameter (so it carries hidden
+    // witness fields and an erased construction of it uses the base struct id).
+    fn struct_is_bounded(self, sname: string) -> bool {
+        var i = 0
+        loop {
+            if i >= self.sg_struct.len() {
+                break
+            }
+            if self.sg_struct[i] == sname && self.sg_bound[i] != "" {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+
+    // ty_args_have_tparam reports whether any type argument is a bare type parameter of the enclosing fn (an
+    // ERASED construction like `Bag<K>` inside new_bag<int>).
+    fn ty_args_have_tparam(self, args: [ps.Ty]) -> bool {
+        var i = 0
+        loop {
+            if i >= args.len() {
+                break
+            }
+            match args[i] {
+                case TyName(qual, name) {
+                    if qual == "" && cg_index_of(self.cur_tp_names, name) >= 0 {
+                        return true
+                    }
+                }
+                case _ {
+                }
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+
     fn lit_struct_id(self, ty: ps.Ty) -> int {
         match ty {
             case TyGeneric(qual, name, args) {
                 let base = self.struct_id_of(name)
                 if base < 0 {
+                    return base
+                }
+                // An ERASED construction of a bounded generic struct (`Bag<K>` in new_bag<int>) uses the BASE
+                // struct id (its witness-augmented layout), not a monomorphized instance (OFI-174).
+                if self.struct_is_bounded(name) && self.ty_args_have_tparam(args) {
                     return base
                 }
                 let ii = cg_index_of(self.inst_keys, ty_key(ty))
@@ -4921,6 +5171,7 @@ struct Chunk {
                 let sid = self.type_struct_id(ty.value)
                 if sid >= 0 {
                     self.gen_struct_fields(sid, fields, line)
+                    self.emit_struct_witnesses(ty.value, line)   // bake hidden witness fields (bounded generic struct)
                     if self.struct_all_scalar(sid) == false {
                         self.emit(OP_NEW_STRUCT)     // boxed: a refcounted-field struct boxes its fields
                         self.emit_idx(self.lit_struct_id(ty.value))
@@ -5087,6 +5338,12 @@ struct Chunk {
     fn gen_stmt(mut self, s: ps.Stmt) {
         match s {
             case SLet(is_var, name, ty, value) {
+                // A RETURN-type-inferred BOUNDED generic call (`var b: Bag<int> = new_bag()`) binds its type
+                // param from the annotation; thread it in as expected_key so gen_bounded_call builds the right
+                // witnesses + resolves the right instance (consumed once, in the ECall dispatch). (OFI-174)
+                if ty.len() > 0 && self.let_value_is_bounded_call(value.value) {
+                    self.expected_key = mono_ty_key(ty[0])
+                }
                 if is_channel_call(value.value) {
                     // `let ch = channel(N)` lands a fresh owned channel HANDLE (refcounted) -> a single droppable
                     // slot, dropped at every exit and INCREF'd when passed to a spawn/call.
@@ -5140,6 +5397,17 @@ struct Chunk {
                         self.declare_binding(name, 1, -1, false, false, false, false)
                     }
                     return
+                }
+                if ty.len() > 0 && self.let_value_is_bounded_call(value.value) {
+                    // A bounded generic call returning a struct (`var b: Bag<int> = new_bag()`): the erased
+                    // result is a boxed struct of the annotation's type. Declare a boxed struct binding so
+                    // `b.method(..)` dispatches to the struct's methods (OFI-174).
+                    let annsid = self.type_struct_id(ty[0])
+                    if annsid >= 0 {
+                        self.gen_expr(value.value, value.line)
+                        self.declare_binding(name, 1, annsid, false, true, true, false)
+                        return
+                    }
                 }
                 let sid = self.struct_value_info(value.value)
                 if sid >= 0 {
@@ -6603,8 +6871,38 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [] }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [] }
     ch.cur_return_span = ch.return_struct_span(f.ret)
+    // Bind this fn's type params to concrete types for baking witnesses in a bounded generic-struct
+    // construction (`Bag<K>{}` in new_bag bakes K=int's Hash/Eq). Derived from the fn's monomorphized instance
+    // key ("new_bag<int>"); a single-instantiation bounded generic bakes the same witnesses in base + instance,
+    // matching stage-0 (OFI-174).
+    if f.generics.len() > 0 {
+        var ki = 0
+        loop {
+            if ki >= ch.fn_inst_keys.len() {
+                break
+            }
+            if str_starts_with(ch.fn_inst_keys[ki], "{f.name}<") {
+                let types = parse_inst_types(ch.fn_inst_keys[ki], f.name)
+                var gi = 0
+                loop {
+                    if gi >= f.generics.len() {
+                        break
+                    }
+                    ch.cur_tp_names.append(f.generics[gi].name)
+                    if gi < types.len() {
+                        ch.cur_tp_types.append(types[gi])
+                    } else {
+                        ch.cur_tp_types.append("")
+                    }
+                    gi = gi + 1
+                }
+                break
+            }
+            ki = ki + 1
+        }
+    }
     if self_struct_id >= 0 {
         // a method receiver: `self` is a BOXED struct in slot 0 (so self.field is GET_FIELD even for an
         // all-scalar struct), and a BORROW — not dropped at exit.
