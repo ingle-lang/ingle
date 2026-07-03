@@ -2386,8 +2386,9 @@ struct Checker {
                 self.check_expr(hi.value)
                 return TY_INFER
             }
-            case ELambda(params) {
-                // the lambda body is not yet stored on the AST (parser drops it for ast_print); skip.
+            case ELambda(params, body) {
+                // a lambda's type is a fn value; the checker stays lenient (TY_INFER) — the body is verified
+                // structurally by codegen. (Full lambda-body type-checking is a future checker pass.)
                 return TY_INFER
             }
             case EError {

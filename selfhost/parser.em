@@ -55,7 +55,7 @@ enum Expr {
     EStructLit(ty: Box<Ty>, fields: [SLitField])
     ETry(operand: Box<Expr>)
     ERange(lo: Box<Expr>, hi: Box<Expr>)
-    ELambda(params: [Param])                         // body parsed but not printed (lossy)
+    ELambda(params: [Param], body: [Stmt])           // body captured (expr-body normalized to a return); NOT printed
     EError
 }
 
@@ -321,7 +321,7 @@ fn p_expr(e: Expr, depth: int) {
             p_expr(lo.value, depth + 1)
             p_expr(hi.value, depth + 1)
         }
-        case ELambda(params) {
+        case ELambda(params, _) {
             var s = "{pad}Lambda("
             var i = 0
             loop {
@@ -1957,12 +1957,15 @@ struct Parser {
             }
         }
         let _ = self.expect(TAG_PIPE)               // closing |
+        var body: [Stmt] = []
         if self.at(TAG_LBRACE) {
-            let _ = self.parse_block()
+            body = self.parse_block()
         } else {
-            let _ = self.parse_expr()
+            // an expression body `|x| expr` is the lifted function's `return expr` (implicit return).
+            let ln = self.peek().line
+            body = [SReturn([Box<Expr>{ value: self.parse_expr(), line: ln }], ln)]
         }
-        return ELambda(params)
+        return ELambda(params, body)
     }
 }
 

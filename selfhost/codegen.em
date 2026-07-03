@@ -42,6 +42,10 @@ let OP_FOR_ARRAY: int = 34
 let OP_CALL: int = 35
 let OP_CALL_NATIVE: int = 36
 let OP_CALL_C: int = 37
+let OP_CALL_INDIRECT: int = 39
+let OP_CALL_DYN: int = 40
+let OP_MAKE_CLOSURE: int = 41
+let OP_CALL_CLOSURE: int = 42
 let OP_INT_TO_FLOAT: int = 70
 let OP_FLOAT_TO_INT: int = 71
 let OP_CONV: int = 72
@@ -120,6 +124,20 @@ fn ty_is_channel(ty: ps.Ty) -> bool {
     match ty {
         case TyGeneric(qual, name, args) {
             return name == "Channel"
+        }
+        case _ {
+            return false
+        }
+    }
+}
+
+
+// ty_is_fn reports whether a type is a function type `fn(...) -> ...` — a first-class CLOSURE value, which is
+// a refcounted heap object, so a fn-typed `let`/param is owned/droppable (dropped at every exit).
+fn ty_is_fn(ty: ps.Ty) -> bool {
+    match ty {
+        case TyFn(params, ret) {
+            return true
         }
         case _ {
             return false
@@ -3307,6 +3325,10 @@ struct Chunk {
             self.declare_binding(p.name, 1, -1, false, true, false, false)   // channel param: owned, droppable handle
             return
         }
+        if ty_is_fn(p.ty[0]) {
+            self.declare_binding(p.name, 1, -1, false, true, false, false)   // fn-value param: owned closure, droppable
+            return
+        }
         if self.type_enum_id(p.ty[0]) >= 0 {
             self.declare_binding(p.name, 1, -1, false, true, false, false)   // enum param: owned, droppable
             return
@@ -3549,6 +3571,14 @@ struct Chunk {
                         let gi = cg_index_of(self.gc_names, name)
                         if gi >= 0 {
                             self.gen_global_const(gi)
+                        } else {
+                            let fi = cg_index_of(self.fn_names, name)
+                            if fi >= 0 {
+                                // a named function used as a VALUE (not called) -> a zero-capture closure
+                                self.emit(OP_MAKE_CLOSURE)
+                                self.emit_idx(fi)
+                                self.emit_idx(0)
+                            }
                         }
                     }
                 }
@@ -3643,6 +3673,11 @@ struct Chunk {
                         self.gen_method_call(object.value, mname, args, line)
                     }
                     case EIdent(name) {
+                        if self.resolve_slot(name) >= 0 {
+                            // the callee is a fn-typed LOCAL/param value -> a closure call, not a direct CALL
+                            self.gen_closure_call(callee.value, args, line)
+                            return
+                        }
                         let ck = numeric_typename_kind(name)
                         if ck >= 0 && args.len() == 1 {
                             self.gen_expr(args[0], line)             // a numeric-width conversion: CONV <kind>
@@ -3749,6 +3784,9 @@ struct Chunk {
                         }
                     }
                     case _ {
+                        // the callee is a VALUE expression (e.g. `pick(true)(9)` — a call returning a fn) ->
+                        // evaluate it and dispatch through CALL_CLOSURE.
+                        self.gen_closure_call(callee.value, args, line)
                     }
                 }
             }
@@ -3829,6 +3867,42 @@ struct Chunk {
     }
 
 
+    // is_fn_value reports whether an expression evaluates to a CLOSURE value (a droppable refcounted heap
+    // object): a lambda, or a bare named function used as a value (an ident resolving to fn_names, not a local).
+    fn is_fn_value(self, e: ps.Expr) -> bool {
+        match e {
+            case ELambda(params, body) {
+                return true
+            }
+            case EIdent(name) {
+                return self.resolve_slot(name) < 0 && cg_index_of(self.fn_names, name) >= 0
+            }
+            case _ {
+                return false
+            }
+        }
+    }
+
+
+    // gen_closure_call lowers a call THROUGH A VALUE (a fn-typed local/param, or a call/expr that yields a
+    // closure): push the args left-to-right (raw — the closure body owns its params), then the closure value
+    // ON TOP, then CALL_CLOSURE <argc>. Distinct from a direct CALL (callee is a named fn resolved by index).
+    fn gen_closure_call(mut self, callee: ps.Expr, args: [ps.Expr], line: int) {
+        var i = 0
+        loop {
+            if i >= args.len() {
+                break
+            }
+            self.gen_expr(args[i], line)
+            i = i + 1
+        }
+        self.gen_expr(callee, line)                  // the closure value: GET_LOCAL for a local, or a call result
+        self.cur_line = line
+        self.emit(OP_CALL_CLOSURE)
+        self.emit_idx(args.len())
+    }
+
+
     // gen_spawn lowers `spawn f(args)`: push each argument (the fiber TAKES OWNERSHIP, so args INCREF/move like
     // a call's but with NO drop-mask — the spawner never drops them), then SPAWN <fn index> <total arg slots>.
     fn gen_spawn(mut self, call: ps.Expr, line: int) {
@@ -3862,6 +3936,13 @@ struct Chunk {
                 if is_channel_call(value.value) {
                     // `let ch = channel(N)` lands a fresh owned channel HANDLE (refcounted) -> a single droppable
                     // slot, dropped at every exit and INCREF'd when passed to a spawn/call.
+                    self.gen_expr(value.value, value.line)
+                    self.declare_binding(name, 1, -1, false, true, false, false)
+                    return
+                }
+                if self.is_fn_value(value.value) || (ty.len() > 0 && ty_is_fn(ty[0])) {
+                    // `let g = double` / `let h: fn(int)->int = |x| …` lands an owned CLOSURE (refcounted) ->
+                    // a single droppable slot.
                     self.gen_expr(value.value, value.line)
                     self.declare_binding(name, 1, -1, false, true, false, false)
                     return
