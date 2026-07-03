@@ -178,6 +178,24 @@ fn erased_tparam_name(p: ps.Param, generics: [ps.GenericParam]) -> string {
 }
 
 
+// ty_tparam_name_in returns the type name if `ty` is a bare (unqualified) type parameter listed in `names`,
+// else "". Used with the erased-type-param name list a function body carries (its own generics plus, for a
+// generic-struct method, the struct's type params — so `Bag.add(x: K)` sees K as erased).
+fn ty_tparam_name_in(ty: ps.Ty, names: [string]) -> string {
+    match ty {
+        case TyName(qual, name) {
+            if qual == "" && cg_index_of(names, name) >= 0 {
+                return name
+            }
+            return ""
+        }
+        case _ {
+            return ""
+        }
+    }
+}
+
+
 // ty_is_fn reports whether a type is a function type `fn(...) -> ...` — a first-class CLOSURE value, which is
 // a refcounted heap object, so a fn-typed `let`/param is owned/droppable (dropped at every exit).
 fn ty_is_fn(ty: ps.Ty) -> bool {
@@ -1216,6 +1234,9 @@ struct WitInfo {
     gb_argidx: [int]        // ...index of the first value param typed as this type-param (-1 = return-inferred)
     impl_struct: [string]   // struct-implements table: struct name (one row per implemented interface)
     impl_iface: [string]    // ...an interface it declares it implements
+    sg_struct: [string]     // struct-generics table: struct name (one row per type parameter)
+    sg_tparam: [string]     // ...the type-parameter name (so a method of a generic struct erases `K`/`V`)
+    sg_bound: [string]      // ...that type-param's bound interfaces, joined by "+" ("" if none, "Copy" excluded)
 }
 
 
@@ -1256,6 +1277,9 @@ fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
     var gb_argidx: [int] = []
     var impl_struct: [string] = []
     var impl_iface: [string] = []
+    var sg_struct: [string] = []
+    var sg_tparam: [string] = []
+    var sg_bound: [string] = []
     var i = 0
     loop {
         if i >= decls.len() {
@@ -1284,6 +1308,29 @@ fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
                     impl_struct.append(name)
                     impl_iface.append(impls[ii])
                     ii = ii + 1
+                }
+                var gi = 0
+                loop {
+                    if gi >= generics.len() {
+                        break
+                    }
+                    sg_struct.append(name)
+                    sg_tparam.append(generics[gi].name)
+                    var bs = ""
+                    var bi = 0
+                    loop {
+                        if bi >= generics[gi].bounds.len() {
+                            break
+                        }
+                        if bs == "" {
+                            bs = generics[gi].bounds[bi]
+                        } else {
+                            bs = "{bs}+{generics[gi].bounds[bi]}"
+                        }
+                        bi = bi + 1
+                    }
+                    sg_bound.append(bs)
+                    gi = gi + 1
                 }
             }
             case DFn(f) {
@@ -1332,7 +1379,7 @@ fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
         ifm_name.append("compare")
         if_names.append("Ord")
     }
-    return WitInfo { if_names: if_names, ifm_iface: ifm_iface, ifm_name: ifm_name, gb_fn: gb_fn, gb_tpname: gb_tpname, gb_bound: gb_bound, gb_argidx: gb_argidx, impl_struct: impl_struct, impl_iface: impl_iface }
+    return WitInfo { if_names: if_names, ifm_iface: ifm_iface, ifm_name: ifm_name, gb_fn: gb_fn, gb_tpname: gb_tpname, gb_bound: gb_bound, gb_argidx: gb_argidx, impl_struct: impl_struct, impl_iface: impl_iface, sg_struct: sg_struct, sg_tparam: sg_tparam, sg_bound: sg_bound }
 }
 
 
@@ -2095,6 +2142,9 @@ struct Chunk {
     gb_argidx: [int]            // ...value-arg index determining this type-param's concrete type (-1 = from return)
     impl_struct: [string]       // struct-implements table (GLOBAL): struct name -> interface it implements
     impl_iface: [string]        // ...parallel: the interface name
+    sg_struct: [string]         // struct-generics table (GLOBAL): struct name -> a type-param name
+    sg_tparam: [string]         // ...parallel: the type-param name (so a generic-struct METHOD erases it)
+    sg_bound: [string]          // ...parallel: that type-param's bounds joined by "+" ("" if none)
     wit_tpname: [string]        // THIS fn's witness slots, in order: slot k's type-param name (k = 0..n_wit-1)
     wit_bound: [string]         // ...and slot k's bound interface name (the leading hidden params)
     wit_slot: [int]             // ...and the actual local slot each witness occupies (leading, before value params)
@@ -6553,7 +6603,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [] }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [] }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     if self_struct_id >= 0 {
         // a method receiver: `self` is a BOXED struct in slot 0 (so self.field is GET_FIELD even for an
@@ -6592,13 +6642,37 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
     // An UNTYPED lambda param used as a string (`|s| s + suffix`) is declared as an owned/droppable string so
     // it INCREFs on consume + drops at exit (regular fns have typed params, so this is empty for them).
     let str_params = infer_str_params(caps, f.params, f.body)
+    // Type-param names erased in THIS body: the function's own generics, plus (for a generic-struct METHOD)
+    // the struct's type params — so `Bag<K>.add(x: K)` erases K (INCREF on consume/append), like a free
+    // generic fn's `T` (OFI-174).
+    var erased_gnames: [string] = []
+    var eg = 0
+    loop {
+        if eg >= f.generics.len() {
+            break
+        }
+        erased_gnames.append(f.generics[eg].name)
+        eg = eg + 1
+    }
+    if self_struct_id >= 0 {
+        var sgx = 0
+        loop {
+            if sgx >= ch.sg_struct.len() {
+                break
+            }
+            if ch.sg_struct[sgx] == ch.st_names[self_struct_id] {
+                erased_gnames.append(ch.sg_tparam[sgx])
+            }
+            sgx = sgx + 1
+        }
+    }
     var p = 0
     loop {
         if p >= f.params.len() {
             break
         }
         if f.params[p].is_self == false {
-            if param_is_erased_tparam(f.params[p], f.generics) {
+            if f.params[p].ty.len() > 0 && ty_tparam_name_in(f.params[p].ty[0], erased_gnames) != "" {
                 if f.params[p].qual == 2 {
                     // a `move T` param: consuming it MOVES (zero the slot); the slot is droppable (the exit
                     // DROP is a no-op once zeroed). Realized as droppable + boxed (move_local_slot moves it).
@@ -6610,7 +6684,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
                 // Record this param's slot + its type-param name so a bound-method call `p.method(..)` on it
                 // dispatches through the matching witness (OFI-174).
                 ch.tp_pslot.append(ch.locals.len() - 1)
-                ch.tp_pname.append(erased_tparam_name(f.params[p], f.generics))
+                ch.tp_pname.append(ty_tparam_name_in(f.params[p].ty[0], erased_gnames))
             } else if cg_index_of(str_params, f.params[p].name) >= 0 {
                 ch.declare_binding(f.params[p].name, 1, 0 - 1, true, true, false, false)
             } else if self_struct_id >= 0 && ch.method_is_iface_impl(ch.st_names[self_struct_id], f.name) && ch.param_is_self_typed(f.params[p], self_struct_id) {
