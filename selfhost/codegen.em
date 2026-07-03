@@ -73,6 +73,7 @@ let OP_STR_LEN: int = 64
 let OP_STR_CHARS: int = 65
 let OP_STR_CHAR_COUNT: int = 66
 let OP_STR_BYTES: int = 67
+let OP_STR_SPLIT: int = 68
 let OP_TO_STRING: int = 74
 let OP_NURSERY_BEGIN: int = 75
 let OP_CONTRACT_CHECK: int = 76
@@ -3423,6 +3424,9 @@ struct Chunk {
                         if mname == "chars" {
                             return -2                     // `s.chars()` -> an owned [string] of characters
                         }
+                        if mname == "split" && self.expr_type_kind(object.value) == 0 - 3 {
+                            return -2                     // `s.split(sep)` -> an owned [string]
+                        }
                     }
                     case _ {
                     }
@@ -3463,6 +3467,9 @@ struct Chunk {
                         }
                         if mname == "chars" {
                             return 0 - 3                  // s.chars() -> a [string]: string elements
+                        }
+                        if mname == "split" {
+                            return 0 - 3                  // s.split(sep) -> a [string]: string elements
                         }
                     }
                     case _ {
@@ -4388,6 +4395,13 @@ struct Chunk {
                         self.emit(OP_GET_LOCAL)
                         self.emit_idx(slot)
                         self.emit(sop)
+                    } else if mname == "split" {
+                        // `s.split(sep)` -> receiver, separator, STR_SPLIT (yields an array).
+                        self.cur_line = line
+                        self.emit(OP_GET_LOCAL)
+                        self.emit_idx(slot)
+                        self.gen_expr(args[0], line)
+                        self.emit(OP_STR_SPLIT)
                     }
                     return
                 }
@@ -4455,6 +4469,11 @@ struct Chunk {
                         self.cur_line = line
                         self.gen_expr(object, line)
                         self.emit(sop)
+                    } else if mname == "split" {
+                        self.cur_line = line
+                        self.gen_expr(object, line)
+                        self.gen_expr(args[0], line)
+                        self.emit(OP_STR_SPLIT)
                     }
                 } else if tk == -2 {
                     self.cur_line = line
