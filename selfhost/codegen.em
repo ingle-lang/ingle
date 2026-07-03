@@ -41,6 +41,9 @@ let OP_FOR_RANGE: int = 33
 let OP_FOR_ARRAY: int = 34
 let OP_CALL: int = 35
 let OP_CALL_NATIVE: int = 36
+let OP_CALL_C: int = 37
+let OP_INT_TO_FLOAT: int = 70
+let OP_FLOAT_TO_INT: int = 71
 let OP_CONV: int = 72
 let OP_EQ: int = 24
 let OP_NEW_STRUCT: int = 43
@@ -530,6 +533,101 @@ fn wrapping_opcode(name: string) -> int {
     }
     return 0 - 1
 }
+
+
+// cextern_index maps a hosted `extern "c"` symbol to its registry index (the CALL_C operand) — the position
+// in src/cextern.c's g_sigs for the DEFAULT build (no NET/SQLITE, which are #ifdef-gated and append AFTER
+// these). A name not in the hosted registry returns -1 (a direct-extern, OFI-167 — native-only, never a
+// CALL_C). This table MUST stay in lockstep with g_sigs' order or the FFI dispatch mis-indexes.
+fn cextern_index(name: string) -> int {
+    if name == "sin" {
+        return 0
+    }
+    if name == "cos" {
+        return 1
+    }
+    if name == "tan" {
+        return 2
+    }
+    if name == "asin" {
+        return 3
+    }
+    if name == "acos" {
+        return 4
+    }
+    if name == "atan" {
+        return 5
+    }
+    if name == "atan2" {
+        return 6
+    }
+    if name == "exp" {
+        return 7
+    }
+    if name == "log" {
+        return 8
+    }
+    if name == "log2" {
+        return 9
+    }
+    if name == "log10" {
+        return 10
+    }
+    if name == "sinh" {
+        return 11
+    }
+    if name == "cosh" {
+        return 12
+    }
+    if name == "tanh" {
+        return 13
+    }
+    if name == "cbrt" {
+        return 14
+    }
+    if name == "trunc" {
+        return 15
+    }
+    if name == "hypot" {
+        return 16
+    }
+    if name == "fmod" {
+        return 17
+    }
+    if name == "cvec2_len" {
+        return 18
+    }
+    if name == "cvec2_dot" {
+        return 19
+    }
+    if name == "cvec2_add" {
+        return 20
+    }
+    if name == "cvec2_scale" {
+        return 21
+    }
+    if name == "strlen" {
+        return 22
+    }
+    if name == "strncmp" {
+        return 23
+    }
+    if name == "fopen" {
+        return 24
+    }
+    if name == "fread" {
+        return 25
+    }
+    if name == "fwrite" {
+        return 26
+    }
+    if name == "fclose" {
+        return 27
+    }
+    return 0 - 1
+}
+
+
 
 
 // native_id_for_name maps a built-in free-function name to its NATIVE_* id (a CALL_NATIVE operand), mirroring
@@ -1297,6 +1395,8 @@ struct Chunk {
     fn_ret_sid: [int]           // ...parallel: struct id fn #i returns (else -1)
     fn_ret_enum: [bool]         // ...parallel: does fn #i return an enum?
     fn_ret_kind: [int]          // ...parallel: fn #i's return scalar kind (int=0, sized 1..7, f32/f64=8/9, bool=10)
+    ext_names: [string]         // every `extern "c"` fn name (parallel to ext_kinds)
+    ext_kinds: [int]            // ...its DECLARED return scalar kind, for an extern call's render/num width
     cont_targets: [int]         // loop-context stack: each enclosing loop's continue target (its start)
     loop_bases: [int]           // ...and each loop's local count at body entry (break/continue unwind to it)
     break_jumps: [int]          // flat list of pending break-JUMP operand positions (per-loop slice)
@@ -2284,6 +2384,87 @@ struct Chunk {
     }
 
 
+    // gen_call_c emits a hosted `extern "c"` call: CALL_C <registry index> <op>, where op = 0xFFFF (65535) for
+    // a non-struct return (every hosted scalar/Ptr/string extern). An extern BORROWS its heap args (§5h — Ember
+    // keeps ownership across the borrow), so a fresh owning-temp OBJECT arg (a string/array literal, e.g. the
+    // "r" in fopen(path, "r")) is kept below the args, PICK'd as a borrow alias, and DROP_UNDER'd from under the
+    // single result — the same discipline as gen_builtin_call, but the mask applies to EVERY extern (not just
+    // nids 0/1/3/4). Struct-by-value returns (op = rsid) are deferred.
+    fn gen_call_c(mut self, name: string, args: [ps.Expr], line: int) {
+        var masked: [bool] = []
+        var keep = 0
+        var i = 0
+        loop {
+            if i >= args.len() {
+                break
+            }
+            let m = self.arg_is_owning_object(args[i])
+            masked.append(m)
+            if m {
+                keep = keep + 1
+            }
+            i = i + 1
+        }
+        if keep == 0 {
+            // Extern args are BORROWED — the foreign callee adopts nothing (stage-0 gates consume on
+            // !is_extern), so push each arg RAW with gen_expr (NOT gen_one_arg, which would INCREF a string
+            // place-read and over-retain a borrowed local).
+            var a = 0
+            loop {
+                if a >= args.len() {
+                    break
+                }
+                self.gen_expr(args[a], line)
+                a = a + 1
+            }
+            self.cur_line = line
+            self.emit(OP_CALL_C)
+            self.emit_idx(cextern_index(name))
+            self.emit_idx(65535)
+            return
+        }
+        var k = 0                                    // push every kept owning temp first (below the args)
+        loop {
+            if k >= args.len() {
+                break
+            }
+            if masked[k] {
+                self.gen_expr(args[k], line)
+            }
+            k = k + 1
+        }
+        var built = 0
+        var t_seen = 0
+        var b = 0
+        loop {
+            if b >= args.len() {
+                break
+            }
+            if masked[b] {
+                self.emit(OP_PICK)                   // a borrow alias of the kept temp
+                self.emit_idx(keep + built - 1 - t_seen)
+                t_seen = t_seen + 1
+            } else {
+                self.gen_expr(args[b], line)         // borrowed extern arg: raw push, no INCREF
+            }
+            built = built + 1
+            b = b + 1
+        }
+        self.cur_line = line
+        self.emit(OP_CALL_C)
+        self.emit_idx(cextern_index(name))
+        self.emit_idx(65535)
+        var dk = 0
+        loop {
+            if dk >= keep {
+                break
+            }
+            self.emit(OP_DROP_UNDER)
+            dk = dk + 1
+        }
+    }
+
+
     // user_arg_masked reports whether a user-function call argument is an OWNING-TEMP ARRAY (an array literal,
     // or a call returning an array) passed to a BORROW param — the caller retains the temp and must drop it
     // after the call. Strings/enums go to OWNED params (adopted, no drop); structs aren't masked here (the
@@ -2726,6 +2907,24 @@ struct Chunk {
     }
 
 
+    // extern_ret_kind returns the DECLARED return scalar kind of an `extern "c"` fn (i32=3, i64=0, f64=9, …),
+    // so `let r = strncmp(...)`/`{sin(x)}` renders/widths at the declared type (the ABI registry can't tell
+    // i32 from i64 — both are 'i'). 0 if not found (a valid extern call always resolves).
+    fn extern_ret_kind(self, name: string) -> int {
+        var i = 0
+        loop {
+            if i >= self.ext_names.len() {
+                break
+            }
+            if self.ext_names[i] == name {
+                return self.ext_kinds[i]
+            }
+            i = i + 1
+        }
+        return 0
+    }
+
+
     // scalar_kind_of returns the NUM_KIND of a numeric expression (the checker's int_kind: int=0, sized 1..7,
     // f32=8, f64=9 — bool is int_kind 0 here, NOT the render-kind 10). Drives a binary op's width operand. A
     // value whose kind the codegen can't infer (a field/call/index — pending st_fkind/fn-ret-kind) is 0 (int).
@@ -2758,6 +2957,13 @@ struct Chunk {
                     case EIdent(name) {
                         if wrapping_opcode(name) >= 0 && args.len() > 0 {
                             return self.scalar_kind_of(args[0])
+                        }
+                        if cextern_index(name) >= 0 && cg_index_of(self.fn_names, name) < 0 {
+                            let ck = self.extern_ret_kind(name)
+                            if ck == 10 {
+                                return 0
+                            }
+                            return ck
                         }
                     }
                     case _ {
@@ -2856,6 +3062,9 @@ struct Chunk {
                         if wrapping_opcode(name) >= 0 && args.len() > 0 {
                             return self.render_kind_of(args[0])
                         }
+                        if cextern_index(name) >= 0 && cg_index_of(self.fn_names, name) < 0 {
+                            return self.extern_ret_kind(name)
+                        }
                     }
                     case _ {
                     }
@@ -2912,6 +3121,9 @@ struct Chunk {
             }
             case EIndex(object, index) {
                 return self.render_kind_of(e)   // reuse the field-array element-kind inference
+            }
+            case ECall(callee, args) {
+                return self.render_kind_of(e)   // a call binding's width (extern f64, wrapping, or fn_ret_kind)
             }
             case _ {
                 return 0
@@ -3385,6 +3597,20 @@ struct Chunk {
                             self.emit(ck)
                             return
                         }
+                        // int<->float conversions are distinct opcodes (a reinterpret of the numeric domain),
+                        // NOT a width CONV: to_float(i) -> INT_TO_FLOAT, to_int(f) -> FLOAT_TO_INT.
+                        if name == "to_float" && args.len() == 1 {
+                            self.gen_expr(args[0], line)
+                            self.cur_line = line
+                            self.emit(OP_INT_TO_FLOAT)
+                            return
+                        }
+                        if name == "to_int" && args.len() == 1 {
+                            self.gen_expr(args[0], line)
+                            self.cur_line = line
+                            self.emit(OP_FLOAT_TO_INT)
+                            return
+                        }
                         let wop = wrapping_opcode(name)
                         if wop >= 0 && args.len() == 2 {
                             // built-in wrapping arithmetic `wrapping_add/sub/mul(a, b)` -> push both operands,
@@ -3430,6 +3656,15 @@ struct Chunk {
                             self.gen_expr(args[0], line)
                             self.cur_line = line
                             self.emit(OP_CLOSE)
+                            return
+                        }
+                        // An `extern "c"` registry call lowers to CALL_C <registry index> <op>, NOT a normal
+                        // CALL. A declared extern is never in fn_names (build_fn_names skips DExtern), so an
+                        // in-registry name absent from fn_names is unambiguously an extern call (a user fn of
+                        // the same name would be in fn_names -> a plain CALL). op = 0xFFFF for a non-struct
+                        // return (every hosted scalar/Ptr/string extern; struct-by-value returns are deferred).
+                        if cextern_index(name) >= 0 && cg_index_of(self.fn_names, name) < 0 {
+                            self.gen_call_c(name, args, line)
                             return
                         }
                         let nid = native_id_for_name(name)
@@ -4286,6 +4521,8 @@ struct FnRets {
     enm: [bool]
     elem: [int]
     kind: [int]
+    ext_names: [string]     // every `extern "c"` fn name (parallel to ext_kinds)
+    ext_kinds: [int]        // ...its DECLARED return scalar kind (i32=3, i64=0, f64=9, …) for a call's render/num kind
 }
 
 
@@ -4307,6 +4544,8 @@ fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string]) -
     var ren: [bool] = []
     var rel: [int] = []
     var rk: [int] = []
+    var exn: [string] = []
+    var exk: [int] = []
     var i = 0
     loop {
         if i >= decls.len() {
@@ -4338,12 +4577,26 @@ fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string]) -
                 rel.append(r.elem)
                 rk.append(ret_scalar_kind(f.ret))
             }
+            case DExtern(abi, fns) {
+                // extern fns get NO CALL-index entry (they lower to CALL_C by registry index), but their
+                // DECLARED return kind drives a `let r = strncmp(...)` binding's width (i32 vs i64 differ,
+                // yet both are 'i' in the ABI registry — only the declaration distinguishes them).
+                var ei = 0
+                loop {
+                    if ei >= fns.len() {
+                        break
+                    }
+                    exn.append(fns[ei].name)
+                    exk.append(ret_scalar_kind(fns[ei].ret))
+                    ei = ei + 1
+                }
+            }
             case _ {
             }
         }
         i = i + 1
     }
-    return FnRets { str: rs, arr: ra, sid: rsid, enm: ren, elem: rel, kind: rk }
+    return FnRets { str: rs, arr: ra, sid: rsid, enm: ren, elem: rel, kind: rk, ext_names: exn, ext_kinds: exk }
 }
 
 
@@ -4434,7 +4687,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval) }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval) }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     if self_struct_id >= 0 {
         // a method receiver: `self` is a BOXED struct in slot 0 (so self.field is GET_FIELD even for an
