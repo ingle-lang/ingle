@@ -1251,16 +1251,19 @@ fn native_ret_kind(name: string) -> int {
 // (the checker requires it), so the value is captured as kind + int/string/bool/float.
 struct GlobalConsts {
     names: [string]
-    kind: [int]                // 0 int, 1 string, 2 bool, 3 float, -1 unknown
+    kind: [int]                // 0 int, 1 string, 2 bool, 3 float, 4 negated int, -1 unknown
     ival: [int]
     sval: [string]
     bval: [bool]
     fval: [float]
+    line: [int]                // the const's DEFINITION line — a negated-int const (kind 4) inlines with it
+                               //   (its `-1` initializer expression's line), unlike a positive const's use line
 }
 
 
 fn build_globals(decls: [ps.Decl]) -> GlobalConsts {
     var names: [string] = []
+    var gline: [int] = []
     var kind: [int] = []
     var iv: [int] = []
     var sv: [string] = []
@@ -1274,6 +1277,7 @@ fn build_globals(decls: [ps.Decl]) -> GlobalConsts {
         match decls[i] {
             case DLet(is_var, name, ty, value) {
                 names.append(name)
+                gline.append(value.line)
                 match value.value {
                     case EInt(v, _) {
                         kind.append(0)
@@ -1303,6 +1307,26 @@ fn build_globals(decls: [ps.Decl]) -> GlobalConsts {
                         bv.append(false)
                         fv.append(v)
                     }
+                    case EUnary(op, operand) {
+                        // a NEGATED int literal (`let NONE = -1`): emitted CONST <abs>; NEG (Ember bytecode has
+                        // no negative int constant), so store the magnitude under a distinct kind (4).
+                        match operand.value {
+                            case EInt(v, _) {
+                                kind.append(4)
+                                iv.append(v)
+                                sv.append("")
+                                bv.append(false)
+                                fv.append(0.0)
+                            }
+                            case _ {
+                                kind.append(0 - 1)
+                                iv.append(0)
+                                sv.append("")
+                                bv.append(false)
+                                fv.append(0.0)
+                            }
+                        }
+                    }
                     case _ {
                         kind.append(0 - 1)
                         iv.append(0)
@@ -1317,7 +1341,7 @@ fn build_globals(decls: [ps.Decl]) -> GlobalConsts {
         }
         i = i + 1
     }
-    return GlobalConsts { names: names, kind: kind, ival: iv, sval: sv, bval: bv, fval: fv }
+    return GlobalConsts { names: names, kind: kind, ival: iv, sval: sv, bval: bv, fval: fv, line: gline }
 }
 
 
@@ -2978,6 +3002,7 @@ struct Chunk {
     gc_sval: [string]
     gc_bval: [bool]
     gc_fval: [float]
+    gc_line: [int]              // ...per global const: its definition line (for a kind-4 negated-int inline)
     expected_key: string        // consume-once: the annotation-derived mono key ("int") for a RETURN-type-inferred
                                 //   generic call in `let x: Option<int> = none_of()` — no value arg gives the key
     // ---- Witness / bounded-generic tables (OFI-174) ----
@@ -3494,6 +3519,16 @@ struct Chunk {
             let idx = self.add_const_float(self.gc_fval[gi])
             self.emit(OP_CONST)
             self.emit_idx(idx)
+        } else if k == 4 {
+            // a negated int constant (`NONE = -1`): CONST <magnitude>; NEG (the same shape a `-1` expression
+            // emits). Unlike a positive const (inlined at the USE line), stage-0 substitutes the `-1` INITIALIZER
+            // expression, so the CONST carries the const's DEFINITION line.
+            self.cur_line = self.gc_line[gi]
+            let idx = self.add_const_int(self.gc_ival[gi])
+            self.emit(OP_CONST)
+            self.emit_idx(idx)
+            self.emit(OP_NEG)
+            self.emit(0)                             // NEG's num-kind operand (int = 0)
         } else {
             let idx = self.add_const_int(self.gc_ival[gi])
             self.emit(OP_CONST)
@@ -8548,7 +8583,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, slot_iface: [], cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), st_felem_payload: clone_ints(structs.f_elem_payload), st_felem_payload_tp: clone_strs(structs.f_elem_payload_tp), st_felem_tpidx: clone_ints(structs.f_elem_tpidx), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), ifm_ret_str: clone_bools(wit.ifm_ret_str), ifm_ret_kind: clone_ints(wit.ifm_ret_kind), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], cur_self_args: "", copy_tparams: [], at_base_generic: false, mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [], aei_name: [], aei_iface: [] }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, slot_iface: [], cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), st_felem_payload: clone_ints(structs.f_elem_payload), st_felem_payload_tp: clone_strs(structs.f_elem_payload_tp), st_felem_tpidx: clone_ints(structs.f_elem_tpidx), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), gc_line: clone_ints(globals.line), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), ifm_ret_str: clone_bools(wit.ifm_ret_str), ifm_ret_kind: clone_ints(wit.ifm_ret_kind), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], cur_self_args: "", copy_tparams: [], at_base_generic: false, mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [], aei_name: [], aei_iface: [] }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     // A generic fn's BASE (emitted-but-uncalled) resolves its own generic calls to BASE callees, matching
     // stage-0 (the base body is never in the mono worklist); only a monomorphized INSTANCE retargets its calls
