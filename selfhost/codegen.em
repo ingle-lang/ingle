@@ -1088,6 +1088,144 @@ fn native_id_for_name(name: string) -> int {
     if name == "byte_slice" {
         return 22
     }
+    if name == "from_bytes" {
+        return 23
+    }
+    if name == "float_bits" {
+        return 24
+    }
+    // Graphics natives (opt-in raylib backend; ids 100+). The self-hosted compiler only NAMES them (CALL_NATIVE
+    // operands) — it needs no graphics backend — so std/ui.em, std/draw.em, std/layout.em and the graphics
+    // examples/tests compile byte-identically. Mirror src/builtin.c's native_id_for_name exactly (OFI-142).
+    if name == "window_open" {
+        return 100
+    }
+    if name == "window_close" {
+        return 101
+    }
+    if name == "window_should_close" {
+        return 102
+    }
+    if name == "frame_begin" {
+        return 103
+    }
+    if name == "frame_end" {
+        return 104
+    }
+    if name == "draw_rect" {
+        return 105
+    }
+    if name == "draw_text" {
+        return 106
+    }
+    if name == "key_down" {
+        return 107
+    }
+    if name == "mouse_x" {
+        return 108
+    }
+    if name == "mouse_y" {
+        return 109
+    }
+    if name == "mouse_down" {
+        return 110
+    }
+    if name == "measure_text" {
+        return 111
+    }
+    if name == "char_pressed" {
+        return 112
+    }
+    if name == "key_pressed" {
+        return 113
+    }
+    if name == "set_layer" {
+        return 114
+    }
+    if name == "clip_push" {
+        return 115
+    }
+    if name == "clip_pop" {
+        return 116
+    }
+    if name == "tape_open" {
+        return 117
+    }
+    if name == "tape_close" {
+        return 118
+    }
+    if name == "tape_mark" {
+        return 119
+    }
+    if name == "fill_round" {
+        return 120
+    }
+    if name == "stroke_round" {
+        return 121
+    }
+    if name == "fill_grad" {
+        return 122
+    }
+    if name == "shadow" {
+        return 123
+    }
+    if name == "fill_circle" {
+        return 124
+    }
+    if name == "mouse_wheel" {
+        return 125
+    }
+    if name == "key_repeat" {
+        return 126
+    }
+    if name == "load_font" {
+        return 127
+    }
+    if name == "set_font" {
+        return 128
+    }
+    if name == "clipboard_set" {
+        return 129
+    }
+    if name == "clipboard_get" {
+        return 130
+    }
+    if name == "screen_width" {
+        return 131
+    }
+    if name == "screen_height" {
+        return 132
+    }
+    if name == "text_line_height" {
+        return 133
+    }
+    if name == "set_cursor" {
+        return 134
+    }
+    if name == "frame_capture" {
+        return 135
+    }
+    if name == "set_event_waiting" {
+        return 136
+    }
+    if name == "had_input" {
+        return 137
+    }
+    if name == "measure_misses" {
+        return 138
+    }
+    if name == "frame_steps" {
+        return 139
+    }
+    if name == "set_alpha" {
+        return 140
+    }
+    if name == "mouse_right_down" {
+        return 141
+    }
+    if name == "dropped_files" {
+        return 142
+    }
     return -1
 }
 
@@ -1095,7 +1233,7 @@ fn native_id_for_name(name: string) -> int {
 // native_ret_kind classifies a builtin's OWNED return type the way expr_ret_kind does for user calls: -3 a
 // string, -2 an array, -1 a scalar/float/unit (not droppable), or -4 = `name` is not a builtin at all.
 fn native_ret_kind(name: string) -> int {
-    if name == "read_line" || name == "read_file" || name == "env" || name == "from_char_code" || name == "byte_slice" || name == "concat" {
+    if name == "read_line" || name == "read_file" || name == "env" || name == "from_char_code" || name == "byte_slice" || name == "concat" || name == "from_bytes" || name == "clipboard_get" || name == "dropped_files" {
         return -3
     }
     if name == "args" {
