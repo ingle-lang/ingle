@@ -323,6 +323,7 @@ struct StructTable {
     f_arrkind: [int]           // ...for an array field: its NEW_ARRAY element kind byte (AEK_*), else -1
     f_enum: [bool]             // ...is the field a known enum (a refcounted single Value — inline-packable)?
     f_kind: [int]              // ...for a scalar field: its num/render kind (int=0, sized 1..7, f32=8, f64=9, bool=10)
+    f_tpname: [string]         // ...if the field's type is a bare type-param of the struct (`key: K`), its name; else ""
 }
 
 
@@ -361,6 +362,7 @@ fn build_structs(decls: [ps.Decl]) -> StructTable {
     var fak: [int] = []
     var fen: [bool] = []
     var fkind: [int] = []
+    var ftp: [string] = []
     var id = 0
     var i = 0
     loop {
@@ -383,6 +385,7 @@ fn build_structs(decls: [ps.Decl]) -> StructTable {
                     fsd.append(ty_struct_id(fty, names))
                     fen.append(ty_enum_id(fty, enames) >= 0)
                     fkind.append(ty_scalar_kind(fty))
+                    ftp.append(field_tpname(fty, generics))
                     if ty_is_array(fty) {
                         fel.append(elem_type_code(elem_ty_of(fty), names, enames))
                         fak.append(array_elem_kind_from_ty(elem_ty_of(fty)))
@@ -415,6 +418,7 @@ fn build_structs(decls: [ps.Decl]) -> StructTable {
                         fkind.append(0)
                         fel.append(0 - 1)
                         fak.append(0 - 1)
+                        ftp.append("")
                         bwi = bwi + 1
                     }
                     gwi = gwi + 1
@@ -426,7 +430,34 @@ fn build_structs(decls: [ps.Decl]) -> StructTable {
         }
         i = i + 1
     }
-    return StructTable { names: names, f_owner: fo, f_name: fn_, f_scalar: fsc, f_string: fst, f_array: far, f_struct: fsd, f_elem: fel, f_arrkind: fak, f_enum: fen, f_kind: fkind }
+    return StructTable { names: names, f_owner: fo, f_name: fn_, f_scalar: fsc, f_string: fst, f_array: far, f_struct: fsd, f_elem: fel, f_arrkind: fak, f_enum: fen, f_kind: fkind, f_tpname: ftp }
+}
+
+
+// field_tpname returns the name of a struct type-parameter if the field's type is exactly that bare type
+// parameter (`key: K` in a struct declared `<K, V>` -> "K"), else "". Lets a bound-method call on a type-param
+// field receiver (`e.key.eq(..)`) dispatch through the enclosing method's witness.
+fn field_tpname(ty: ps.Ty, generics: [ps.GenericParam]) -> string {
+    match ty {
+        case TyName(qual, name) {
+            if qual == "" {
+                var i = 0
+                loop {
+                    if i >= generics.len() {
+                        break
+                    }
+                    if generics[i].name == name {
+                        return name
+                    }
+                    i = i + 1
+                }
+            }
+            return ""
+        }
+        case _ {
+            return ""
+        }
+    }
 }
 
 
@@ -2235,6 +2266,7 @@ struct Chunk {
     st_farrkind: [int]          // ...for an array field: its NEW_ARRAY element kind byte (AEK_*), else -1
     st_fenum: [bool]            // ...is the field a known enum (a refcounted single Value)?
     st_fkind: [int]             // ...for a scalar field: its num/render kind (int=0, sized 1..7, f32=8, f64=9, bool=10)
+    st_ftpname: [string]        // ...if the field's type is a bare struct type-param (`key: K`), its name; else ""
     inst_keys: [string]         // generic-struct INSTANCE keys (cloned): id = st_names.len() + index here
     et_names: [string]          // the enum table (cloned): enum id -> name
     ev_owner: [int]             // ...flat variant table: owning enum id
@@ -3020,7 +3052,7 @@ struct Chunk {
     // gen_witness_method_call lowers a bound-method call on a type-param receiver (`a.compare(b)`, `x.name()`)
     // to a witness dispatch: push the receiver + args (borrowed), then GET_FIELD the method-ref off the
     // matching witness and CALL_INDIRECT. Returns true if it handled the call (OFI-174).
-    fn gen_witness_method_call(mut self, recv_slot: int, tpn: string, mname: string, args: [ps.Expr], line: int) -> bool {
+    fn gen_witness_method_call(mut self, recv: ps.Expr, tpn: string, mname: string, args: [ps.Expr], line: int) -> bool {
         // A free-fn / method's own witness PARAM (max<T: Ord>): the witness is a leading local slot.
         var k = 0
         loop {
@@ -3030,7 +3062,7 @@ struct Chunk {
             if self.wit_tpname[k] == tpn {
                 let midx = self.iface_method_index(self.wit_bound[k], mname)
                 if midx >= 0 {
-                    self.gen_witness_dispatch_head(recv_slot, args, line)
+                    self.gen_witness_dispatch_head(recv, args, line)
                     self.emit(OP_GET_LOCAL)             // push the witness dict (a leading param)
                     self.emit_idx(self.wit_slot[k])
                     self.gen_witness_dispatch_tail(midx, args.len())
@@ -3048,7 +3080,7 @@ struct Chunk {
             if self.mwit_tpname[m] == tpn {
                 let midx = self.iface_method_index(self.mwit_bound[m], mname)
                 if midx >= 0 {
-                    self.gen_witness_dispatch_head(recv_slot, args, line)
+                    self.gen_witness_dispatch_head(recv, args, line)
                     self.emit(OP_GET_LOCAL)             // push self...
                     self.emit_idx(0)
                     self.emit(OP_GET_FIELD)             // ...and read its witness field (the Some dict)
@@ -3064,10 +3096,8 @@ struct Chunk {
 
 
     // gen_witness_dispatch_head pushes the receiver + call arguments (borrowed), before the witness dict.
-    fn gen_witness_dispatch_head(mut self, recv_slot: int, args: [ps.Expr], line: int) {
-        self.cur_line = line
-        self.emit(OP_GET_LOCAL)                        // push the receiver (borrow)
-        self.emit_idx(recv_slot)
+    fn gen_witness_dispatch_head(mut self, recv: ps.Expr, args: [ps.Expr], line: int) {
+        self.gen_expr(recv, line)                      // push the receiver (borrow: a local or a field read)
         var a = 0
         loop {
             if a >= args.len() {
@@ -3076,6 +3106,47 @@ struct Chunk {
             self.gen_expr(args[a], line)               // push each arg (borrow)
             a = a + 1
         }
+    }
+
+
+    // receiver_tparam returns the type-param name a method-call receiver has (so the call dispatches through a
+    // witness): a type-param local/param (`key.hash()`), or a type-param FIELD (`e.key.eq(..)`), else "".
+    fn receiver_tparam(self, e: ps.Expr) -> string {
+        match e {
+            case EIdent(name) {
+                let slot = self.resolve_slot(name)
+                if slot >= 0 {
+                    return self.tp_slot_name(slot)
+                }
+                return ""
+            }
+            case EGet(obj, fname) {
+                let osid = self.expr_type_kind(obj.value)
+                if osid >= 0 {
+                    return self.field_tpname_of(osid, fname)
+                }
+                return ""
+            }
+            case _ {
+                return ""
+            }
+        }
+    }
+
+
+    // field_tpname_of returns field `fname` of struct `sid`'s bare type-param name (`e.key` -> "K"), or "".
+    fn field_tpname_of(self, sid: int, fname: string) -> string {
+        var i = 0
+        loop {
+            if i >= self.st_fowner.len() {
+                break
+            }
+            if self.st_fowner[i] == sid && self.st_fname[i] == fname {
+                return self.st_ftpname[i]
+            }
+            i = i + 1
+        }
+        return ""
     }
 
 
@@ -3311,18 +3382,17 @@ struct Chunk {
 
 
     fn gen_method_call(mut self, object: ps.Expr, mname: string, args: [ps.Expr], line: int) {
+        // A bound-method call on a type-param receiver (`key.hash()`, `e.key.eq(..)`) dispatches through a
+        // witness (OFI-174) — handled uniformly for a type-param local/param OR a type-param field receiver.
+        let rtpn = self.receiver_tparam(object)
+        if rtpn != "" {
+            if self.gen_witness_method_call(object, rtpn, mname, args, line) {
+                return
+            }
+        }
         match object {
             case EIdent(recv) {
                 let slot = self.resolve_slot(recv)
-                if slot >= 0 {
-                    // A bound-method call on a type-param receiver dispatches through its witness (OFI-174).
-                    let tpn = self.tp_slot_name(slot)
-                    if tpn != "" {
-                        if self.gen_witness_method_call(slot, tpn, mname, args, line) {
-                            return
-                        }
-                    }
-                }
                 if slot < 0 {
                     // the receiver is not a value: a MODULE-QUALIFIED free-function call (`ps.parse(x)`) — the
                     // alias is inert and `mname` names a (merged) function, so emit a plain CALL by name.
@@ -6926,7 +6996,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], mwit_tpname: [], mwit_bound: [], mwit_field: [] }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], mwit_tpname: [], mwit_bound: [], mwit_field: [] }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     // Bind this fn's type params to concrete types for baking witnesses in a bounded generic-struct
     // construction (`Bag<K>{}` in new_bag bakes K=int's Hash/Eq). Derived from the fn's monomorphized instance
