@@ -472,6 +472,69 @@ fn count_functions(decls: [ps.Decl]) -> int {
 // each function's source_file is its OWN module (multi-module byte-identity). It writes the file directly
 // rather than returning the byte array, because returning a struct FIELD is a partial move (unsupported);
 // from_bytes borrows the field, so no move occurs.
+// count_lifted_lambdas runs codegen's pass-0 (compile each declared fn/method with a dummy instance context,
+// summing ch.lifted.len()) so the instance base is known before the function table is emitted — identical to
+// codegen.disassemble_program's pass 0. Needed because the .emb header carries func_count up front.
+fn count_lifted_lambdas(decls: [ps.Decl], fn_names: [string], fn_rets: cg.FnRets, structs: cg.StructTable, enums: cg.EnumTable, globals: cg.GlobalConsts, instances: [string], gf: cg.GenFns) -> int {
+    var no_caps: [cg.CaptureFlag] = []
+    var no_keys: [string] = []
+    var total = 0
+    var sid = 0
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        let ch = cg.compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid, fn_names.len(), no_caps, gf.names, gf.pquals, no_keys, fn_names.len())
+                        total = total + ch.lifted.len()
+                    }
+                    mi = mi + 1
+                }
+                sid = sid + 1
+            }
+            case DFn(f) {
+                if f.has_body {
+                    let ch = cg.compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, fn_names.len(), no_caps, gf.names, gf.pquals, no_keys, fn_names.len())
+                    total = total + ch.lifted.len()
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return total
+}
+
+
+// emit_lifted_chunks serializes each lifted lambda of `ch` (name "<lambda>", the enclosing fn's source) into
+// the .emb function table — the serialize analogue of codegen.emit_lifted_disasm, same order so the table's
+// numbering matches. A lambda's arity is its capture count plus its declared param count (captures are its
+// leading slots).
+fn emit_lifted_chunks(mut w: Writer, ch: cg.Chunk, source: string, fn_names: [string], fn_rets: cg.FnRets, structs: cg.StructTable, enums: cg.EnumTable, globals: cg.GlobalConsts, instances: [string], gf: cg.GenFns, inst_keys: [string], inst_base: int) {
+    var li = 0
+    loop {
+        if li >= ch.lifted.len() {
+            break
+        }
+        w.emit_str("<lambda>")
+        w.emit_optstr(source)
+        w.emit_uvarint(ch.lifted[li].caps.len() + ch.lifted[li].decl.params.len())
+        let lch = cg.compile_fn(ch.lifted[li].decl, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, 0, ch.lifted[li].caps, gf.names, gf.pquals, inst_keys, inst_base)
+        w.emit_chunk(lch)
+        li = li + 1
+    }
+}
+
+
 fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
     let fn_names = cg.build_fn_names(decls)
     let structs = cg.build_structs(decls)
@@ -480,7 +543,18 @@ fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
     let globals = cg.build_globals(decls)
     let instances = cg.build_struct_instances(decls, structs.names)
 
-    let func_count = count_functions(decls)
+    // Generic-fn set + lifted-lambda count + generic instances — the SAME monomorphization structure as
+    // codegen.disassemble_program, so the runnable .emb's function table matches the disassembly path (declared
+    // fns, then lifted lambdas, then generic instances). Previously this path was a 1-pass stopgap that omitted
+    // lambdas + instances entirely, so lambda/generic programs serialized to a broken image (OFI-175).
+    let gf = cg.build_generic_fns(decls)
+    var no_caps: [cg.CaptureFlag] = []
+    var no_keys: [string] = []
+    let total_lambdas = count_lifted_lambdas(decls, fn_names, fn_rets, structs, enums, globals, instances, gf)
+    let inst_base = fn_names.len() + total_lambdas
+    let insts = cg.build_fn_instances(decls, gf.names)
+
+    let func_count = count_functions(decls) + total_lambdas + insts.keys.len()
     let struct_count = structs.names.len() + instances.len()
     let variant_count = enums.v_name.len()
     let result_id = cg.cg_index_of(enums.e_names, "Result")
@@ -528,9 +602,10 @@ fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
         vi = vi + 1
     }
 
-    // Function table (methods interleaved with free functions, declaration order — CALL operands index it).
-    var no_caps: [cg.CaptureFlag] = []           // declared local: an inline `[]` caps arg mis-emits its elem kind
-    var no_gen: [string] = []                    // generic-fn set / instance keys: empty (lambda + generic .emb deferred)
+    // Function table: three passes matching codegen.disassemble_program so CALL / MAKE_CLOSURE operands index
+    // the same slots — (1) declared fns + methods, (2) lifted lambdas, (3) generic instances.
+    // Pass 1: declared functions + methods, declaration order (each fn's lambda_base advances by its lifted count).
+    var lambda_base = fn_names.len()
     var sid = 0
     var i = 0
     loop {
@@ -548,8 +623,9 @@ fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
                         w.emit_str(name + "." + methods[mi].name)
                         w.emit_optstr(sources[i])
                         w.emit_uvarint(methods[mi].params.len())
-                        let ch = cg.compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid, fn_names.len(), no_caps, no_gen, no_gen, no_gen, fn_names.len())
+                        let ch = cg.compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid, lambda_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base)
                         w.emit_chunk(ch)
+                        lambda_base = lambda_base + ch.lifted.len()
                     }
                     mi = mi + 1
                 }
@@ -560,14 +636,79 @@ fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
                     w.emit_str(f.name)
                     w.emit_optstr(sources[i])
                     w.emit_uvarint(f.params.len())
-                    let ch = cg.compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, fn_names.len(), no_caps, no_gen, no_gen, no_gen, fn_names.len())
+                    let ch = cg.compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, lambda_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base)
                     w.emit_chunk(ch)
+                    lambda_base = lambda_base + ch.lifted.len()
                 }
             }
             case _ {
             }
         }
         i = i + 1
+    }
+    // Pass 2: the lifted lambdas, in the same fn order (recompute each fn's lambda_base identically).
+    var lb2 = fn_names.len()
+    var sid2 = 0
+    var j = 0
+    loop {
+        if j >= decls.len() {
+            break
+        }
+        match decls[j] {
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        let ch = cg.compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid2, lb2, no_caps, gf.names, gf.pquals, insts.keys, inst_base)
+                        emit_lifted_chunks(w, ch, sources[j], fn_names, fn_rets, structs, enums, globals, instances, gf, insts.keys, inst_base)
+                        lb2 = lb2 + ch.lifted.len()
+                    }
+                    mi = mi + 1
+                }
+                sid2 = sid2 + 1
+            }
+            case DFn(f) {
+                if f.has_body {
+                    let ch = cg.compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, lb2, no_caps, gf.names, gf.pquals, insts.keys, inst_base)
+                    emit_lifted_chunks(w, ch, sources[j], fn_names, fn_rets, structs, enums, globals, instances, gf, insts.keys, inst_base)
+                    lb2 = lb2 + ch.lifted.len()
+                }
+            }
+            case _ {
+            }
+        }
+        j = j + 1
+    }
+    // Pass 3: the monomorphized generic-fn instances, in first-use order (each = the base body under a new slot).
+    var xi = 0
+    loop {
+        if xi >= insts.keys.len() {
+            break
+        }
+        var di = 0
+        loop {
+            if di >= decls.len() {
+                break
+            }
+            match decls[di] {
+                case DFn(f) {
+                    if f.has_body && f.name == insts.bases[xi] {
+                        w.emit_str(f.name)
+                        w.emit_optstr(sources[di])
+                        w.emit_uvarint(f.params.len())
+                        let ich = cg.compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, inst_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base)
+                        w.emit_chunk(ich)
+                    }
+                }
+                case _ {
+                }
+            }
+            di = di + 1
+        }
+        xi = xi + 1
     }
 
     write_file(out_path, from_bytes(w.bytes))
