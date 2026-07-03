@@ -1351,6 +1351,8 @@ struct WitInfo {
     if_names: [string]      // interface id -> name
     ifm_iface: [int]        // interface-method table: owning interface index (parallel to ifm_name)
     ifm_name: [string]      // ...required method name, in declaration order within the interface
+    ifm_owning: [bool]      // ...does the method return an OWNING value (string/array) — so a call to it via a
+                            //   witness is an owning temp that a native-call arg must keep + PICK + DROP_UNDER
     gb_fn: [string]         // generic-fn bound table: fn name (one row per (type-param, bound))
     gb_tpname: [string]     // ...the type-parameter name
     gb_bound: [string]      // ...the bound interface name
@@ -1388,12 +1390,23 @@ fn param_tparam_index(params: [ps.Param], tpname: string) -> int {
 }
 
 
+// ty_ret_is_owning reports whether a return type is an OWNING value (string / array) — a call yielding one is
+// a fresh owned temporary a native-call argument must keep + PICK + DROP_UNDER.
+fn ty_ret_is_owning(ret: [ps.Ty]) -> bool {
+    if ret.len() == 0 {
+        return false
+    }
+    return ty_is_string(ret[0]) || ty_is_array(ret[0])
+}
+
+
 // build_wit_info collects every interface's method list and every generic free function's per-type-param
 // bounds. The bound rows are ordered (type-param, then bound) exactly as stage-0 prepends witness params.
 fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
     var if_names: [string] = []
     var ifm_iface: [int] = []
     var ifm_name: [string] = []
+    var ifm_owning: [bool] = []
     var gb_fn: [string] = []
     var gb_tpname: [string] = []
     var gb_bound: [string] = []
@@ -1419,6 +1432,7 @@ fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
                     }
                     ifm_iface.append(iid)
                     ifm_name.append(methods[mi].name)
+                    ifm_owning.append(ty_ret_is_owning(methods[mi].ret))
                     mi = mi + 1
                 }
             }
@@ -1490,19 +1504,22 @@ fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
     if cg_index_of(if_names, "Hash") < 0 {
         ifm_iface.append(if_names.len())
         ifm_name.append("hash")
+        ifm_owning.append(false)
         if_names.append("Hash")
     }
     if cg_index_of(if_names, "Eq") < 0 {
         ifm_iface.append(if_names.len())
         ifm_name.append("eq")
+        ifm_owning.append(false)
         if_names.append("Eq")
     }
     if cg_index_of(if_names, "Ord") < 0 {
         ifm_iface.append(if_names.len())
         ifm_name.append("compare")
+        ifm_owning.append(false)
         if_names.append("Ord")
     }
-    return WitInfo { if_names: if_names, ifm_iface: ifm_iface, ifm_name: ifm_name, gb_fn: gb_fn, gb_tpname: gb_tpname, gb_bound: gb_bound, gb_argidx: gb_argidx, impl_struct: impl_struct, impl_iface: impl_iface, sg_struct: sg_struct, sg_tparam: sg_tparam, sg_bound: sg_bound }
+    return WitInfo { if_names: if_names, ifm_iface: ifm_iface, ifm_name: ifm_name, ifm_owning: ifm_owning, gb_fn: gb_fn, gb_tpname: gb_tpname, gb_bound: gb_bound, gb_argidx: gb_argidx, impl_struct: impl_struct, impl_iface: impl_iface, sg_struct: sg_struct, sg_tparam: sg_tparam, sg_bound: sg_bound }
 }
 
 
@@ -2292,6 +2309,7 @@ struct Chunk {
     if_names: [string]          // interface id -> name (GLOBAL, cloned)
     ifm_iface: [int]            // interface-method table: owning interface index (parallel to ifm_name)
     ifm_name: [string]          // ...required method name, in interface declaration order
+    ifm_owning: [bool]          // ...does the method return an owning value (string/array)?
     gb_fn: [string]             // generic-fn bound table: fn name (one row per (type-param, bound), GLOBAL)
     gb_tpname: [string]         // ...type-parameter name
     gb_bound: [string]          // ...bound interface name
@@ -2995,6 +3013,60 @@ struct Chunk {
     }
 
 
+    // iface_method_flat_index returns the FLAT row index (into ifm_owning) of method `mname` in interface
+    // `iface`, or -1. Distinct from iface_method_index, which returns the position WITHIN the interface.
+    fn iface_method_flat_index(self, iface: string, mname: string) -> int {
+        let iid = cg_index_of(self.if_names, iface)
+        if iid < 0 {
+            return 0 - 1
+        }
+        var i = 0
+        loop {
+            if i >= self.ifm_iface.len() {
+                break
+            }
+            if self.ifm_iface[i] == iid && self.ifm_name[i] == mname {
+                return i
+            }
+            i = i + 1
+        }
+        return 0 - 1
+    }
+
+
+    // witness_method_owning reports whether a bound-method call on a `tpn` receiver returns an OWNING value —
+    // i.e. the interface method the witness (a param OR self's field) resolves to returns a string/array.
+    fn witness_method_owning(self, tpn: string, mname: string) -> bool {
+        var k = 0
+        loop {
+            if k >= self.wit_tpname.len() {
+                break
+            }
+            if self.wit_tpname[k] == tpn {
+                let oi = self.iface_method_flat_index(self.wit_bound[k], mname)
+                if oi >= 0 {
+                    return self.ifm_owning[oi]
+                }
+            }
+            k = k + 1
+        }
+        var m = 0
+        loop {
+            if m >= self.mwit_tpname.len() {
+                break
+            }
+            if self.mwit_tpname[m] == tpn {
+                let oi = self.iface_method_flat_index(self.mwit_bound[m], mname)
+                if oi >= 0 {
+                    return self.ifm_owning[oi]
+                }
+            }
+            m = m + 1
+        }
+        return false
+    }
+
+
     // method_is_iface_impl reports whether method `mname` of struct `sname` implements an interface method (the
     // struct declares `implements <I>` and `I` requires `mname`). Such a method is reachable via a witness's
     // CALL_INDIRECT, which passes its receiver + Self-typed args BOXED, so those params compile as boxed. (OFI-174)
@@ -3622,6 +3694,13 @@ struct Chunk {
                     case EIdent(name) {
                         if cg_index_of(self.generic_fns, name) >= 0 && args.len() > 0 {
                             return self.arg_is_owning_object(args[0])
+                        }
+                    }
+                    case EGet(recv, mname) {
+                        // a WITNESS method call (`x.name()`) returning a string/array is a fresh owning temp.
+                        let tpn = self.receiver_tparam(recv.value)
+                        if tpn != "" {
+                            return self.witness_method_owning(tpn, mname)
                         }
                     }
                     case _ {
@@ -7025,7 +7104,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], mwit_tpname: [], mwit_bound: [], mwit_field: [] }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], mwit_tpname: [], mwit_bound: [], mwit_field: [] }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     // Bind this fn's type params to concrete types for baking witnesses in a bounded generic-struct
     // construction (`Bag<K>{}` in new_bag bakes K=int's Hash/Eq). Derived from the fn's monomorphized instance
