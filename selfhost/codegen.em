@@ -2668,6 +2668,8 @@ struct Chunk {
     mrecv_args: [string]        // ...method call `b.add(..)` retargets to the monomorphized `Bag.add<int>` instance
     cur_tp_names: [string]      // THIS fn's own type-param names (`K` for new_bag<K>) — for baking witnesses in
     cur_tp_types: [string]      // ...parallel: the concrete type each binds to in this compilation (`int`)
+    copy_tparams: [string]      // type-param names bounded `T: Copy` — a Copy local is ALIASED (over-retain),
+                                //   not MOVED, so it is excluded from the owned-type-param move discipline (OFI-009)
 
 
     // variant_field_index returns the flat payload-field-table index of field position `b` of flat-variant
@@ -3021,7 +3023,9 @@ struct Chunk {
                 }
                 // a string OR enum/closure local: an owned single-refcounted-Value local (droppable, not an
                 // array, not a struct, not BOXED — a boxed move-T is MOVED, not INCREF'd) read into a new owner
-                return self.local_str[slot] || (self.local_drop[slot] && self.slot_array[slot] == false && self.slot_struct[slot] < 0 && self.slot_boxed[slot] == false)
+                // INCREFs — EXCEPT an owned ERASED TYPE-PARAM local (`var acc = init`), which stage-0 MOVES
+                // (moves_local=1), so it is excluded here and handled by move_local_slot (OFI-009).
+                return self.local_str[slot] || (self.local_drop[slot] && self.slot_array[slot] == false && self.slot_struct[slot] < 0 && self.slot_boxed[slot] == false && self.tp_slot_name(slot) == "")
             }
             case EGet(object, name) {
                 // a REFCOUNTED field (string OR enum/closure) read off any struct-typed object (a local, OR
@@ -3039,9 +3043,11 @@ struct Chunk {
     }
 
 
-    // move_local_slot returns the slot of an OWNED move-type local (an array or boxed struct `let`/`var`)
-    // read by `e`, or -1. Consuming such a local MOVES it: the value goes to the consumer and the slot is
-    // zeroed, so the function-exit DROP of that slot is a harmless no-op (it never double-frees).
+    // move_local_slot returns the slot of an OWNED move-type local (an array or boxed struct `let`/`var`, or an
+    // owned erased TYPE-PARAM local like `var acc = init`) read by `e`, or -1. Consuming such a local MOVES it:
+    // the value goes to the consumer and the slot is zeroed, so the function-exit DROP of that slot is a
+    // harmless no-op (it never double-frees). An owned type-param local moves because stage-0's moves_local
+    // marks a whole-value read of an owned type-param as a MOVE (moves_local=1), not an INCREF-share (OFI-009).
     fn move_local_slot(self, e: ps.Expr) -> int {
         match e {
             case EIdent(name) {
@@ -3052,7 +3058,7 @@ struct Chunk {
                 if self.local_str[slot] {
                     return -1                        // a string is refcounted -> INCREF, not moved
                 }
-                if self.local_drop[slot] && (self.slot_array[slot] || self.slot_boxed[slot]) {
+                if self.local_drop[slot] && (self.slot_array[slot] || self.slot_boxed[slot] || self.tp_slot_name(slot) != "") {
                     return slot
                 }
                 return -1
@@ -4097,16 +4103,31 @@ struct Chunk {
     // (`key: K`) — distinct from a string/enum borrow, which tp_slot_name leaves as "". Used to suppress the
     // borrow-passthrough INCREF that a type-param arg does not need (OFI-165).
     fn is_erased_tparam_arg(self, e: ps.Expr) -> bool {
+        return self.erased_tparam_read_name(e) != ""
+    }
+
+
+    // is_copy_tparam reports whether type-param `name` is bounded `T: Copy` — a Copy value is ALIASED (a read
+    // shares it, over-retain), never MOVED, so it is excluded from the owned-type-param move discipline (OFI-009).
+    fn is_copy_tparam(self, name: string) -> bool {
+        return cg_index_of(self.copy_tparams, name) >= 0
+    }
+
+
+    // erased_tparam_read_name returns the type-param name a bare local read is typed as (`key` typed `K` -> "K"),
+    // or "" for anything else. Drives both the borrow-passthrough INCREF suppression (OFI-165) and the owned
+    // erased-type-param local's MOVE-on-consume discipline (OFI-009).
+    fn erased_tparam_read_name(self, e: ps.Expr) -> string {
         match e {
             case EIdent(name) {
                 let slot = self.resolve_slot(name)
                 if slot < 0 {
-                    return false
+                    return ""
                 }
-                return self.tp_slot_name(slot) != ""
+                return self.tp_slot_name(slot)
             }
             case _ {
-                return false
+                return ""
             }
         }
     }
@@ -6355,6 +6376,17 @@ struct Chunk {
                     } else if rk == -3 {
                         self.gen_expr(value.value, value.line)       // CALL -> one owned string slot (fresh)
                         self.declare_binding(name, 1, -1, true, true, false, false)
+                    } else if self.erased_tparam_read_name(value.value) != "" && self.is_copy_tparam(self.erased_tparam_read_name(value.value)) == false {
+                        // `var acc = init` where init is a bare ERASED, NON-Copy TYPE-PARAM read: an OWNED,
+                        // DROPPABLE local (stage-0's moves_local: a whole-value read of an owned type-param MOVES,
+                        // nil-ing the slot; scope exit / reassignment DROP it). INCREF the borrowed init in, then
+                        // register the slot as its type-param so reads MOVE and `acc.method()` still dispatch via
+                        // witness — the precise ownership stage-0 gives an owned type-param, not over-retain. A
+                        // `T: Copy` local is ALIASED instead (the is_erased_read path below), never dropped (OFI-009).
+                        self.gen_consume(value.value, value.line)
+                        self.declare_binding(name, 1, -1, false, true, false, false)
+                        self.tp_pslot.append(self.locals.len() - 1)
+                        self.tp_pname.append(self.erased_tparam_read_name(value.value))
                     } else if self.is_erased_read(value.value) {
                         // `let a = x` of an erased type-param: INCREF on consume, NEVER dropped (over-retain)
                         self.gen_consume(value.value, value.line)
@@ -7800,7 +7832,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), st_felem_payload: clone_ints(structs.f_elem_payload), st_felem_payload_tp: clone_strs(structs.f_elem_payload_tp), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [] }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), st_felem_payload: clone_ints(structs.f_elem_payload), st_felem_payload_tp: clone_strs(structs.f_elem_payload_tp), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], copy_tparams: [], mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [] }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     // Bind this fn's type params to concrete types for baking witnesses in a bounded generic-struct
     // construction (`Bag<K>{}` in new_bag bakes K=int's Hash/Eq). Derived from the fn's monomorphized instance
@@ -7833,6 +7865,11 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
                 ch.cur_tp_types.append(types[gi])
             } else {
                 ch.cur_tp_types.append("")
+            }
+            // A `T: Copy` type-param: its owned local is ALIASED (over-retain), not MOVED (OFI-009). The Copy
+            // bound rides on the GenericParam's `is_copy` flag, not in `bounds`.
+            if f.generics[gi].is_copy {
+                ch.copy_tparams.append(f.generics[gi].name)
             }
             gi = gi + 1
         }
