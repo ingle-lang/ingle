@@ -548,7 +548,7 @@ fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
                         w.emit_str(name + "." + methods[mi].name)
                         w.emit_optstr(sources[i])
                         w.emit_uvarint(methods[mi].params.len())
-                        let ch = cg.compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid, fn_names.len(), no_caps, no_gen, no_gen, fn_names.len())
+                        let ch = cg.compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid, fn_names.len(), no_caps, no_gen, no_gen, no_gen, fn_names.len())
                         w.emit_chunk(ch)
                     }
                     mi = mi + 1
@@ -560,7 +560,7 @@ fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
                     w.emit_str(f.name)
                     w.emit_optstr(sources[i])
                     w.emit_uvarint(f.params.len())
-                    let ch = cg.compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, fn_names.len(), no_caps, no_gen, no_gen, fn_names.len())
+                    let ch = cg.compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, fn_names.len(), no_caps, no_gen, no_gen, no_gen, fn_names.len())
                     w.emit_chunk(ch)
                 }
             }
