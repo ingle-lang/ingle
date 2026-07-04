@@ -5102,9 +5102,10 @@ struct Chunk {
                     // directly. A method on a generic-struct field retargets to its monomorphized instance.
                     let midx = self.resolve_field_method_index(object, self.st_names[tk], mname)
                     let erase = self.method_param_erasure(self.st_names[tk], mname)
+                    let plan = self.plan_erased_mask(args, erase)
                     self.cur_line = line
-                    self.gen_expr(object, line)
                     if self.is_owning_temp_obj(object) {
+                        self.gen_expr(object, line)
                         if is_call_expr(object) && self.struct_all_scalar(tk) {
                             self.emit(OP_BOX_STRUCT)     // a multi-slot struct returned by a call -> one box
                             self.emit_idx(tk)
@@ -5116,11 +5117,22 @@ struct Chunk {
                         self.emit_idx(midx)
                         self.emit_idx(1 + n)
                         self.emit(OP_DROP_UNDER)
-                    } else {
+                    } else if plan.keep == 0 {
+                        self.gen_expr(object, line)
                         let n = self.gen_call_args_e(args, line, erase)
                         self.emit(OP_CALL)
                         self.emit_idx(midx)
                         self.emit_idx(1 + n)
+                    } else {
+                        // an owning-temp arg (`map.set(k, Win{..})`) is kept BELOW the borrowed receiver, then
+                        // PICK'd as a borrow alias and DROP_UNDER'd from under the result (stage-0's mask).
+                        self.push_mask_temps(args, line, plan)
+                        self.gen_expr(object, line)
+                        let n = self.push_masked_args(args, line, erase, plan)
+                        self.emit(OP_CALL)
+                        self.emit_idx(midx)
+                        self.emit_idx(1 + n)
+                        self.emit_drop_unders(plan.keep)
                     }
                 }
             }
@@ -5150,10 +5162,24 @@ struct Chunk {
     }
 
 
+    // arg_is_owning_temp_struct reports whether a call arg builds a fresh STRUCT value (a struct literal
+    // `Window{..}`) — an owning temp that, passed to an erased param, is BOXED + kept + PICK'd + DROP_UNDER'd.
+    fn arg_is_owning_temp_struct(self, e: ps.Expr) -> bool {
+        match e {
+            case EStructLit(ty, fields) {
+                return true
+            }
+            case _ {
+                return false
+            }
+        }
+    }
+
+
     // plan_erased_mask marks each call arg that is an OWNING-TEMP refcounted value the caller must keep + PICK +
     // DROP_UNDER around the call: (a) an owning-temp ARRAY/object (`s.bytes()`, `[..]`, an array-returning call)
-    // passed to a borrow param — user_arg_masked; or (b) an owning-temp STRING passed to an ERASED param
-    // (`kw.add("fn")`, erase[i]=='1'). keep = how many.
+    // passed to a borrow param — user_arg_masked; or (b) an owning-temp STRING or STRUCT-literal passed to an
+    // ERASED param (`kw.add("fn")`, `map.set(k, Win{..})`, erase[i]=='1'). keep = how many.
     fn plan_erased_mask(self, args: [ps.Expr], erase: string) -> MaskPlan {
         let em = erase.bytes()
         var masked: [bool] = []
@@ -5164,8 +5190,10 @@ struct Chunk {
                 break
             }
             var m = self.user_arg_masked(args[i])
-            if i < em.len() && int(em[i]) == 49 && self.arg_is_owning_temp_string(args[i]) {
-                m = true
+            if i < em.len() && int(em[i]) == 49 {
+                if self.arg_is_owning_temp_string(args[i]) || self.arg_is_owning_temp_struct(args[i]) {
+                    m = true
+                }
             }
             masked.append(m)
             if m {
@@ -5185,7 +5213,13 @@ struct Chunk {
                 break
             }
             if plan.masked[k] {
-                self.gen_expr(args[k], line)
+                // a masked STRUCT literal to an erased param is built BOXED (one owning-temp slot to PICK),
+                // not exploded multi-slot; everything else pushes normally.
+                if self.arg_is_owning_temp_struct(args[k]) {
+                    self.gen_struct_construct(args[k], line, true)
+                } else {
+                    self.gen_expr(args[k], line)
+                }
             }
             k = k + 1
         }
