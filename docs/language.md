@@ -40,7 +40,7 @@ coercion, `+` concatenates strings); the **full explicit-width numeric family** 
 suffix/inference literals, `u8(x)`-style conversions); **`struct` types — construction, field reads, and methods
 (with `self`), including struct-typed fields**; **`interface` declarations with `implements`
 conformance checking**; **`enum` types and exhaustive `match`** (variant construction + field
-binding + a `case _` catch-all); a growing **standard library** — I/O (**`print`/`println`**, **`read_line`/`read_file`/`write_file`**), program environment (**`args`/`env`/`exit`**),
+binding + a `case _` catch-all); a growing **standard library** — I/O (**`print`/`println`**, **`read_line`/`read_file`/`write_file`/`list_dir`**), program environment (**`args`/`env`/`exit`**),
 math (**`sqrt`/`pow`/`abs`/`floor`/`ceil`/`round`/`random`**), strings (**`to_upper`/`to_lower`/`trim`/`contains`/`index_of`/`starts_with`/`ends_with`/`repeat`/`substring`/`replace`/`join`**, plus code-point caret helpers **`cp_count`/`cp_at`/`cp_slice`/`cp_prefix`/`cp_insert`/`cp_delete`** — Unicode-aware, written in Ingle in **`std/string`**, `import`ed), a **`std/map`** generic hash map `Map<K, V>` and **`std/set`** hash set `Set<K>` (any `Hash + Eq` key),
 and **`to_float`/`to_int`**, **`char_code`/`from_char_code`/`parse_float`**, **`clock()`** — and **expression statements**;
 **generic structs
@@ -396,6 +396,11 @@ Ingle also reads from the world:
   file can't be opened (so missing files degrade gracefully rather than crashing).
 - **`write_file(path: string, text: string)`** — write `text` to a file (creating/truncating it);
   a statement, like `print`.
+- **`list_dir(path: string) -> string`** — the directory's entries, one per line, with
+  subdirectories marked by a trailing `/`; the empty string if the directory can't be opened (or
+  has no entries). The lines are **sorted** (byte-wise): directory order is filesystem-dependent,
+  and a listing is an *input* — the same tree must list identically on every run and platform, and
+  `--emit=replay` records each listing exactly like a `read_file`.
 
 ```ember
 fn main() -> int {

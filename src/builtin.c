@@ -18,6 +18,9 @@ int native_id_for_name(const char *name) {
     if (strcmp(name, "write_file") == 0) {
         return NATIVE_WRITE_FILE;
     }
+    if (strcmp(name, "list_dir") == 0) {
+        return NATIVE_LIST_DIR;
+    }
     if (strcmp(name, "char_code") == 0)      return NATIVE_CHAR_CODE;
     if (strcmp(name, "from_char_code") == 0) return NATIVE_FROM_CHAR_CODE;
     if (strcmp(name, "byte_slice") == 0)     return NATIVE_BYTE_SLICE;

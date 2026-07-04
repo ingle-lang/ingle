@@ -106,6 +106,12 @@ Value          alloc_interface(EmberRt *ctx, Value receiver, Value vtable);
 void           free_list(Obj *o);
 void           drain_pool(Obj *pool[POOL_CLASSES]);
 void           rt_free_objects(EmberRt *ctx);
+// list_dir's shared body (hosted-only; defined in runtime.c's !EMBER_FREESTANDING I/O block,
+// dispatched by BOTH the VM and the native-backend runtime so the two can never drift): the
+// directory's entries joined one per line, subdirectories marked with a trailing '/', sorted
+// byte-wise over the printed lines. Returns a malloc'd buffer (caller frees) + its length in
+// *out_len; NULL/0 when the directory can't be opened or has no entries.
+char          *em_list_dir_join(const char *path, size_t *out_len);
 
 // Boxed enum aggregates the C backend emits calls to: em_enum constructs a variant
 // (refcounted); em_enum_field borrows a payload field for a match binding. The variant

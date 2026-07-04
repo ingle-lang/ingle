@@ -171,12 +171,13 @@ typedef struct Nursery {
 
 // Verification loop (§5j, record-replay): the source tags for the captured nondeterministic
 // values. Each is a single static address so events can be matched by POINTER (fast, and the
-// breakdown is unambiguous). `random`/`clock` yield a double; `read_line`/`read_file` yield a
-// string whose bytes are copied into the log so they survive into the (separate) replay run.
+// breakdown is unambiguous). `random`/`clock` yield a double; `read_line`/`read_file`/`list_dir`
+// yield a string whose bytes are copied into the log so they survive into the (separate) replay run.
 static const char NONDET_RANDOM[]    = "random";
 static const char NONDET_CLOCK[]     = "clock";
 static const char NONDET_READ_LINE[] = "read_line";
 static const char NONDET_READ_FILE[] = "read_file";
+static const char NONDET_LIST_DIR[]  = "list_dir";  // a directory listing is an input too
 static const char NONDET_FFI[]       = "ffi";       // a foreign (C) call result leaf
 
 // One captured nondeterministic value, tagged by `kind`: NDV_SCALAR (a double in `num`, from
@@ -1206,6 +1207,23 @@ static Value call_native(VM *vm, int native_id, Value *args, int argc) {
             }
             if (vm->nondet_mode == 1) {   // record the contents for a future replay
                 nondet_record_string(vm, NONDET_READ_FILE, s);
+            }
+            return OBJ_VAL(s);
+        }
+        case NATIVE_LIST_DIR: {
+            if (vm->nondet_mode == 2) {   // replay: return the recorded listing, no real scan
+                return nondet_replay_string(vm, NONDET_LIST_DIR);
+            }
+            const char *path = argc >= 1 ? AS_CSTRING(args[0]) : "";
+            size_t len = 0;
+            char *buf = em_list_dir_join(path, &len);   // the shared body (runtime.c) — sorted,
+            ObjString *s = make_string(RT(vm), len);    // '/'-marked, "" on error/empty
+            if (buf != NULL) {
+                memcpy(s->chars, buf, len);
+                free(buf);
+            }
+            if (vm->nondet_mode == 1) {   // record the listing for a future replay
+                nondet_record_string(vm, NONDET_LIST_DIR, s);
             }
             return OBJ_VAL(s);
         }
@@ -4558,13 +4576,14 @@ int vm_replay(const CompiledProgram *prog, const Tracer *tracer) {
     VMResult r2 = vm_run(rep, &out2, NULL);
     long long ret2 = IS_INT(out2) ? AS_INT(out2) : 0;
 
-    int n_random = 0, n_clock = 0, n_line = 0, n_file = 0, n_ffi = 0;
+    int n_random = 0, n_clock = 0, n_line = 0, n_file = 0, n_dir = 0, n_ffi = 0;
     for (int i = 0; i < rec->nondet_count; i++) {
         const char *s = rec->nondet_log[i].src;
         if      (s == NONDET_RANDOM)    { n_random++; }
         else if (s == NONDET_CLOCK)     { n_clock++; }
         else if (s == NONDET_READ_LINE) { n_line++; }
         else if (s == NONDET_READ_FILE) { n_file++; }
+        else if (s == NONDET_LIST_DIR)  { n_dir++; }
         else if (s == NONDET_FFI)       { n_ffi++; }
     }
 
@@ -4574,11 +4593,11 @@ int vm_replay(const CompiledProgram *prog, const Tracer *tracer) {
 
     if (ok) {
         printf("replay: deterministic — %d nondeterministic event(s) recorded "
-               "(%d random, %d clock, %d read_line, %d read_file, %d ffi); both runs identical\n",
-               rec->nondet_count, n_random, n_clock, n_line, n_file, n_ffi);
+               "(%d random, %d clock, %d read_line, %d read_file, %d list_dir, %d ffi); both runs identical\n",
+               rec->nondet_count, n_random, n_clock, n_line, n_file, n_dir, n_ffi);
         printf("{\"event\":\"replay\",\"status\":\"deterministic\",\"events\":%d,\"random\":%d,"
-               "\"clock\":%d,\"read_line\":%d,\"read_file\":%d,\"ffi\":%d}\n",
-               rec->nondet_count, n_random, n_clock, n_line, n_file, n_ffi);
+               "\"clock\":%d,\"read_line\":%d,\"read_file\":%d,\"list_dir\":%d,\"ffi\":%d}\n",
+               rec->nondet_count, n_random, n_clock, n_line, n_file, n_dir, n_ffi);
     } else {
         printf("replay: DIVERGED — the replay did not reproduce the recorded run "
                "(recorded %d, consumed %d)\n", rec->nondet_count, rep->nondet_pos);

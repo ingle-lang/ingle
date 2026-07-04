@@ -34,6 +34,8 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <dirent.h>    // list_dir: opendir/readdir (hosted-only, like the file I/O it sits with)
+#include <sys/stat.h>  // list_dir: stat() classifies every entry (uniform across filesystems)
 #endif
 
 
@@ -2300,6 +2302,99 @@ Value ember_gfx_native(EmberRt *ctx, int nid, const Value *args) {
 #endif
 
 
+#ifndef EMBER_FREESTANDING
+// _entry_cmp orders list_dir's printed lines byte-wise (the trailing '/' participates, so the
+// rule is simply "the output lines are sorted" — no name-vs-suffix subtlety to remember).
+static int _entry_cmp(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+
+// em_list_dir_join — the ONE body behind the list_dir builtin (VM + native backend; see
+// ember_rt.h). Entries are classified by stat() rather than d_type so a symlink to a directory
+// counts as a directory and every filesystem answers identically (d_type is DT_UNKNOWN on some).
+// "." and ".." are skipped. The listing is sorted because readdir order is an accident of the
+// filesystem — determinism (record/replay, golden tests) demands one canonical order.
+char *em_list_dir_join(const char *path, size_t *out_len) {
+    *out_len = 0;
+    DIR *d = opendir(path);
+    if (d == NULL) {
+        return NULL;
+    }
+    size_t plen = strlen(path);
+    char **names = NULL;
+    size_t count = 0, cap = 0;
+    const struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        const char *n = ent->d_name;
+        if (n[0] == '.' && (n[1] == '\0' || (n[1] == '.' && n[2] == '\0'))) {
+            continue;
+        }
+        size_t nlen = strlen(n);
+        char *full = malloc(plen + 1 + nlen + 1);
+        if (full == NULL) {
+            continue;
+        }
+        memcpy(full, path, plen);
+        full[plen] = '/';
+        memcpy(full + plen + 1, n, nlen + 1);
+        struct stat st;
+        int is_dir = (stat(full, &st) == 0 && S_ISDIR(st.st_mode));
+        free(full);
+        char *line = malloc(nlen + 2);            // name (+ '/' for a directory) + NUL
+        if (line == NULL) {
+            continue;
+        }
+        memcpy(line, n, nlen);
+        if (is_dir) {
+            line[nlen++] = '/';
+        }
+        line[nlen] = '\0';
+        if (count == cap) {
+            cap = cap == 0 ? 16 : cap * 2;
+            char **grown = realloc(names, cap * sizeof(char *));
+            if (grown == NULL) {
+                free(line);
+                break;
+            }
+            names = grown;
+        }
+        names[count++] = line;
+    }
+    closedir(d);
+    if (count == 0) {
+        free(names);
+        return NULL;
+    }
+    qsort(names, count, sizeof(char *), _entry_cmp);
+    size_t total = count;                         // count-1 newlines + NUL
+    for (size_t i = 0; i < count; i++) {
+        total += strlen(names[i]);
+    }
+    char *out = malloc(total);
+    size_t at = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (out != NULL) {
+            size_t l = strlen(names[i]);
+            if (i > 0) {
+                out[at++] = '\n';
+            }
+            memcpy(out + at, names[i], l);
+            at += l;
+        }
+        free(names[i]);
+    }
+    free(names);
+    if (out == NULL) {
+        return NULL;
+    }
+    out[at] = '\0';
+    *out_len = at;
+    return out;
+}
+#endif  // !EMBER_FREESTANDING
+
+
 // em_native — the native-builtin dispatcher (the VM's call_native, minus the verification
 // /nondet/graphics paths which are VM-only). print/println keep their own emitter path; this
 // covers stdin/file I/O, libm math, char/parse helpers, concat, and args/env/exit.
@@ -2380,6 +2475,17 @@ Value em_native(EmberRt *ctx, int nid, int argc, const Value *args) {
                 fclose(f);
             }
             return INT_VAL(0);
+        }
+        case NATIVE_LIST_DIR: {
+            const char *path = argc >= 1 ? AS_CSTRING(args[0]) : "";
+            size_t len = 0;
+            char *buf = em_list_dir_join(path, &len);
+            ObjString *s = make_string(ctx, len);
+            if (buf != NULL) {
+                memcpy(s->chars, buf, len);
+                free(buf);
+            }
+            return OBJ_VAL(s);
         }
 #endif  // !EMBER_FREESTANDING (stdin/file I/O)
         case NATIVE_CHAR_CODE: {

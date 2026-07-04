@@ -4423,6 +4423,21 @@ static SemType check_expr_inner(Checker *c, Expr *e) {
                         (argc >= 1 && is_owning_temp(c, e->as.call.args[0], at)) ? 1 : 0;
                     return TY_STRING;
                 }
+                if (nid == NATIVE_LIST_DIR) {
+                    if (argc != 1) {
+                        type_error(c, e->line, e->col,
+                                   "list_dir takes one argument (the directory path)");
+                    }
+                    SemType at = argc >= 1 ? check_expr(c, e->as.call.args[0])
+                                           : TY_ERROR;
+                    if (at != TY_ERROR && at != TY_STRING) {
+                        type_error(c, e->line, e->col,
+                                   "list_dir's path must be a string");
+                    }
+                    e->as.call.drop_mask =
+                        (argc >= 1 && is_owning_temp(c, e->as.call.args[0], at)) ? 1 : 0;
+                    return TY_STRING;
+                }
                 if (nid == NATIVE_WRITE_FILE) {
                     if (argc != 2) {
                         type_error(c, e->line, e->col,
