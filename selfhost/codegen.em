@@ -5548,6 +5548,9 @@ struct Chunk {
                     if sid >= 0 {
                         return sid
                     }
+                    if self.is_enum_ctor(elems[0]) {
+                        return 0 - 4                  // `[Circle(2.0), Rect(..), Origin]` -> enum elements (refcounted)
+                    }
                 }
             }
             case _ {
