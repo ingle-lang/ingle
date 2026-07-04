@@ -74,6 +74,7 @@ let OP_STR_CHARS: int = 65
 let OP_STR_CHAR_COUNT: int = 66
 let OP_STR_BYTES: int = 67
 let OP_STR_SPLIT: int = 68
+let OP_STR_PARSE_INT: int = 69
 let OP_TO_STRING: int = 74
 let OP_NURSERY_BEGIN: int = 75
 let OP_CONTRACT_CHECK: int = 76
@@ -4577,6 +4578,13 @@ struct Chunk {
                         self.emit_idx(slot)
                         self.gen_expr(args[0], line)
                         self.emit(OP_STR_SPLIT)
+                    } else if mname == "parse_int" {
+                        // `s.parse_int()` -> STR_PARSE_INT <Some enum id> <Some tag> <None tag> (builds Option<int>).
+                        self.cur_line = line
+                        self.emit(OP_GET_LOCAL)
+                        self.emit_idx(slot)
+                        self.emit(OP_STR_PARSE_INT)
+                        self.emit_recv_option_operands()
                     }
                     return
                 }
@@ -4649,6 +4657,11 @@ struct Chunk {
                         self.gen_expr(object, line)
                         self.gen_expr(args[0], line)
                         self.emit(OP_STR_SPLIT)
+                    } else if mname == "parse_int" {
+                        self.cur_line = line
+                        self.gen_expr(object, line)
+                        self.emit(OP_STR_PARSE_INT)
+                        self.emit_recv_option_operands()
                     }
                 } else if tk == -2 {
                     self.cur_line = line
