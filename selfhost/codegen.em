@@ -3248,6 +3248,9 @@ struct Chunk {
                                 //   `s.method()` dispatches dynamically via CALL_DYN); else ""
     st_mod: [int]               // per-struct defining module — module-scoped type-name resolution (OFI-179)
     et_mod: [int]               // per-enum defining module
+    imp_from: [int]             // import map: importing module (parallel to imp_alias/imp_to) — module-qualified call resolution
+    imp_alias: [string]         // ...its alias
+    imp_to: [int]               // ...the imported module's index
     cur_ret_elem: int           // this function's ARRAY-return element code (`[string]` -> -3), else -99 — types `return []`
     cur_return_span: int        // >0 if this function returns an all-scalar struct (RETURN_STRUCT span)
     ret_box_struct: bool        // a method of a GENERIC struct returns an all-scalar struct BOXED (NEW_STRUCT +
@@ -4235,12 +4238,58 @@ struct Chunk {
                 if rsid >= 0 {
                     return cg_index_of(self.fn_names, self.st_names[rsid] + "." + mname)
                 }
-                return cg_index_of(self.fn_names, mname)   // a module-qualified free function
+                return self.resolve_module_qualified(recv.value, mname)   // a module-qualified free function
             }
             case _ {
                 return -1
             }
         }
+    }
+
+
+    // resolve_module_qualified resolves `alias.fn()` to the fn in the module `alias` imports (from THIS
+    // function's own module's import list), so a name that COLLIDES across co-imported modules (`lay.new()`
+    // when flare, layout AND ui all define `new`) resolves to the RIGHT one — not the first global match,
+    // which for flare's `lo: lay.new()` was flare's own `new` -> infinite recursion (OFI-179). Falls back to
+    // the bare-name lookup when the alias is not a recorded import (a single-module compile / an inert alias).
+    fn resolve_module_qualified(self, recv: ps.Expr, mname: string) -> int {
+        match recv {
+            case EIdent(alias) {
+                var i = 0
+                loop {
+                    if i >= self.imp_alias.len() {
+                        break
+                    }
+                    if self.imp_from[i] == self.cur_module && self.imp_alias[i] == alias {
+                        let fi = self.fn_in_module(mname, self.imp_to[i])
+                        if fi >= 0 {
+                            return fi
+                        }
+                        break
+                    }
+                    i = i + 1
+                }
+            }
+            case _ {
+            }
+        }
+        return cg_index_of(self.fn_names, mname)
+    }
+
+
+    // fn_in_module returns the index of free function `name` defined in module `mod`, or -1.
+    fn fn_in_module(self, name: string, mod: int) -> int {
+        var i = 0
+        loop {
+            if i >= self.fn_names.len() {
+                break
+            }
+            if self.fn_names[i] == name && i < self.fn_module.len() && self.fn_module[i] == mod {
+                return i
+            }
+            i = i + 1
+        }
+        return 0 - 1
     }
 
 
@@ -5286,8 +5335,9 @@ struct Chunk {
                     // a NON-generic module-qualified free function (`lx.dump(lx.lex(..))`): route through
                     // gen_user_call with mask_obj=false — exactly like the bare non-generic free-fn path — so an
                     // owning-temp ARRAY arg is kept + PICK'd + DROP_UNDER'd (but a struct temp is NOT, matching
-                    // stage-0's non-generic borrow discipline).
-                    let fi = cg_index_of(self.fn_names, mname)
+                    // stage-0's non-generic borrow discipline). Resolved via the import alias so `lay.new()`
+                    // reaches layout's `new`, not the first global `new` (OFI-179).
+                    let fi = self.resolve_module_qualified(object, mname)
                     if fi >= 0 {
                         self.gen_user_call(fi, args, line, false, "")
                     }
@@ -9284,6 +9334,9 @@ struct FnRets {
     ext_pquals: [string]    // ...one char per param: '0' none / '1' mut / '2' move (a `move Ptr` arg is move-consumed)
     st_mod: [int]           // per-struct defining module (parallel to struct sids) — module-scoped type resolution
     et_mod: [int]           // per-enum defining module (parallel to enum ids incl. prelude Option/Result)
+    imp_from: [int]         // per-import: importing module (parallel to imp_alias/imp_to) — module-qualified call resolution
+    imp_alias: [string]     // ...its alias (`lay`)
+    imp_to: [int]           // ...the imported module's index
 }
 
 
@@ -9298,7 +9351,7 @@ fn ret_scalar_kind(ret: [ps.Ty]) -> int {
 }
 
 
-fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string], mod_of: [int]) -> FnRets {
+fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string], mod_of: [int], imp_from: [int], imp_alias: [string], imp_to: [int]) -> FnRets {
     var rs: [bool] = []
     var ra: [bool] = []
     var rsid: [int] = []
@@ -9398,7 +9451,7 @@ fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string], m
         }
         i = i + 1
     }
-    return FnRets { str: rs, arr: ra, sid: rsid, enm: ren, elem: rel, kind: rk, ok: rok, err: rerr, ext_names: exn, ext_kinds: exk, ext_pquals: exq, st_mod: st_mod, et_mod: et_mod }
+    return FnRets { str: rs, arr: ra, sid: rsid, enm: ren, elem: rel, kind: rk, ok: rok, err: rerr, ext_names: exn, ext_kinds: exk, ext_pquals: exq, st_mod: st_mod, et_mod: et_mod, imp_from: imp_from, imp_alias: imp_alias, imp_to: imp_to }
 }
 
 
@@ -10182,7 +10235,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_module: [int], cur_module: in
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_module: clone_ints(fn_module), cur_module: cur_module, fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), fn_ret_ok: clone_ints(fn_rets.ok), fn_ret_err: clone_ints(fn_rets.err), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_elem_targs: [], slot_kind: skind, slot_iface: [], st_mod: clone_ints(fn_rets.st_mod), et_mod: clone_ints(fn_rets.et_mod), cur_ret_elem: 0 - 99, cur_return_span: 0, ret_box_struct: false, self_is_generic: false, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_felem2: clone_ints(structs.f_elem2), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), st_felem_payload: clone_ints(structs.f_elem_payload), st_felem_payload_tp: clone_strs(structs.f_elem_payload_tp), st_felem_tpidx: clone_ints(structs.f_elem_tpidx), st_ftargs: clone_strs(structs.f_targs), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), gc_line: clone_ints(globals.line), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), ifm_ret_str: clone_bools(wit.ifm_ret_str), ifm_ret_kind: clone_ints(wit.ifm_ret_kind), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), mpe_key: clone_strs(wit.mpe_key), mpe_flags: clone_strs(wit.mpe_flags), mrp_key: clone_strs(wit.mrp_key), mrp_tpidx: clone_ints(wit.mrp_tpidx), mre_tpidx: clone_ints(wit.mre_tpidx), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], cur_self_args: "", copy_tparams: [], at_base_generic: false, mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [], aei_name: [], aei_iface: [] }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_module: clone_ints(fn_module), cur_module: cur_module, fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), fn_ret_ok: clone_ints(fn_rets.ok), fn_ret_err: clone_ints(fn_rets.err), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_elem_targs: [], slot_kind: skind, slot_iface: [], st_mod: clone_ints(fn_rets.st_mod), et_mod: clone_ints(fn_rets.et_mod), imp_from: clone_ints(fn_rets.imp_from), imp_alias: clone_strs(fn_rets.imp_alias), imp_to: clone_ints(fn_rets.imp_to), cur_ret_elem: 0 - 99, cur_return_span: 0, ret_box_struct: false, self_is_generic: false, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_felem2: clone_ints(structs.f_elem2), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), st_felem_payload: clone_ints(structs.f_elem_payload), st_felem_payload_tp: clone_strs(structs.f_elem_payload_tp), st_felem_tpidx: clone_ints(structs.f_elem_tpidx), st_ftargs: clone_strs(structs.f_targs), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), gc_line: clone_ints(globals.line), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), ifm_ret_str: clone_bools(wit.ifm_ret_str), ifm_ret_kind: clone_ints(wit.ifm_ret_kind), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), mpe_key: clone_strs(wit.mpe_key), mpe_flags: clone_strs(wit.mpe_flags), mrp_key: clone_strs(wit.mrp_key), mrp_tpidx: clone_ints(wit.mrp_tpidx), mre_tpidx: clone_ints(wit.mre_tpidx), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], cur_self_args: "", copy_tparams: [], at_base_generic: false, mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [], aei_name: [], aei_iface: [] }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     ch.cur_ret_elem = ch.ret_elem_code(f.ret)
     // A method of a GENERIC struct (Box<T>, SlotMap<V>) uses the erased BOXED-struct convention: an all-scalar

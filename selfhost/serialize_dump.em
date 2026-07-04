@@ -17,6 +17,9 @@ struct Loaded {
     decls: [ps.Decl]
     sources: [string]
     mod_of: [int]
+    imp_from: [int]
+    imp_alias: [string]
+    imp_to: [int]
 }
 
 
@@ -79,6 +82,9 @@ fn load_modules(entry: string) -> Loaded {
     var combined: [ps.Decl] = []
     var sources: [string] = []
     var mod_of: [int] = []
+    var imp_from: [int] = []
+    var imp_alias: [string] = []
+    var imp_to: [int] = []
     seen.append(entry)
     queue.append(entry)
     var qi = 0
@@ -105,10 +111,26 @@ fn load_modules(entry: string) -> Loaded {
             match decls[ii] {
                 case DImport(ipath, alias) {
                     let rpath = resolve_import(queue[qi], ipath)
-                    if seen_has(seen, rpath) == false {
+                    var tidx = 0 - 1
+                    var si = 0
+                    loop {
+                        if si >= queue.len() {
+                            break
+                        }
+                        if queue[si] == rpath {
+                            tidx = si
+                            break
+                        }
+                        si = si + 1
+                    }
+                    if tidx < 0 {
+                        tidx = queue.len()
                         seen.append(rpath)
                         queue.append(rpath)
                     }
+                    imp_from.append(qi)
+                    imp_alias.append(alias)
+                    imp_to.append(tidx)
                 }
                 case _ {
                 }
@@ -117,7 +139,7 @@ fn load_modules(entry: string) -> Loaded {
         }
         qi = qi + 1
     }
-    return Loaded { decls: combined, sources: sources, mod_of: mod_of }
+    return Loaded { decls: combined, sources: sources, mod_of: mod_of, imp_from: imp_from, imp_alias: imp_alias, imp_to: imp_to }
 }
 
 
@@ -130,7 +152,7 @@ fn main() -> int {
     let entry = argv[0]
     let out = argv[1]
     let loaded = load_modules(entry)
-    sz.serialize_program(loaded.decls, loaded.mod_of, loaded.sources, out)
+    sz.serialize_program(loaded.decls, loaded.mod_of, loaded.sources, loaded.imp_from, loaded.imp_alias, loaded.imp_to, out)
     exit(0)
     return 0
 }

@@ -72,6 +72,9 @@ fn seen_has(seen: [string], p: string) -> bool {
 struct Loaded {
     decls: [ps.Decl]
     mod_of: [int]
+    imp_from: [int]        // per-import: the IMPORTING module's index (parallel to imp_alias/imp_to)
+    imp_alias: [string]    // ...its alias (`lay`)
+    imp_to: [int]          // ...the imported module's index (so `lay.new()` resolves in layout's module)
 }
 
 
@@ -82,6 +85,9 @@ fn load_modules(entry: string) -> Loaded {
     var queue: [string] = []
     var combined: [ps.Decl] = []
     var mod_of: [int] = []
+    var imp_from: [int] = []
+    var imp_alias: [string] = []
+    var imp_to: [int] = []
     seen.append(entry)
     queue.append(entry)
     var qi = 0
@@ -107,10 +113,26 @@ fn load_modules(entry: string) -> Loaded {
             match decls[ii] {
                 case DImport(ipath, alias) {
                     let rpath = resolve_import(queue[qi], ipath)
-                    if seen_has(seen, rpath) == false {
+                    var tidx = 0 - 1
+                    var si = 0
+                    loop {
+                        if si >= queue.len() {
+                            break
+                        }
+                        if queue[si] == rpath {
+                            tidx = si
+                            break
+                        }
+                        si = si + 1
+                    }
+                    if tidx < 0 {
+                        tidx = queue.len()
                         seen.append(rpath)
                         queue.append(rpath)
                     }
+                    imp_from.append(qi)          // `lay.new()` in module qi resolves `new` in module tidx (layout)
+                    imp_alias.append(alias)
+                    imp_to.append(tidx)
                 }
                 case _ {
                 }
@@ -119,7 +141,7 @@ fn load_modules(entry: string) -> Loaded {
         }
         qi = qi + 1
     }
-    return Loaded { decls: combined, mod_of: mod_of }
+    return Loaded { decls: combined, mod_of: mod_of, imp_from: imp_from, imp_alias: imp_alias, imp_to: imp_to }
 }
 
 
@@ -133,7 +155,7 @@ fn main() -> int {
     let fn_names = cg.build_fn_names(lm.decls)
     let structs = cg.build_structs(lm.decls)
     let enums = cg.build_enums(lm.decls, structs)
-    let fn_rets = cg.build_fn_rets(lm.decls, structs, enums.e_names, lm.mod_of)
+    let fn_rets = cg.build_fn_rets(lm.decls, structs, enums.e_names, lm.mod_of, lm.imp_from, lm.imp_alias, lm.imp_to)
     let globals = cg.build_globals(lm.decls)
     let instances = cg.build_struct_instances(lm.decls, structs.names)
     cg.disassemble_program(lm.decls, lm.mod_of, fn_names, fn_rets, structs, enums, globals, instances)

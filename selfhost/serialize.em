@@ -567,13 +567,13 @@ fn emit_lifted_chunks(mut w: Writer, ch: cg.Chunk, source: string, fn_names: [st
 }
 
 
-fn serialize_program(decls: [ps.Decl], mod_of: [int], sources: [string], out_path: string) {
+fn serialize_program(decls: [ps.Decl], mod_of: [int], sources: [string], imp_from: [int], imp_alias: [string], imp_to: [int], out_path: string) {
     let no_mods: [int] = []              // global fallback for instances/lambdas (their module is inert)
     let fn_names = cg.build_fn_names(decls)
     let fn_mods = cg.build_fn_modules(decls, mod_of)
     let structs = cg.build_structs(decls)
     let enums = cg.build_enums(decls, structs)
-    let fn_rets = cg.build_fn_rets(decls, structs, enums.e_names, mod_of)
+    let fn_rets = cg.build_fn_rets(decls, structs, enums.e_names, mod_of, imp_from, imp_alias, imp_to)
     let globals = cg.build_globals(decls)
     let instances = cg.build_struct_instances(decls, structs.names)
 

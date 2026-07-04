@@ -31,7 +31,10 @@ import "serialize" as sz
 struct Loaded {
     decls: [ps.Decl]
     sources: [string]
-    mod_of: [int]               // each decl's owning module index (BFS order) — for module-local fn resolution
+    mod_of: [int]
+    imp_from: [int]
+    imp_alias: [string]
+    imp_to: [int]               // each decl's owning module index (BFS order) — for module-local fn resolution
 }
 
 
@@ -100,6 +103,9 @@ fn load_modules(entry: string) -> Loaded {
     var combined: [ps.Decl] = []
     var sources: [string] = []
     var mod_of: [int] = []
+    var imp_from: [int] = []
+    var imp_alias: [string] = []
+    var imp_to: [int] = []
     seen.append(entry)
     queue.append(entry)
     var qi = 0
@@ -126,10 +132,26 @@ fn load_modules(entry: string) -> Loaded {
             match decls[ii] {
                 case DImport(ipath, alias) {
                     let rpath = resolve_import(queue[qi], ipath)
-                    if seen_has(seen, rpath) == false {
+                    var tidx = 0 - 1
+                    var si = 0
+                    loop {
+                        if si >= queue.len() {
+                            break
+                        }
+                        if queue[si] == rpath {
+                            tidx = si
+                            break
+                        }
+                        si = si + 1
+                    }
+                    if tidx < 0 {
+                        tidx = queue.len()
                         seen.append(rpath)
                         queue.append(rpath)
                     }
+                    imp_from.append(qi)
+                    imp_alias.append(alias)
+                    imp_to.append(tidx)
                 }
                 case _ {
                 }
@@ -138,18 +160,18 @@ fn load_modules(entry: string) -> Loaded {
         }
         qi = qi + 1
     }
-    return Loaded { decls: combined, sources: sources, mod_of: mod_of }
+    return Loaded { decls: combined, sources: sources, mod_of: mod_of, imp_from: imp_from, imp_alias: imp_alias, imp_to: imp_to }
 }
 
 
 // emit_program codegens every function of every module (merged decls) and prints its disassembly, in
 // stage-0's `--emit=bytecode` format — a struct's methods are emitted as `Struct.method` in declaration
 // order so CALL indices line up.
-fn emit_program(decls: [ps.Decl], mod_of: [int]) {
+fn emit_program(decls: [ps.Decl], mod_of: [int], imp_from: [int], imp_alias: [string], imp_to: [int]) {
     let fn_names = cg.build_fn_names(decls)
     let structs = cg.build_structs(decls)
     let enums = cg.build_enums(decls, structs)
-    let fn_rets = cg.build_fn_rets(decls, structs, enums.e_names, mod_of)
+    let fn_rets = cg.build_fn_rets(decls, structs, enums.e_names, mod_of, imp_from, imp_alias, imp_to)
     let globals = cg.build_globals(decls)
     let instances = cg.build_struct_instances(decls, structs.names)
     cg.disassemble_program(decls, mod_of, fn_names, fn_rets, structs, enums, globals, instances)
@@ -174,9 +196,9 @@ fn main() -> int {
         //    print the `--emit=bytecode` disassembly (the differential path, byte-identical to stage 0).
         let loaded = load_modules(entry)
         if argv.len() >= 2 {
-            sz.serialize_program(loaded.decls, loaded.mod_of, loaded.sources, argv[1])
+            sz.serialize_program(loaded.decls, loaded.mod_of, loaded.sources, loaded.imp_from, loaded.imp_alias, loaded.imp_to, argv[1])
         } else {
-            emit_program(loaded.decls, loaded.mod_of)
+            emit_program(loaded.decls, loaded.mod_of, loaded.imp_from, loaded.imp_alias, loaded.imp_to)
         }
     }
     // `exit` sets the real process code AND suppresses the runtime's `=> N` echo, so emberc-self's output
