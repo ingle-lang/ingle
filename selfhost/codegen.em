@@ -5669,12 +5669,22 @@ struct Chunk {
                 return true
             }
             case _ {
-                // A field read off a NON-identifier object (a call result, a construction): evaluate the
-                // object, then extract the field. A boxed-struct owning temp uses GET_FIELD_OWNED (drops the
-                // receiver box after extracting); a borrowed place uses GET_FIELD. (Multi-slot temps —
-                // a flat-struct call result — are deferred to the nested-flattening work.)
+                // A field read off a NON-identifier object (a call result, a construction, a NESTED field read
+                // `self.style.pad`): evaluate the object, then extract the field. A boxed-struct owning temp uses
+                // GET_FIELD_OWNED (drops the receiver box); a borrowed place uses GET_FIELD. A field read of a
+                // struct field (`self.style`) always MATERIALISES a boxed struct (even an all-scalar one), so the
+                // nested access reads it boxed — hence the all-scalar carve-out only excludes a multi-slot CALL
+                // result (still deferred to the nested-flattening work).
                 let tk = self.expr_type_kind(object)
-                if tk >= 0 && self.struct_all_scalar(tk) == false {
+                var obj_boxed = self.struct_all_scalar(tk) == false
+                match object {
+                    case EGet(inner, iname) {
+                        obj_boxed = true                 // a nested field read yields a boxed struct value
+                    }
+                    case _ {
+                    }
+                }
+                if tk >= 0 && obj_boxed {
                     let ln = self.cur_line
                     self.gen_expr(object, ln)
                     self.cur_line = ln
@@ -5711,6 +5721,17 @@ struct Chunk {
                 return ec >= 0 && self.struct_array_inline(ec)
             }
             case EGet(object, name) {
+                // a field read whose FIELD is an ALL-SCALAR (inline-packed) struct (`self.style`) MATERIALISES a
+                // fresh boxed struct copy — an owning temp (so a further `.pad` GET_FIELD_OWNEDs it, dropping the
+                // copy). A BOXED sub-struct field (refcounted) reads as a borrowed pointer; a scalar field is a
+                // borrowed place too; deeper nesting recurses on the object.
+                let osid = self.expr_type_kind(object.value)
+                if osid >= 0 {
+                    let fsid = self.field_type_kind(osid, name)
+                    if fsid >= 0 && self.struct_all_scalar(fsid) {
+                        return true
+                    }
+                }
                 return self.is_owning_temp_obj(object.value)
             }
             case _ {
