@@ -3667,6 +3667,24 @@ struct Chunk {
     }
 
 
+    // array_place_slot returns the slot of an ARRAY-place read `e` (a bare array local/param — `var out = blocks`),
+    // or -1. Binding one to a new owner INCREFs a borrow / MOVES an owned array (gen_consume) and carries the
+    // source's element type onto the new droppable-array binding.
+    fn array_place_slot(self, e: ps.Expr) -> int {
+        match e {
+            case EIdent(name) {
+                let slot = self.resolve_slot(name)
+                if slot >= 0 && self.slot_array[slot] {
+                    return slot
+                }
+            }
+            case _ {
+            }
+        }
+        return 0 - 1
+    }
+
+
     // gen_global_const inlines the folded literal of top-level constant `gi` (the same value stage-0 inlines
     // at each reference): an int/float -> CONST, a string -> STRING, a bool -> TRUE/FALSE.
     fn gen_global_const(mut self, gi: int) {
@@ -7753,6 +7771,17 @@ struct Chunk {
                     } else if self.expr_is_string(value.value) {
                         self.gen_consume(value.value, value.line)    // a string place-read INCREFs; owned/droppable
                         self.declare_binding(name, 1, -1, true, true, false, false)
+                    } else if self.array_place_slot(value.value) >= 0 {
+                        // `var out = blocks` — a bare ARRAY place read (param/local) bound to a NEW owner: INCREF
+                        // a borrow / MOVE an owned array (gen_consume), declare a droppable array carrying the
+                        // source's element type so `out[i]` / `out.append(..)` resolve.
+                        let asrc = self.array_place_slot(value.value)
+                        let aelem = self.slot_elem[asrc]
+                        let atargs = self.slot_elem_targs[asrc]
+                        self.gen_consume(value.value, value.line)
+                        self.declare_binding(name, 1, -1, false, true, false, true)
+                        self.slot_elem[self.slot_elem.len() - 1] = aelem
+                        self.slot_elem_targs[self.slot_elem_targs.len() - 1] = atargs
                     } else if self.is_str_local_read(value.value) {
                         // a refcounted ENUM read from a place (`let op = self.advance().kind`, an enum field
                         // or an owned-enum local): aliasing an existing owner INCREFs (gen_consume), and the
