@@ -1816,6 +1816,37 @@ struct WitInfo {
     gret_fn: [string]       // generic-return table: a generic fn whose RETURN is a bare type-param T or [T]
     gret_arr: [bool]        // ...is the return `[T]` (true) or bare `T` (false)?
     gret_argidx: [int]      // ...the value-param index (typed T or [T]) whose concrete type the result takes
+    mpe_key: [string]       // generic-struct method param-erasure table: "Struct.method" (one row per method)
+    mpe_flags: [string]     // ...per-EXPLICIT-param flags ('1' = bare erased type-param `key: K`, '0' otherwise),
+                            //   so a string arg to an erased `K` param is NOT incref'd (stage-0's borrow rule)
+}
+
+
+// param_erasure_flag returns "1" if a method param's type is a bare erased type-parameter of its struct
+// (`key: K` where the struct is declared `<K, V>`), else "0" — one char of a method's mpe_flags string.
+fn param_erasure_flag(p: ps.Param, generics: [ps.GenericParam]) -> string {
+    if p.ty.len() == 0 {
+        return "0"
+    }
+    match p.ty[0] {
+        case TyName(qual, name) {
+            if qual == "" {
+                var gi = 0
+                loop {
+                    if gi >= generics.len() {
+                        break
+                    }
+                    if generics[gi].name == name {
+                        return "1"
+                    }
+                    gi = gi + 1
+                }
+            }
+        }
+        case _ {
+        }
+    }
+    return "0"
 }
 
 
@@ -1976,6 +2007,8 @@ fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
     var gret_fn: [string] = []
     var gret_arr: [bool] = []
     var gret_argidx: [int] = []
+    var mpe_key: [string] = []
+    var mpe_flags: [string] = []
     var i = 0
     loop {
         if i >= decls.len() {
@@ -2035,6 +2068,31 @@ fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
                     }
                     sg_bound.append(bs)
                     gi = gi + 1
+                }
+                // Method param-erasure: for a GENERIC struct, record which EXPLICIT method params are bare
+                // erased type-params (`key: K`). A string arg to such a param is a BORROW (not incref'd) —
+                // the method compiles once over the erased K and a store inside takes its OWN reference.
+                if generics.len() > 0 {
+                    var mmi = 0
+                    loop {
+                        if mmi >= methods.len() {
+                            break
+                        }
+                        var flags = ""
+                        var pmi = 0
+                        loop {
+                            if pmi >= methods[mmi].params.len() {
+                                break
+                            }
+                            if methods[mmi].params[pmi].is_self == false {
+                                flags = "{flags}{param_erasure_flag(methods[mmi].params[pmi], generics)}"
+                            }
+                            pmi = pmi + 1
+                        }
+                        mpe_key.append("{name}.{methods[mmi].name}")
+                        mpe_flags.append(flags)
+                        mmi = mmi + 1
+                    }
                 }
             }
             case DFn(f) {
@@ -2107,7 +2165,7 @@ fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
         ifm_ret_kind.append(0)
         if_names.append("Ord")
     }
-    return WitInfo { if_names: if_names, ifm_iface: ifm_iface, ifm_name: ifm_name, ifm_owning: ifm_owning, ifm_ret_str: ifm_ret_str, ifm_ret_kind: ifm_ret_kind, gb_fn: gb_fn, gb_tpname: gb_tpname, gb_bound: gb_bound, gb_argidx: gb_argidx, impl_struct: impl_struct, impl_iface: impl_iface, sg_struct: sg_struct, sg_tparam: sg_tparam, sg_bound: sg_bound, gret_fn: gret_fn, gret_arr: gret_arr, gret_argidx: gret_argidx }
+    return WitInfo { if_names: if_names, ifm_iface: ifm_iface, ifm_name: ifm_name, ifm_owning: ifm_owning, ifm_ret_str: ifm_ret_str, ifm_ret_kind: ifm_ret_kind, gb_fn: gb_fn, gb_tpname: gb_tpname, gb_bound: gb_bound, gb_argidx: gb_argidx, impl_struct: impl_struct, impl_iface: impl_iface, sg_struct: sg_struct, sg_tparam: sg_tparam, sg_bound: sg_bound, gret_fn: gret_fn, gret_arr: gret_arr, gret_argidx: gret_argidx, mpe_key: mpe_key, mpe_flags: mpe_flags }
 }
 
 
@@ -3101,6 +3159,8 @@ struct Chunk {
     gret_fn: [string]           // generic-return table (GLOBAL): a generic fn returning a bare `T` / `[T]`
     gret_arr: [bool]            // ...is the return `[T]` (true) or bare `T`?
     gret_argidx: [int]          // ...the value-param whose concrete type the result takes
+    mpe_key: [string]           // generic-struct method param-erasure table (GLOBAL): "Struct.method"
+    mpe_flags: [string]         // ...parallel: per-explicit-param '1'=erased-tparam-borrow (no incref) / '0'
     wit_tpname: [string]        // THIS fn's witness slots, in order: slot k's type-param name (k = 0..n_wit-1)
     wit_bound: [string]         // ...and slot k's bound interface name (the leading hidden params)
     wit_slot: [int]             // ...and the actual local slot each witness occupies (leading, before value params)
@@ -4800,11 +4860,12 @@ struct Chunk {
                     return
                 }
                 let midx = self.resolve_method_index(recv, self.st_names[sid], mname)
+                let erase = self.method_param_erasure(self.st_names[sid], mname)
                 self.cur_line = line
                 if self.slot_boxed[slot] {
                     self.emit(OP_GET_LOCAL)
                     self.emit_idx(slot)
-                    let n = self.gen_call_args(args, line)
+                    let n = self.gen_call_args_e(args, line, erase)
                     self.emit(OP_CALL)
                     self.emit_idx(midx)
                     self.emit_idx(1 + n)
@@ -4823,7 +4884,7 @@ struct Chunk {
                     self.emit_idx(sid)
                     self.emit(OP_PICK)
                     self.emit_idx(0)
-                    let n = self.gen_call_args(args, line)
+                    let n = self.gen_call_args_e(args, line, erase)
                     self.emit(OP_CALL)
                     self.emit_idx(midx)
                     self.emit_idx(1 + n)
@@ -4872,6 +4933,7 @@ struct Chunk {
                     // (`self.wins` — a generic-struct field is a live boxed pointer, not a copy) is CALL'd
                     // directly. A method on a generic-struct field retargets to its monomorphized instance.
                     let midx = self.resolve_field_method_index(object, self.st_names[tk], mname)
+                    let erase = self.method_param_erasure(self.st_names[tk], mname)
                     self.cur_line = line
                     self.gen_expr(object, line)
                     if self.is_owning_temp_obj(object) {
@@ -4881,13 +4943,13 @@ struct Chunk {
                         }
                         self.emit(OP_PICK)
                         self.emit_idx(0)
-                        let n = self.gen_call_args(args, line)
+                        let n = self.gen_call_args_e(args, line, erase)
                         self.emit(OP_CALL)
                         self.emit_idx(midx)
                         self.emit_idx(1 + n)
                         self.emit(OP_DROP_UNDER)
                     } else {
-                        let n = self.gen_call_args(args, line)
+                        let n = self.gen_call_args_e(args, line, erase)
                         self.emit(OP_CALL)
                         self.emit_idx(midx)
                         self.emit_idx(1 + n)
@@ -4901,13 +4963,25 @@ struct Chunk {
     // gen_call_args pushes each argument and returns the TOTAL number of stack slots pushed — a multi-slot
     // (all-scalar) value-struct argument occupies one slot per field, so call arity counts slots not args.
     fn gen_call_args(mut self, args: [ps.Expr], line: int) -> int {
+        return self.gen_call_args_e(args, line, "")
+    }
+
+
+    // gen_call_args_e is gen_call_args with a per-EXPLICIT-param erasure mask (`erase[a]=='1'` -> the callee's
+    // param `a` is a bare erased type-param, so a string arg BORROWS it and is NOT incref'd — stage-0's rule).
+    fn gen_call_args_e(mut self, args: [ps.Expr], line: int, erase: string) -> int {
+        let em = erase.bytes()
         var total = 0
         var a = 0
         loop {
             if a >= args.len() {
                 break
             }
-            total = total + self.gen_one_arg(args[a], line)
+            var no_incref = false
+            if a < em.len() && int(em[a]) == 49 {    // '1' == 49
+                no_incref = true
+            }
+            total = total + self.gen_one_arg_e(args[a], line, no_incref)
             a = a + 1
         }
         return total
@@ -4915,6 +4989,11 @@ struct Chunk {
 
 
     fn gen_one_arg(mut self, e: ps.Expr, line: int) -> int {
+        return self.gen_one_arg_e(e, line, false)
+    }
+
+
+    fn gen_one_arg_e(mut self, e: ps.Expr, line: int, no_incref: bool) -> int {
         match e {
             case EIdent(name) {
                 let slot = self.resolve_slot(name)
@@ -4938,15 +5017,29 @@ struct Chunk {
             case _ {
             }
         }
-        if self.arg_needs_incref(e) {
+        if no_incref == false && self.arg_needs_incref(e) {
             // a refcounted value passed to an owned param keeps the caller's reference -> INCREF (the callee
             // drops its copy). Covers a string/enum local AND a string PLACE read (field / `arr[i]` element).
+            // Suppressed (no_incref) when the callee param is a bare erased type-param (`key: K`): the method
+            // compiles once over the erased K and a store inside takes its own reference (no per-call leak).
             self.gen_expr(e, line)
             self.emit(OP_INCREF)
             return 1
         }
         self.gen_expr(e, line)
         return 1
+    }
+
+
+    // method_param_erasure returns the per-explicit-param erasure mask for a generic-struct method
+    // (`Map.set` -> "11": both `key: K` and `val: V` are erased borrows), or "" for a non-generic-struct
+    // method / unknown callee (every param incref'd as before).
+    fn method_param_erasure(self, struct_name: string, mname: string) -> string {
+        let ix = cg_index_of(self.mpe_key, "{struct_name}.{mname}")
+        if ix >= 0 {
+            return self.mpe_flags[ix]
+        }
+        return ""
     }
 
 
@@ -8998,7 +9091,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), fn_ret_ok: clone_ints(fn_rets.ok), fn_ret_err: clone_ints(fn_rets.err), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, slot_iface: [], cur_return_span: 0, ret_box_struct: false, self_is_generic: false, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), st_felem_payload: clone_ints(structs.f_elem_payload), st_felem_payload_tp: clone_strs(structs.f_elem_payload_tp), st_felem_tpidx: clone_ints(structs.f_elem_tpidx), st_ftargs: clone_strs(structs.f_targs), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), gc_line: clone_ints(globals.line), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), ifm_ret_str: clone_bools(wit.ifm_ret_str), ifm_ret_kind: clone_ints(wit.ifm_ret_kind), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], cur_self_args: "", copy_tparams: [], at_base_generic: false, mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [], aei_name: [], aei_iface: [] }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), fn_ret_ok: clone_ints(fn_rets.ok), fn_ret_err: clone_ints(fn_rets.err), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, slot_iface: [], cur_return_span: 0, ret_box_struct: false, self_is_generic: false, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), st_felem_payload: clone_ints(structs.f_elem_payload), st_felem_payload_tp: clone_strs(structs.f_elem_payload_tp), st_felem_tpidx: clone_ints(structs.f_elem_tpidx), st_ftargs: clone_strs(structs.f_targs), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), gc_line: clone_ints(globals.line), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), ifm_ret_str: clone_bools(wit.ifm_ret_str), ifm_ret_kind: clone_ints(wit.ifm_ret_kind), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), mpe_key: clone_strs(wit.mpe_key), mpe_flags: clone_strs(wit.mpe_flags), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], cur_self_args: "", copy_tparams: [], at_base_generic: false, mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [], aei_name: [], aei_iface: [] }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     // A method of a GENERIC struct (Box<T>, SlotMap<V>) uses the erased BOXED-struct convention: an all-scalar
     // struct RETURN boxes (NEW_STRUCT + RETURN) not multi-slots (RETURN_STRUCT), and an all-scalar struct PARAM
