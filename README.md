@@ -57,7 +57,7 @@ Website: **[ingle-lang.org](https://ingle-lang.org)**
 ## Proof, not promises
 
 A language that sells verification should be able to show its own. Each of these is a gate that
-runs on every change — not a benchmark, not an aspiration:
+runs on every change:
 
 - **1,800+ automated checks green** — golden tests, differential suites, doctor and LSP
   regressions (431 in the core suite; 1,347 in the self-hosting gate alone).
