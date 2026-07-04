@@ -3434,6 +3434,24 @@ struct Chunk {
     }
 
 
+    // resolve_ctor_vi resolves a CONSTRUCTED variant `Name(args)` by name AND matching arity, so a variant name
+    // that collides across co-imported enums (`Json.Str(s)` arity 1 vs `highlight.Str` arity 0) builds the one
+    // whose payload count matches the construction (OFI-179). Falls back to the bare-name lookup.
+    fn resolve_ctor_vi(self, vname: string, argc: int) -> int {
+        var i = 0
+        loop {
+            if i >= self.ev_name.len() {
+                break
+            }
+            if self.ev_name[i] == vname && self.ev_arity[i] == argc {
+                return i
+            }
+            i = i + 1
+        }
+        return cg_index_of(self.ev_name, vname)
+    }
+
+
     // field_elem_code returns the element type code of array field `fname` of struct `id` (struct sid / -3
     // string / -4 enum / -1 scalar), or -1 if not found. Lets `obj.arr[i]` resolve its element kind.
     fn field_elem_code(self, id: int, fname: string) -> int {
@@ -7747,7 +7765,7 @@ struct Chunk {
                 } else {
                     // not a local: a bare (zero-field) enum variant -> NEW_ENUM, or a top-level constant
                     // referenced by name -> inline its folded literal value.
-                    let vi = cg_index_of(self.ev_name, name)
+                    let vi = self.resolve_ctor_vi(name, 0)
                     if vi >= 0 {
                         self.emit(OP_NEW_ENUM)
                         self.emit_idx(self.ev_owner[vi])
@@ -7947,7 +7965,7 @@ struct Chunk {
                             self.gen_builtin_call(nid, args, line)   // a built-in: CALL_NATIVE, not CALL
                             return
                         }
-                        let vi = cg_index_of(self.ev_name, name)
+                        let vi = self.resolve_ctor_vi(name, args.len())
                         if vi >= 0 {
                             // a payload enum variant: push the payload args, then NEW_ENUM <eid> <tag> <arity>
                             var a = 0
