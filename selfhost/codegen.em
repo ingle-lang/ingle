@@ -2944,6 +2944,7 @@ struct Chunk {
     fn_ret_sid: [int]           // ...parallel: struct id fn #i returns (else -1)
     fn_ret_enum: [bool]         // ...parallel: does fn #i return an enum?
     fn_ret_ok: [int]            // ...parallel: fn #i's Result/Option OK-payload code (`let x = f()?`), else -99
+    fn_ret_err: [int]           // ...parallel: fn #i's Result ERR-payload code (`case Err(e)` over `match f()`), else -99
     fn_ret_kind: [int]          // ...parallel: fn #i's return scalar kind (int=0, sized 1..7, f32/f64=8/9, bool=10)
     ext_names: [string]         // every `extern "c"` fn name (parallel to ext_kinds/ext_pquals)
     ext_kinds: [int]            // ...its DECLARED return scalar kind, for an extern call's render/num width
@@ -3665,6 +3666,29 @@ struct Chunk {
     // resolve_call_fn_index returns the merged-fn-table index a call's callee names: a free function
     // (`f`), a struct method (`recv.m` where recv is a struct VALUE -> `Struct.m`), or a MODULE-QUALIFIED
     // free function (`mod.f` where `mod` is an import alias, not a value -> `f`). -1 if unresolved.
+    // scrutinee_call_payload returns the payload code a `match <call> { case Ok(x)/Some(x)/Err(x) }` binding
+    // should take when the scrutinee is a Result/Option-returning call: fn_ret_ok for Ok/Some, fn_ret_err for
+    // Err. The prelude Result/Option's payload field is the ABSTRACT T/E, so this supplies the concrete type.
+    fn scrutinee_call_payload(self, e: ps.Expr, variant: string) -> int {
+        match e {
+            case ECall(callee, args) {
+                let idx = self.resolve_call_fn_index(callee.value)
+                if idx >= 0 {
+                    if variant == "Ok" || variant == "Some" {
+                        return self.fn_ret_ok[idx]
+                    }
+                    if variant == "Err" {
+                        return self.fn_ret_err[idx]
+                    }
+                }
+            }
+            case _ {
+            }
+        }
+        return 0 - 99
+    }
+
+
     // try_ok_code returns the OK/SOME-payload code a `let x = f()?` binding unwraps to (from the ETry operand
     // call's fn_ret_ok), or -99 if `e` is not a `<call>?` over a Result/Option-returning fn.
     fn try_ok_code(self, e: ps.Expr) -> int {
@@ -7393,7 +7417,21 @@ struct Chunk {
                             let fidx = self.variant_field_index(vi, b)
                             let scpay = self.scrutinee_payload_sid(value.value)
                             let scpaytp = self.scrutinee_payload_tparam(value.value)
-                            if scpaytp != "" {
+                            let sccall = self.scrutinee_call_payload(value.value, cases[ci].pattern.variant)
+                            if sccall != 0 - 99 {
+                                // `match f() { case Ok(cfg)/Err(msg) }` where f -> Result/Option: type the binding
+                                // by the CONCRETE payload (the prelude Ok/Err/Some field is the abstract T/E) — a
+                                // BORROW of the subject's payload (drop=false), so `cfg.host`/`{msg}` resolve.
+                                if sccall == 0 - 3 {
+                                    self.declare_binding(cases[ci].pattern.bindings[b], 1, -1, true, false, false, false)
+                                } else if sccall == 0 - 4 {
+                                    self.declare_binding(cases[ci].pattern.bindings[b], 1, -1, true, false, false, false)
+                                } else if sccall >= 0 {
+                                    self.declare_binding(cases[ci].pattern.bindings[b], 1, sccall, false, false, true, false)
+                                } else {
+                                    self.declare_binding(cases[ci].pattern.bindings[b], 1, -1, false, false, false, false)
+                                }
+                            } else if scpaytp != "" {
                                 // Nested-generic WITNESS typing: `case Some(k)` over a `[Option<K>]` field element
                                 // (K the struct's own type-param) binds k as an ERASED type-param — a refcounted
                                 // single-Value borrow — AND records its slot as type-param `K`, so `k.eq(..)` /
@@ -7846,6 +7884,46 @@ fn result_ok_code(ret: [ps.Ty], structs: StructTable, enum_names: [string]) -> i
 }
 
 
+// result_err_code returns the type code of a `Result<T, E>` return's ERR payload `E` (`case Err(e)`), same
+// encoding as result_ok_code; -99 if the return is not a Result (Option has no Err payload).
+fn result_err_code(ret: [ps.Ty], structs: StructTable, enum_names: [string]) -> int {
+    if ret.len() == 0 {
+        return 0 - 99
+    }
+    match ret[0] {
+        case TyGeneric(qual, name, args) {
+            if name == "Result" {
+                if args.len() > 1 {
+                    if ty_is_string(args[1]) {
+                        return 0 - 3
+                    }
+                    if ty_is_array(args[1]) {
+                        return 0 - 2
+                    }
+                    match args[1] {
+                        case TyName(q, n) {
+                            if cg_index_of(enum_names, n) >= 0 {
+                                return 0 - 4
+                            }
+                            let sid = cg_index_of(structs.names, n)
+                            if sid >= 0 {
+                                return sid
+                            }
+                        }
+                        case _ {
+                        }
+                    }
+                    return 0 - 1
+                }
+            }
+        }
+        case _ {
+        }
+    }
+    return 0 - 99
+}
+
+
 fn ret_info(ret: [ps.Ty], structs: StructTable, enum_names: [string]) -> RetInfo {
     if ret.len() == 0 {
         return RetInfo { str: false, arr: false, sid: -1, enm: false, elem: -1 }
@@ -7888,6 +7966,7 @@ struct FnRets {
     elem: [int]
     kind: [int]
     ok: [int]               // ...parallel: the Result/Option OK-payload code (for a `let x = f()?` binding), else -99
+    err: [int]              // ...parallel: the Result ERR-payload code (`case Err(e)` over `match f()`), else -99
     ext_names: [string]     // every `extern "c"` fn name (parallel to ext_kinds/ext_pquals)
     ext_kinds: [int]        // ...its DECLARED return scalar kind (i32=3, i64=0, f64=9, …) for a call's render/num kind
     ext_pquals: [string]    // ...one char per param: '0' none / '1' mut / '2' move (a `move Ptr` arg is move-consumed)
@@ -7916,6 +7995,7 @@ fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string]) -
     var exk: [int] = []
     var exq: [string] = []
     var rok: [int] = []
+    var rerr: [int] = []
     var i = 0
     loop {
         if i >= decls.len() {
@@ -7936,6 +8016,7 @@ fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string]) -
                     rel.append(r.elem)
                     rk.append(ret_scalar_kind(methods[mi].ret))
                     rok.append(result_ok_code(methods[mi].ret, structs, enum_names))
+                    rerr.append(result_err_code(methods[mi].ret, structs, enum_names))
                     mi = mi + 1
                 }
             }
@@ -7948,6 +8029,7 @@ fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string]) -
                 rel.append(r.elem)
                 rk.append(ret_scalar_kind(f.ret))
                 rok.append(result_ok_code(f.ret, structs, enum_names))
+                rerr.append(result_err_code(f.ret, structs, enum_names))
             }
             case DExtern(abi, fns) {
                 // extern fns get NO CALL-index entry (they lower to CALL_C by registry index), but their
@@ -7978,7 +8060,7 @@ fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string]) -
         }
         i = i + 1
     }
-    return FnRets { str: rs, arr: ra, sid: rsid, enm: ren, elem: rel, kind: rk, ok: rok, ext_names: exn, ext_kinds: exk, ext_pquals: exq }
+    return FnRets { str: rs, arr: ra, sid: rsid, enm: ren, elem: rel, kind: rk, ok: rok, err: rerr, ext_names: exn, ext_kinds: exk, ext_pquals: exq }
 }
 
 
@@ -8712,7 +8794,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_rets: FnRets, structs: Struct
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), fn_ret_ok: clone_ints(fn_rets.ok), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, slot_iface: [], cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), st_felem_payload: clone_ints(structs.f_elem_payload), st_felem_payload_tp: clone_strs(structs.f_elem_payload_tp), st_felem_tpidx: clone_ints(structs.f_elem_tpidx), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), gc_line: clone_ints(globals.line), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), ifm_ret_str: clone_bools(wit.ifm_ret_str), ifm_ret_kind: clone_ints(wit.ifm_ret_kind), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], cur_self_args: "", copy_tparams: [], at_base_generic: false, mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [], aei_name: [], aei_iface: [] }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), fn_ret_ok: clone_ints(fn_rets.ok), fn_ret_err: clone_ints(fn_rets.err), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_kind: skind, slot_iface: [], cur_return_span: 0, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), st_felem_payload: clone_ints(structs.f_elem_payload), st_felem_payload_tp: clone_strs(structs.f_elem_payload_tp), st_felem_tpidx: clone_ints(structs.f_elem_tpidx), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), gc_line: clone_ints(globals.line), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), ifm_ret_str: clone_bools(wit.ifm_ret_str), ifm_ret_kind: clone_ints(wit.ifm_ret_kind), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], cur_self_args: "", copy_tparams: [], at_base_generic: false, mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [], aei_name: [], aei_iface: [] }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     // A generic fn's BASE (emitted-but-uncalled) resolves its own generic calls to BASE callees, matching
     // stage-0 (the base body is never in the mono worklist); only a monomorphized INSTANCE retargets its calls
