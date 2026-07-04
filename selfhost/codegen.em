@@ -5312,16 +5312,21 @@ struct Chunk {
     fn gen_call_args_e(mut self, args: [ps.Expr], line: int, erase: string) -> int {
         let em = erase.bytes()
         var total = 0
-        var a = 0
-        loop {
+        var cur = line                               // running source line: a compound arg updates it, a bare
+        var a = 0                                    //   leaf (no box, no own line) INHERITS the previous arg's
+        loop {                                       //   line — matching stage-0 when args group by source line
             if a >= args.len() {
                 break
+            }
+            let el = self.expr_line(args[a], 0 - 1)
+            if el >= 0 {
+                cur = el
             }
             var no_incref = false
             if a < em.len() && int(em[a]) == 49 {    // '1' == 49
                 no_incref = true
             }
-            total = total + self.gen_one_arg_e(args[a], self.expr_line(args[a], line), no_incref)
+            total = total + self.gen_one_arg_e(args[a], cur, no_incref)
             a = a + 1
         }
         return total
@@ -5515,12 +5520,17 @@ struct Chunk {
             i = i + 1
         }
         if keep == 0 {
+            var cur = line
             var a = 0
             loop {
                 if a >= args.len() {
                     break
                 }
-                self.gen_expr(args[a], self.expr_line(args[a], line))
+                let el = self.expr_line(args[a], 0 - 1)
+                if el >= 0 {
+                    cur = el
+                }
+                self.gen_expr(args[a], cur)
                 a = a + 1
             }
             self.emit(OP_CALL_NATIVE)
