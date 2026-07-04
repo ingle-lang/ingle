@@ -6158,6 +6158,24 @@ struct Chunk {
     }
 
 
+    // iter_elem_code returns the element type code of a `for` loop's array iterator (its slot_elem: -3 string,
+    // -4 enum/refcounted, sid>=0 struct, else -1 scalar), so the loop var inherits the element's type.
+    fn iter_elem_code(self, iter: ps.Expr) -> int {
+        match iter {
+            case EIdent(name) {
+                let slot = self.resolve_slot(name)
+                if slot >= 0 && self.slot_array[slot] {
+                    return self.slot_elem[slot]
+                }
+                return 0 - 1
+            }
+            case _ {
+                return 0 - 1
+            }
+        }
+    }
+
+
     // iter_elem_iface returns the element interface of a `for` loop's array iterator (`for s in shapes` where
     // shapes: [Shape] -> "Shape"), or "" — so the loop var is typed as an interface value.
     fn iter_elem_iface(self, iter: ps.Expr) -> string {
@@ -7461,8 +7479,19 @@ struct Chunk {
                         self.emit_idx(zero)
                         let var_slot = self.locals.len()
                         let loop_iface = self.iter_elem_iface(iter.value)
+                        let loop_elem = self.iter_elem_code(iter.value)
                         if loop_iface != "" {
                             self.declare_iface_local(vname, loop_iface)   // `for s in shapes` -> s: Shape (CALL_DYN)
+                        } else if loop_elem == 0 - 3 {
+                            // `for line in lines` over a [string]: the loop var is a STRING (a borrow, not
+                            // dropped) — so `line.split(..)`/`line.len()` dispatch as string methods.
+                            self.declare_binding(vname, 1, -1, true, false, false, false)
+                        } else if loop_elem == 0 - 4 {
+                            // a [enum] element: a refcounted single-Value borrow (INCREF on consume, not dropped).
+                            self.declare_binding(vname, 1, -1, true, false, false, false)
+                        } else if loop_elem >= 0 {
+                            // a [Struct] element: a boxed-struct borrow, so `x.field`/`x.method()` resolve.
+                            self.declare_binding(vname, 1, loop_elem, false, false, true, false)
                         } else {
                             self.declare_binding(vname, 1, -1, false, false, false, false)
                         }
