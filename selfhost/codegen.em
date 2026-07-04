@@ -3935,6 +3935,12 @@ struct Chunk {
                                         let parts = targs.split("_")
                                         let ti = self.mrp_tpidx[mk]
                                         if ti < parts.len() {
+                                            // a STRING value type (`Map<string,string>.get` -> Option<string>) types
+                                            // the binding as a string so `q = v` INCREFs it; a struct value type
+                                            // resolves to its sid; a scalar (int/bool/float) falls through to plain.
+                                            if parts[ti] == "string" {
+                                                return 0 - 3
+                                            }
                                             let sid = cg_index_of(self.st_names, parts[ti])
                                             if sid >= 0 {
                                                 return sid
@@ -5193,6 +5199,11 @@ struct Chunk {
                     return false
                 }
                 return self.expr_ret_kind(e) == 0 - 3
+            }
+            case EBinary(op, l, r) {
+                // a string concatenation `a + b` (`key + ".max"`) produces a FRESH owning-temp string — masked
+                // like a literal when passed to an erased BORROW param, else the temp leaks / mis-stages.
+                return self.expr_is_string(e)
             }
             case _ {
                 return false
