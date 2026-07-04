@@ -5770,7 +5770,20 @@ struct Chunk {
                 return self.field_is_string(osid, name)
             }
             case ECall(callee, args) {
-                return self.iface_call_ret(e) == 0 - 3   // `s.m()` where m returns string (interface value)
+                if self.iface_call_ret(e) == 0 - 3 {
+                    return true                          // `s.m()` where m returns string (interface value)
+                }
+                match callee.value {
+                    case EIdent(nm) {
+                        if native_ret_kind(nm) == 0 - 3 {
+                            return true                  // a builtin returning a string (`read_file(..)`, …)
+                        }
+                    }
+                    case _ {
+                    }
+                }
+                let idx = self.resolve_call_fn_index(callee.value)   // a user fn/method returning a string
+                return idx >= 0 && self.fn_ret_str[idx]
             }
             case _ {
                 return false
