@@ -1,7 +1,7 @@
 #ifndef EMBER_BUILTIN_H
 #define EMBER_BUILTIN_H
 
-// Built-in (native) functions: implemented in C, callable from Ember. Each has a
+// Built-in (native) functions: implemented in C, callable from Ingle. Each has a
 // stable native id that the checker/codegen reference by name and the VM
 // dispatches on. This registry is the seed of the standard library.
 enum {
@@ -11,7 +11,7 @@ enum {
                              //                         empty string at end of input
     NATIVE_READ_FILE  = 3,   // read_file(path) -> string — whole file; empty on error
     NATIVE_WRITE_FILE = 4,    // write_file(path, text)    — write text to a file
-    // The irreducible string + math primitives the Ember stdlib builds on.
+    // The irreducible string + math primitives the Ingle stdlib builds on.
     NATIVE_CHAR_CODE     = 5, // char_code(s) -> int       — byte value of s[0] (−1 if empty)
     NATIVE_FROM_CHAR_CODE= 6, // from_char_code(n) -> string — one-byte string of value n
     NATIVE_PARSE_FLOAT   = 7, // parse_float(s) -> float    — 0.0 if not a number
@@ -24,12 +24,12 @@ enum {
     NATIVE_RANDOM        = 14,// random() -> float          — in [0, 1)
     NATIVE_HASH          = 15,// hash(s) -> int             — non-negative hash of a string
     NATIVE_CONCAT        = 16,// concat(parts) -> string    — join a [string] in one pass
-    // Program environment: how an Ember program talks to the world it was launched in.
+    // Program environment: how an Ingle program talks to the world it was launched in.
     NATIVE_ARGS          = 17,// args() -> [string]         — command-line arguments (after the file)
     NATIVE_ENV           = 18,// env(name) -> string        — environment variable ("" if unset)
     NATIVE_EXIT          = 19,// exit(code)                 — terminate the program with an exit code
     // Witness shims for built-in key types satisfying Hash/Eq (Map<K,V>). Not callable
-    // by name from Ember; referenced only from a witness vtable and dispatched by the
+    // by name from Ingle; referenced only from a witness vtable and dispatched by the
     // indirect-call opcodes when the type parameter is bound to a scalar/string.
     NATIVE_HASH_ANY      = 20,// hash(self) for a built-in key — hash any scalar/string Value
     NATIVE_VALUE_EQ      = 21,// eq(self, other) for a built-in key — structural value equality
@@ -40,22 +40,22 @@ enum {
 
     NATIVE_FROM_BYTES    = 23,// from_bytes(bytes) -> string — a string whose raw buffer is EXACTLY the
                               // [u8] array's bytes; the inverse of .bytes() with NO UTF-8 re-encoding
-                              // (unlike from_char_code), so it can build ANY byte sequence. The Ember-
+                              // (unlike from_char_code), so it can build ANY byte sequence. The Ingle-
                               // side binary-serializer primitive (docs/design/bytecode-container.md).
 
     NATIVE_FLOAT_BITS    = 24 // float_bits(f) -> int — the raw IEEE-754 bits of an f64 reinterpreted as an
-                              // i64 (bit-for-bit, no conversion). Lets an Ember serializer write a float
-                              // constant's 8 bytes to the .emb container (docs/design/bytecode-container.md).
+                              // i64 (bit-for-bit, no conversion). Lets an Ingle serializer write a float
+                              // constant's 8 bytes to the .igb container (docs/design/bytecode-container.md).
 };
 
-// A witness method slot normally holds an Ember function-table index. For a built-in
-// type satisfying Hash/Eq there is no Ember function, so the slot holds a NATIVE id
+// A witness method slot normally holds an Ingle function-table index. For a built-in
+// type satisfying Hash/Eq there is no Ingle function, so the slot holds a NATIVE id
 // offset by this base; the indirect-call opcodes detect the range and call the native.
 #define WITNESS_NATIVE_BASE 1000000
 
 // Graphics is an opt-in build (MANIFESTO §5g): `-DEMBER_GRAPHICS=1` links the raylib
 // backend and registers these native primitives. The default build defines it to 0,
-// so the compiler stays dependency-free and the test suite needs no display. Ember
+// so the compiler stays dependency-free and the test suite needs no display. Ingle
 // only *describes* each frame through these; the std/draw + std/ui modules wrap them.
 #ifndef EMBER_GRAPHICS
 #define EMBER_GRAPHICS 0

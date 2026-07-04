@@ -3,7 +3,7 @@
 # OFI-167; see docs/design/kernel-freestanding.md). Boots kernel/kernel.elf on QEMU `aarch64 virt`
 # and asserts (1) the UART output — including a string built + INTERPOLATED by the runtime, proving
 # the freestanding heap (arrays/strings) works — and (2) the semihosting exit code, which the
-# freestanding entry surfaces from Ember main's int RESULT (hello.em sums an array to 42), so it is a
+# freestanding entry surfaces from Ingle main's int RESULT (hello.ig sums an array to 42), so it is a
 # value COMPUTED BY EMBER, with aggregates, on bare metal. Also regression-checks the `--freestanding`
 # emit-time guards (spawn and hosted-registry externs are rejected with clear messages, not link
 # errors). Kept OUT of the dependency-free default suite (tests/run.sh) — it needs the LLVM cross
@@ -13,15 +13,15 @@ set -u
 ELF="kernel/kernel.elf"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
 EMBERC="${EMBERC:-build/emberc}"
-EXPECT="Hello from Ember"
+EXPECT="Hello from Ingle"
 EXPECT_INTERP="= 42"   # the interpolated array sum — proves heap strings + interpolation + arrays
-EXPECT_EXIT=42         # hello.em sums [10,20,12] and returns it
+EXPECT_EXIT=42         # hello.ig sums [10,20,12] and returns it
 
 fail=0
 
 # --- emit-time guard regressions (no qemu needed) -------------------------------------------------
 TMPDIR="${TMPDIR:-/tmp}"
-GUARD="$TMPDIR/ember_kernel_guard_$$.em"
+GUARD="$TMPDIR/ember_kernel_guard_$$.ig"
 
 cat > "$GUARD" <<'EOF'
 fn work(n: int) -> int { return n * 2 }
@@ -96,9 +96,9 @@ else
     fail=1
 fi
 if [ "$RC" -eq "$EXPECT_EXIT" ]; then
-    echo "PASS: exit code $EXPECT_EXIT — Ember main's computed result reached the host"
+    echo "PASS: exit code $EXPECT_EXIT — Ingle main's computed result reached the host"
 else
-    echo "FAIL: expected exit $EXPECT_EXIT (Ember main's loop counter), got $RC"
+    echo "FAIL: expected exit $EXPECT_EXIT (Ingle main's loop counter), got $RC"
     fail=1
 fi
 

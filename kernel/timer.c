@@ -1,7 +1,7 @@
 //
 // timer.c — GICv2 + the ARM generic timer, the first INTERRUPT source on bare metal (kernel
 // milestone 4; docs/design/kernel-freestanding.md). A periodic timer IRQ, taken through the vector
-// table's IRQ entry (kernel/vectors.S) and handled here, increments a tick counter that Ember can
+// table's IRQ entry (kernel/vectors.S) and handled here, increments a tick counter that Ingle can
 // observe — proving asynchronous interrupts work. This is the gateway to a scheduler.
 //
 // Targets the QEMU `virt` board's GICv2 (run with -machine virt,gic-version=2): distributor at
@@ -44,7 +44,7 @@ static void timer_set_ctl(uint64_t c) {
 
 
 // timer_init — bring up the GIC + the generic timer + unmask IRQs, so a periodic timer interrupt
-// starts firing. Called by Ember as a direct extern (kernel/timerdemo.em). ~10 ticks/second.
+// starts firing. Called by Ingle as a direct extern (kernel/timerdemo.ig). ~10 ticks/second.
 void timer_init(void) {
     *GICD_CTLR        = 1;                     // enable the distributor
     *GICD_ISENABLER0  = (1u << TIMER_INTID);   // enable the timer PPI
@@ -85,7 +85,7 @@ void em_irq(void) {
 }
 
 
-// tick_count — the timer tick count so far, for Ember to poll (a direct extern). It only ever
+// tick_count — the timer tick count so far, for Ingle to poll (a direct extern). It only ever
 // advances via em_irq, so a program seeing it change has observed a real hardware interrupt.
 int64_t tick_count(void) {
     return (int64_t)g_ticks;

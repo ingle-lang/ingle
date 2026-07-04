@@ -1,1 +1,1 @@
-tests/run/error_global_annotation.em:3:1: error: binding annotation does not match the value's type
+tests/run/error_global_annotation.ig:3:1: error: binding annotation does not match the value's type

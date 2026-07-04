@@ -1,7 +1,7 @@
-tests/lexer/errors_recovery.em:11:11: error: unexpected character (near '$')
-tests/lexer/errors_recovery.em:12:11: error: unexpected character (near '@')
-tests/lexer/errors_recovery.em:13:9: error: unterminated string literal
-tests/lexer/errors_recovery.em:13:9: help: add a closing '"'
+tests/lexer/errors_recovery.ig:11:11: error: unexpected character (near '$')
+tests/lexer/errors_recovery.ig:12:11: error: unexpected character (near '@')
+tests/lexer/errors_recovery.ig:13:9: error: unterminated string literal
+tests/lexer/errors_recovery.ig:13:9: help: add a closing '"'
   11:1    LET         let
   11:5    IDENT       a
   11:7    ASSIGN      =

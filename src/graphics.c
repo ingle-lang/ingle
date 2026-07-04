@@ -280,7 +280,7 @@ static int g_clip_depth = 0;
 // that std/ui marks. It's the same JSON-lines shape as the instruction tape, so an LLM
 // parses it the same way, but at frame granularity (the per-instruction tape is far too
 // fine for a 60fps loop). Off unless tape_open() is called; then every frame_end appends
-// a record. This is Ember's answer to "why did my UI do that?" as structured data.
+// a record. This is Ingle's answer to "why did my UI do that?" as structured data.
 static FILE *g_tape       = NULL;
 static int   g_frame      = 0;     // frame counter since tape_open
 static int   g_fmx, g_fmy, g_fdown;  // input snapshot captured at frame_begin
@@ -989,7 +989,7 @@ void ember_gfx_set_layer(int z) {
 
 
 
-// ember_gfx_set_cursor maps an Ember-abstract cursor shape (stable, raylib-independent) to the OS pointer.
+// ember_gfx_set_cursor maps an Ingle-abstract cursor shape (stable, raylib-independent) to the OS pointer.
 // Like set_layer it mutates GL/OS state directly — it pushes NO draw command, so it never appears in the tape
 // and cannot perturb a render golden. frame_begin resets to the default each frame, so a widget only needs to
 // re-assert its cursor while it is hovered/active; nothing has to "unset" it.

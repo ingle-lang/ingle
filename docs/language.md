@@ -1,17 +1,17 @@
 ---
 title: Language Reference
 nav_order: 3
-description: The canonical syntax and semantics reference for Ember — a statically-typed, brace-delimited systems language that is memory-safe without a garbage collector and compiles to C.
+description: The canonical syntax and semantics reference for Ingle — a statically-typed, brace-delimited systems language that is memory-safe without a garbage collector and compiles to C.
 ---
 
-# The Ember Language Reference
+# The Ingle Language Reference
 
-The canonical *how-to-write-Ember* document. It is a **living reference**: it describes only
+The canonical *how-to-write-Ingle* document. It is a **living reference**: it describes only
 what the language has actually grown to, and every feature slice updates it in the same commit.
-For the *why* behind the design see [MANIFESTO.md](https://github.com/kmcnally5/ember-lang/blob/main/MANIFESTO.md); for runnable samples see
-[examples/](https://github.com/kmcnally5/ember-lang/tree/main/examples).
+For the *why* behind the design see [MANIFESTO.md](https://github.com/ingle-lang/ingle/blob/main/MANIFESTO.md); for runnable samples see
+[examples/](https://github.com/ingle-lang/ingle/tree/main/examples).
 
-> **Audience note.** Ember is designed LLM-first (MANIFESTO §5b). This reference is the single
+> **Audience note.** Ingle is designed LLM-first (MANIFESTO §5b). This reference is the single
 > source a model should rely on. Where a construct is designed and parses but does not yet
 > execute, that is stated plainly — do not assume unmarked behaviour.
 
@@ -19,7 +19,7 @@ For the *why* behind the design see [MANIFESTO.md](https://github.com/kmcnally5/
 
 ## Implementation status
 
-Ember is built as a *walking skeleton*: the whole pipeline (lex → parse → type-check → bytecode
+Ingle is built as a *walking skeleton*: the whole pipeline (lex → parse → type-check → bytecode
 → VM) exists, and language features are switched on one slice at a time, end to end. So three
 layers of "exists" are worth separating:
 
@@ -41,7 +41,7 @@ suffix/inference literals, `u8(x)`-style conversions); **`struct` types — cons
 (with `self`), including struct-typed fields**; **`interface` declarations with `implements`
 conformance checking**; **`enum` types and exhaustive `match`** (variant construction + field
 binding + a `case _` catch-all); a growing **standard library** — I/O (**`print`/`println`**, **`read_line`/`read_file`/`write_file`**), program environment (**`args`/`env`/`exit`**),
-math (**`sqrt`/`pow`/`abs`/`floor`/`ceil`/`round`/`random`**), strings (**`to_upper`/`to_lower`/`trim`/`contains`/`index_of`/`starts_with`/`ends_with`/`repeat`/`substring`/`replace`/`join`**, plus code-point caret helpers **`cp_count`/`cp_at`/`cp_slice`/`cp_prefix`/`cp_insert`/`cp_delete`** — Unicode-aware, written in Ember in **`std/string`**, `import`ed), a **`std/map`** generic hash map `Map<K, V>` and **`std/set`** hash set `Set<K>` (any `Hash + Eq` key),
+math (**`sqrt`/`pow`/`abs`/`floor`/`ceil`/`round`/`random`**), strings (**`to_upper`/`to_lower`/`trim`/`contains`/`index_of`/`starts_with`/`ends_with`/`repeat`/`substring`/`replace`/`join`**, plus code-point caret helpers **`cp_count`/`cp_at`/`cp_slice`/`cp_prefix`/`cp_insert`/`cp_delete`** — Unicode-aware, written in Ingle in **`std/string`**, `import`ed), a **`std/map`** generic hash map `Map<K, V>` and **`std/set`** hash set `Set<K>` (any `Hash + Eq` key),
 and **`to_float`/`to_int`**, **`char_code`/`from_char_code`/`parse_float`**, **`clock()`** — and **expression statements**;
 **generic structs
 and enums, functions, and methods** (`Box<T>`, `Option<T>`, `Result<T, E>`, `fn id<T>(…)`,
@@ -64,7 +64,7 @@ interpolation** (`"{ expr }"`) and **UTF-8 string methods** (`len`/`bytes`/`char
 module-qualified function calls + types, with `_`-prefix privacy); **executable contracts**
 (`requires`/`ensures` with `result`, type-checked always, runtime-checked in debug and elided in
 `--release`, reporting violations as structured events on the tape); and `return`. Run a program
-with `emberc --emit=run file.em`.
+with `inglec --emit=run file.ig`.
 
 **Interfaces** are fully runtime now: as **generic bounds** (`<T: Ord>`, static witness dispatch)
 and as **value types** (`let s: Shape = …`, `[Shape]`, dynamic dispatch through a boxed
@@ -86,8 +86,8 @@ consecutive `///` lines coalesce into one Markdown block. Doc comments are not d
 ordinary `//` comments — they are attached to the declaration in the AST and become the single
 source of API documentation, surfaced two ways from the one comment:
 
-- the language server shows them on **hover** and in **completion** (`emberc --lsp`), and
-- `emberc --emit=docs <file.em>` renders them to a Markdown reference page.
+- the language server shows them on **hover** and in **completion** (`inglec --lsp`), and
+- `inglec --emit=docs <file.ig>` renders them to a Markdown reference page.
 
 So a comment written once is both the editor tooltip and the docs, and the two cannot drift.
 `////` (four or more slashes) and `//` are ordinary comments and are ignored. **[runs]**
@@ -103,7 +103,7 @@ struct Point {
 ```
 
 ### Statement termination — newlines are significant
-Ember has **no semicolons**. A newline ends a statement *only* when the line's last token can
+Ingle has **no semicolons**. A newline ends a statement *only* when the line's last token can
 end one (an identifier, a literal, `)`, `]`, `}`, `?`, or `return`/`break`/`continue`). After a
 token that implies more to come — an operator, `,`, `(`, `=`, `->`, `&&`, … — the newline is
 ignored, so multi-line expressions read naturally. **[runs]**
@@ -172,7 +172,7 @@ typing applies: arithmetic needs a number, logical needs `bool`, bitwise/shift n
 
 The precedence mirrors C exactly, so `a & b == c` is `a & (b == c)` — parenthesize mixed
 bitwise/comparison as you would in C. `&`/`\|`/`^`/`~`/`<<`/`>>` are **bitwise operators on
-integers**, not reference or ownership sigils (Ember has none — ownership is keyword-based, §5b).
+integers**, not reference or ownership sigils (Ingle has none — ownership is keyword-based, §5b).
 A single `\|` is also the lambda delimiter (`\|x\| x + 1`); grammar position disambiguates it from
 bitwise-or. Shifts are bit operations: the value truncates to its operand width and the shift
 amount must be in `[0, width)` (a trap otherwise); `>>` is arithmetic (sign-preserving) on signed
@@ -186,7 +186,7 @@ types and logical (zero-filling) on unsigned ones; `~` on a narrow unsigned type
 one token (MANIFESTO §5b).
 
 ```ember
-let name = "Ember"   // immutable
+let name = "Ingle"   // immutable
 var count = 0        // mutable
 count = count + 1    // OK
 ```
@@ -203,7 +203,7 @@ A binding's initialiser is checked *before* the name is in scope, so `let a = a`
 outer `a`, never itself.
 
 A **top-level `let`** declares a module **constant** — a named, immutable, compile-time value
-(`let WIDTH = 800`, `let TITLE = "ember"`). Its initialiser must be a literal (int, float, bool,
+(`let WIDTH = 800`, `let TITLE = "ingle"`). Its initialiser must be a literal (int, float, bool,
 string, or a negated number); each use is substituted with that value at compile time, so a
 constant has no runtime cost. Constants are exported like functions and read qualified across
 modules (`draw.RED`); a leading `_` keeps one private (§5d). A top-level `var`, or a non-literal
@@ -275,7 +275,7 @@ fn clamp(x: int, lo: int, hi: int) -> int
 
 - **`requires`** is checked when the function is entered (the parameters are in scope); **`ensures`**
   is checked just before each `return`, with `result` bound to that value.
-- A contract may call ordinary predicate functions, so the spec language *is* Ember: `requires
+- A contract may call ordinary predicate functions, so the spec language *is* Ingle: `requires
   is_sorted(xs)`. Contracts should read their inputs, not mutate them.
 - On violation the program aborts with a clear error — `precondition failed in 'clamp' (requires,
   line 2)` — **and** emits a structured event on the execution tape (see *The execution tape*):
@@ -289,8 +289,8 @@ fn clamp(x: int, lo: int, hi: int) -> int
   serial and the parallel runtimes (they are compiled into the bytecode).
 
 ```
-emberc --emit=run         file.em     # debug: contracts checked (the default)
-emberc --emit=run --release file.em   # release: contracts elided
+inglec --emit=run         file.ig     # debug: contracts checked (the default)
+inglec --emit=run --release file.ig   # release: contracts elided
 ```
 
 ### `assert` — inline checks that join the trace
@@ -301,7 +301,7 @@ not a bare crash but a structured trace event (`{"event":"contract_violation",�
 contract it is **elided in `--release`**. The condition must be a `bool`. Use `assert` for the
 invariants that hold *inside* a body; use `requires`/`ensures` for the function's boundary.
 
-### Property-based checking — `emberc --emit=check` — [runs]
+### Property-based checking — `inglec --emit=check` — [runs]
 
 Contracts are an executable spec, so the compiler can **search for inputs that break them**. For
 every *checkable* function — a free, non-generic function with at least one `ensures`, whose
@@ -311,7 +311,7 @@ function's `requires`, runs it, and reports the first input that violates an `en
 (or crashes) as a **counterexample**:
 
 ```
-emberc --emit=check file.em
+inglec --emit=check file.ig
 # check sum_pt: FAILED
 #   counterexample: sum_pt({-1, 0})  =>  postcondition failed in 'sum_pt' (ensures, line 12)
 # {"event":"check_failed","fn":"sum_pt","input":"sum_pt({-1, 0})","detail":…}
@@ -331,9 +331,9 @@ emberc --emit=check file.em
   contract trace. This is the verification loop (MANIFESTO §5j): a model writes code + a spec, and
   the language hands back a concrete, reproducible falsifying input.
 
-### Deterministic record-replay — `emberc --emit=replay` — [runs]
+### Deterministic record-replay — `inglec --emit=replay` — [runs]
 
-A bug you cannot reproduce is a bug you cannot fix. Ember's nondeterminism comes from a small,
+A bug you cannot reproduce is a bug you cannot fix. Ingle's nondeterminism comes from a small,
 known set of sources — `random()`, the monotonic clock `clock()`, the external reads
 `read_line()` / `read_file()`, and foreign (`extern "c"`) call results — so the runtime can
 **record** every nondeterministic value a run consumes and **replay** them to reproduce that run
@@ -343,7 +343,7 @@ them (performing no real I/O and no real foreign calls) — and verifies the two
 **byte-for-byte identical**:
 
 ```
-emberc --emit=replay file.em
+inglec --emit=replay file.ig
 # replay: deterministic — 5 nondeterministic event(s) recorded (5 random, 0 clock, 0 read_line, 0 read_file, 0 ffi); both runs identical
 # {"event":"replay","status":"deterministic","events":5,"random":5,"clock":0,"read_line":0,"read_file":0,"ffi":0}
 ```
@@ -357,17 +357,17 @@ nondeterminism the runtime does *not* yet capture — which is precisely what th
 Together with contracts and `--check`, this closes the verification loop (MANIFESTO §5j): a model
 can write code, have it fuzzed against its spec, and replay any failure deterministically.
 
-### Static contract proving — `emberc --emit=prove` — [runs]
+### Static contract proving — `inglec --emit=prove` — [runs]
 
 Fuzzing can find a counterexample; **proving** establishes there is none. For contracts in a
-decidable fragment — linear integer arithmetic over a function's integer parameters — Ember
+decidable fragment — linear integer arithmetic over a function's integer parameters — Ingle
 discharges the proof statically, with no external solver. For each `ensures`, it substitutes
 `result` with the body's returned expression and proves `requires ⟹ ensures` by showing
 `requires ∧ ¬ensures` is infeasible (Fourier–Motzkin elimination; rational-infeasibility implies
 integer-infeasibility, so a proof is sound):
 
 ```
-emberc --emit=prove file.em
+inglec --emit=prove file.ig
 # prove add_nonneg: ensures @line 4 — PROVED          (a>=0 ∧ b>=0  ⊢  a+b >= 0)
 # prove scale:      ensures @line 12 — PROVED          (x>=0         ⊢  2x   >= x)
 # prove shift:      ensures @line 19 — not proved (use --check)
@@ -386,9 +386,9 @@ verification loop (MANIFESTO §5j): prove what is decidable, fuzz the rest, repl
 
 The built-ins **`print`** (no newline) and **`println`** (with a newline) write a single value
 to standard output. They accept a number or a `string`. They are the first members of the
-standard library and the seed of Ember's native-function mechanism.
+standard library and the seed of Ingle's native-function mechanism.
 
-Ember also reads from the world:
+Ingle also reads from the world:
 
 - **`read_line() -> string`** — one line from standard input, with the trailing newline removed
   (`\r\n` tolerated). Returns the empty string at end of input, so a read loop ends on `""`.
@@ -405,10 +405,10 @@ fn main() -> int {
 }
 ```
 
-And Ember talks to the **environment it was launched in**, so it can be a real command-line tool:
+And Ingle talks to the **environment it was launched in**, so it can be a real command-line tool:
 
 - **`args() -> [string]`** — the command-line arguments passed to the program (everything after
-  the source file on the `emberc --emit=run file.em …` line). Empty when none were given.
+  the source file on the `inglec --emit=run file.ig …` line). Empty when none were given.
 - **`env(name: string) -> string`** — the value of an environment variable, or `""` if unset.
 - **`exit(code: int)`** — terminate the program immediately with an exit code (`0` = success).
   Execution stops at the call; nothing after it runs and `main`'s return value is not printed.
@@ -522,11 +522,11 @@ operations implemented in C):
   allocation and copy pass. Strings are immutable, so building one with repeated `out = out + c` is
   O(n²); `std/string`'s builders accumulate pieces in an array and `concat` once, staying linear.
 
-On top of those, the rest of the library is **written in Ember itself** and lives in real source
+On top of those, the rest of the library is **written in Ingle itself** and lives in real source
 files under `std/`, pulled in with an ordinary `import`. The `std/` prefix is **reserved**: it
-resolves to the toolchain's standard-library directory (`$EMBER_STD`, else `<compiler>/../std`)
+resolves to the toolchain's standard-library directory (`$INGLE_STD`, else `<compiler>/../std`)
 regardless of where the importing file sits. This is the model for growing the stdlib — write it
-in Ember over a minimal native base, in a file, and `import` it like any other module.
+in Ingle over a minimal native base, in a file, and `import` it like any other module.
 
 - **`std/string`** — `to_upper`, `to_lower`, `trim`, `contains(s, sub)`, `index_of(s, sub)`
   (`-1` if absent), `starts_with(s, prefix)`, `ends_with(s, suffix)`, `repeat(s, n)`,
@@ -549,7 +549,7 @@ in Ember over a minimal native base, in a file, and `import` it like any other m
   `m.set(key, val)`, `m.get(key) -> Option<V>`, `m.has(key)`, `m.size()`, `m.keys() -> [K]`
   (bucket order, not insertion order). Backed by an open-addressing hash table (linear probing,
   doubling at a 0.7 load factor), so lookups and inserts are amortised O(1). It is itself written
-  in Ember — a generic struct bounded by `Hash + Eq`, dispatching the key's `hash`/`eq`
+  in Ingle — a generic struct bounded by `Hash + Eq`, dispatching the key's `hash`/`eq`
   through witnesses stored per instance. No `Copy` bound: a built-in key copies cheaply, and a
   move-type **struct key is deep-cloned structurally on store** (the runtime owns its copy, the
   caller keeps theirs — value-semantic keys, no `clone()` ceremony; OFI-042).
@@ -567,13 +567,13 @@ in Ember over a minimal native base, in a file, and `import` it like any other m
   reads back as `None` rather than a dangling value — the C raw-index footgun (a silent wrong-entity
   read after a slot is recycled, the ABA bug) becomes a safe `Option` by construction. Freed slots
   are recycled (reuse is O(1) via a free-list); a move-type `V` is **deep-cloned on store** like a
-  `std/map` value, so the arena owns its copy. There is no in-place `get_mut` (Ember has no interior
+  `std/map` value, so the arena owns its copy. There is no in-place `get_mut` (Ingle has no interior
   mutability) — read out, edit, and `replace`. This is the blessed answer for graph- and pool-shaped
-  data (entity tables, retained UI nodes, object pools) that [the manifesto](https://github.com/kmcnally5/ember-lang/blob/main/MANIFESTO.md)
+  data (entity tables, retained UI nodes, object pools) that [the manifesto](https://github.com/ingle-lang/ingle/blob/main/MANIFESTO.md)
   promises in place of escalating a borrow checker.
 
 **Also in `std/` (opt-in, application support).** Beyond the core collections above, the standard
-library ships modules a real 2026 program reaches for, each ordinary Ember pulled in with `import`:
+library ships modules a real 2026 program reaches for, each ordinary Ingle pulled in with `import`:
 **`std/json`** (parse/emit), **`std/markdown`** and **`std/highlight`** (Markdown rendering and
 syntax highlighting), **`std/layout`** (a flexbox solver), and — built under `make net` —
 **`std/http`** and **`std/sse`** (an HTTP client and server-sent-event streaming). Embedded SQL lives
@@ -779,7 +779,7 @@ let m2 = scores.clone()            // a Map<K,V> — deep-cloned, fully independ
 `x.clone()` returns an independent deep copy of the receiver: array elements and struct fields are
 cloned **recursively**, so mutating the clone (or the original) never affects the other. It is
 available on **arrays** and on **structs** — including generic structs such as `Map<K,V>` and
-`Set<K>`. The cost is **visible at the call site** (Ember never deep-copies implicitly — see the
+`Set<K>`. The cost is **visible at the call site** (Ingle never deep-copies implicitly — see the
 manifesto on explicit cost). A user-defined `clone` method on a struct takes precedence over the
 built-in. It is not offered on scalars (assignment already copies them), on immutable shared values
 (strings, enums — assignment already gives you a usable handle), or on a slice (use `arr.slice(0,
@@ -848,7 +848,7 @@ substitutes the parameter accordingly (`Box<int>.value` is `int`). Instantiation
 (`Box<Box<int>>`). Type arguments are written explicitly at construction
 (`Box<int> { value: 42 }`).
 
-Ember deliberately has **no turbofish** (`Box::<int>`): the clean `Name<T> { … }` form is
+Ingle deliberately has **no turbofish** (`Box::<int>`): the clean `Name<T> { … }` form is
 unambiguous on its own. The parser reads `Name<…> {` as a generic literal only when the angle
 brackets enclose a well-formed type-argument list immediately followed by `{`; because no
 expression can begin with `{`, a `> {` sequence can never be a comparison, so `a < b` and
@@ -907,7 +907,7 @@ anything — exactly as the entry module does.
 **Type arguments are inferred** at construction from two sources: the **argument** (a field
 declared `T` fixes `T` to the argument's type, so `Some(5)` is `Option<int>`) and the **expected
 type** from a `let` annotation or a function's return type (so `None` and `Result`'s second
-parameter resolve). When neither pins a parameter — a bare `None` with no annotation — Ember asks
+parameter resolve). When neither pins a parameter — a bare `None` with no annotation — Ingle asks
 for an annotation rather than guessing.
 
 **Functions and methods are generic too.** A function declares its own parameters
@@ -933,7 +933,7 @@ fn main() -> int {
 
 Inference unifies structurally: `unwrap<T>(b: Box<T>) -> T` recovers `T` from a `Box<int>`
 argument, and `none_of<T>() -> Option<T>` recovers it from an expected `Option<int>`. When a
-parameter is pinned by neither argument nor expected type, Ember asks for an annotation. Within a
+parameter is pinned by neither argument nor expected type, Ingle asks for an annotation. Within a
 generic body `T` is **opaque** — you may pass, store, and return it, but not do arithmetic on it
 or call methods (that needs a bound).
 
@@ -991,7 +991,7 @@ bounds on generic **enums** and on standalone **methods** are not yet supported.
 
 ### Numeric types
 
-Ember has an explicit-width numeric family — `i8 i16 i32 i64`, `u8 u16 u32 u64`, `f32 f64` —
+Ingle has an explicit-width numeric family — `i8 i16 i32 i64`, `u8 u16 u32 u64`, `f32 f64` —
 with two ergonomic aliases for the common case: **`int` = `i64`** and **`float` = `f64`**. Use
 `int`/`float` by default; reach for a specific width when range matters. `bool` is its own type
 and is never numeric.
@@ -1448,7 +1448,7 @@ fn main() -> int {
 
 **Runtimes & status.** Three schedulers run the *same* source: the default **cooperative N:1**
 scheduler (one OS thread); a **1:1 thread-per-spawn** runtime (`make parallel`, `-DEMBER_PARALLEL`),
-which is also what a native `emberc -o` binary uses; and an **M:N green-thread** scheduler (`make mn`,
+which is also what a native `inglec -o` binary uses; and an **M:N green-thread** scheduler (`make mn`,
 `-DEMBER_MN`) — a worker pool multiplexing many lightweight fibers that *park* on channels, with
 structured nursery join, cancellation-on-failure (a failing task tears its group down at yield
 seams), and global deadlock detection. The M:N scheduler is **built but VM-only and opt-in**, gated
@@ -1463,17 +1463,17 @@ becomes the default. **Still deferred:** `select`/timeouts, and main↔child cha
 A source file is a module. `import "path" as name` brings another module into scope under an
 explicit alias, and its members are used **qualified** through that alias — so a name's origin is
 always visible (no implicit flat merging, no collisions). Paths resolve relative to the importing
-file (with `.em` appended); all transitively-imported modules are loaded, deduped, and compiled as
+file (with `.ig` appended); all transitively-imported modules are loaded, deduped, and compiled as
 one program (mutual imports are fine).
 
 ```ember
-// modlib/mathx.em
+// modlib/mathx.ig
 fn _step(n: int) -> int { return n + 1 }      // private (leading _)
 fn square(n: int) -> int { return n * n }     // public
 fn cube(n: int) -> int { return square(n) * _step(n - 1) }
 ```
 ```ember
-// main.em
+// main.ig
 import "modlib/mathx" as mathx
 fn main() -> int {
     return mathx.square(5) + mathx.cube(2)     // 33
@@ -1504,13 +1504,13 @@ module may of course also export a constructor *function* (`geom.make(…)`); ei
 access and methods work normally, since a value's type is module-independent once resolved.
 
 ```ember
-// geom.em
+// geom.ig
 struct Point { x: int  y: int }
 fn make(x: int, y: int) -> Point { return Point { x: x, y: y } }
 fn sum(p: Point) -> int { return p.x + p.y }
 ```
 ```ember
-// main.em
+// main.ig
 import "geom" as geom
 fn main() -> int {
     let p = geom.Point { x: 3, y: 4 }   // qualified construction literal
@@ -1531,7 +1531,7 @@ qualified** (`list.map(xs, f)` infers its type arguments like a direct call); th
 
 ## Foreign functions — C FFI [runs: scalars + structs by value + pointers/buffers/handles]
 
-An **`extern "c"` block** declares foreign (C) functions by their Ember-side signature; you then
+An **`extern "c"` block** declares foreign (C) functions by their Ingle-side signature; you then
 call them like any function (MANIFESTO §5h):
 
 ```ember
@@ -1546,7 +1546,7 @@ fn main() -> int {
 ```
 
 The `extern` declaration **is the trust boundary** — there is no raw `unsafe`; the signature you
-write is what Ember type-checks against. The first slice covers **scalar** arguments and returns
+write is what Ingle type-checks against. The first slice covers **scalar** arguments and returns
 against the C math library (`libm`, part of the standard C runtime — no new dependency): the
 exposed functions are `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log`, `log2`,
 `log10`, `sinh`, `cosh`, `tanh`, `cbrt`, `trunc`, `hypot`, `fmod`. (`sqrt`, `pow`, `abs`, `floor`,
@@ -1554,7 +1554,7 @@ exposed functions are `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp
 the C function, or it is a compile error.
 
 **Structs by value** cross the boundary too — that is the C ABI. An all-scalar struct argument is
-flattened to its scalar leaves on the Ember side, and the C wrapper reassembles a *concrete C
+flattened to its scalar leaves on the Ingle side, and the C wrapper reassembles a *concrete C
 struct* and passes (or returns) it by value, so the system C compiler generates the platform's
 exact aggregate calling convention — no hand-rolled marshalling, no `libffi`. The boundary is
 defined by the **leaf-scalar sequence**, so a `struct Vec2 { x: f64  y: f64 }` matches a C
@@ -1572,18 +1572,18 @@ extern "c" {
 `cvec2_scale`.)
 
 **Pointers, buffers, and opaque handles** cross the boundary too — enough to bind real C. Three
-flavours, all **borrowed for the duration of the call** (Ember keeps ownership and frees nothing C
+flavours, all **borrowed for the duration of the call** (Ingle keeps ownership and frees nothing C
 owns):
 
-| Ember type        | C parameter   | Notes                                                             |
+| Ingle type        | C parameter   | Notes                                                             |
 |-------------------|---------------|-------------------------------------------------------------------|
 | `string`          | `const char*` | the string's NUL-terminated bytes; read-only                      |
 | `[u8]` (any packed scalar array) | a buffer | the array's contiguous native storage, passed as a pointer    |
 | `mut [u8]`        | a writable buffer | C may write the elements in place                             |
-| `Ptr`             | an opaque handle (`FILE*`, `void*`, …) | round-trips to/from C; never dereferenced in Ember |
+| `Ptr`             | an opaque handle (`FILE*`, `void*`, …) | round-trips to/from C; never dereferenced in Ingle |
 
 A `Ptr` is opaque: you receive one from C (e.g. `fopen`), pass it back to C (`fread`, `fclose`),
-and never inspect it from Ember — its lifetime is managed explicitly in C. A `Ptr` is a **linear**
+and never inspect it from Ingle — its lifetime is managed explicitly in C. A `Ptr` is a **linear**
 handle (OFI-049): it must be consumed **exactly once** — used *at most* once (move-only) and *at
 least* once (must-close).
 
@@ -1596,7 +1596,7 @@ least* once (must-close).
   being closed (or returned to transfer ownership) is a **compile error** — *"this `Ptr` is opened
   but not closed on this path"* — on **every** control-flow path (an `if` that closes on one branch
   must close on both; an early `return` or `?` must close first). This catches the leak that a C
-  program would commit silently. A handle has **no destructor** (Ember can't know whether to call
+  program would commit silently. A handle has **no destructor** (Ingle can't know whether to call
   `fclose`/`free`/`sqlite3_close`), so it can't auto-close — you must close it explicitly. The
   null-handle case stays simple because `fclose(NULL)` is a guarded no-op: open, use under a
   null-check, then **one unconditional close**. Because a `Ptr` has no destructor and can't be
@@ -1620,8 +1620,8 @@ extern "c" {
 
 Passing a heap value (a `string` literal, a freshly-built array) borrows it for the call and the
 caller reclaims it afterward, so `strlen("hello")` leaks nothing. (A C function that *returns*
-owned memory — a `char*` Ember would have to copy or free — is a deliberate future widening; see
-OFI-043. Arbitrary dynamic linking likewise remains future work.) See `examples/16_ffi.em`.
+owned memory — a `char*` Ingle would have to copy or free — is a deliberate future widening; see
+OFI-043. Arbitrary dynamic linking likewise remains future work.) See `examples/16_ffi.ig`.
 
 > **Replay note:** `--emit=replay` captures a C call's scalar *result* but not the bytes a C
 > function writes into a borrowed `mut` buffer, so a program that reads a file into a `[u8]` and uses
@@ -1703,7 +1703,7 @@ without `move` (the §3.1 ergonomic goal). Deterministic **drop/free** is covere
 
 ## Memory model — [runs: structs/arrays freed; strings/enums reference-counted]
 
-Ember reclaims heap memory **deterministically, without a garbage collector** — the manifesto's
+Ingle reclaims heap memory **deterministically, without a garbage collector** — the manifesto's
 "safe without a GC" promise. The discipline follows ownership: **mutable aggregates are uniquely
 owned; immutable values are shared.**
 
@@ -1797,13 +1797,13 @@ caller — the earlier erased-`T` over-retain was closed; see [OFI.md](OFI.md) O
 
 ## Graphics & UI — Flare
 
-Ember has an **immediate-mode UI**, written in Ember over one blessed native dependency (MANIFESTO
+Ingle has an **immediate-mode UI**, written in Ingle over one blessed native dependency (MANIFESTO
 §5g). A UI is a *function of state that runs every frame* — no retained widget tree, no callbacks, no
 `Rc<RefCell>` graph — the shape that keeps the ownership model out of your way and reads cleanly for a
 model. You build with two imports: **`std/draw`** (primitives over the native backend) and
 **`std/flare`** (the widget and layout toolkit, layered on `std/ui` and `std/layout`).
 
-**The frame loop.** Ember drives the loop itself; the body *is* the frame.
+**The frame loop.** Ingle drives the loop itself; the body *is* the frame.
 
 ```ember
 import "std/draw"  as draw
@@ -1855,18 +1855,18 @@ and `f.animate_layout(key) { … }` FLIP-animates subtrees that moved. **Theming
 `f.use_dark()`/`f.use_light()` swap a `Style` struct; `f.set_zoom(pct)` (60–220) and `f.zoom_by(d)`
 scale the whole UI.
 
-**The backend.** The heavy work — paint, GPU, the OS event pump — is native C, so Ember only
+**The backend.** The heavy work — paint, GPU, the OS event pump — is native C, so Ingle only
 *describes* each frame and 60fps stays reachable on the bytecode VM. The screen is reached through
 **one** curated in-tree C library, **raylib**, with a real embedded TrueType font (Inter) baked in for
-crisp, zero-install text. The engine hides behind the Ember API, so it stays swappable. Every frame
+crisp, zero-install text. The engine hides behind the Ingle API, so it stays swappable. Every frame
 can also be recorded to a **UI tape** — input, draw commands, and high-level interactions as
 JSON-Lines, the same machine-readable shape as the execution tape.
 
 **Build & run.** Graphics is an **opt-in build**, so the default compiler stays dependency-free:
 
 ```
-make graphics                                   # builds build/emberc-gfx (links raylib)
-EMBER_STD=./std build/emberc-gfx --emit=run examples/graphics/17_flare.em
+make graphics                                   # builds build/inglec-gfx (links raylib)
+INGLE_STD=./std build/inglec-gfx --emit=run examples/graphics/17_flare.ig
 ```
 
 **Status — [runs]:** layout, the widgets above, overlays, animation, theming/zoom, virtual lists,
@@ -1874,27 +1874,27 @@ docking, and toasts; `std/ui` widgets even carry contracts. **Not yet:** `checkb
 into Flare's flexbox layer (use `button`/`segmented` over a `var` meanwhile), real bold/italic faces
 (inline `**bold**`/`*italic*` are synthesised from one embedded weight — OFI-077), cross-block text
 selection in Markdown, and free-floating windows. The full tour is in
-[the book](THE_EMBER_BOOK.md) (ch. 25) and [docs/flare.md](flare.md).
+[the book](THE_INGLE_BOOK.md) (ch. 25) and [docs/flare.md](flare.md).
 
 ---
 
 ## Using the compiler
 
 ```
-emberc file.em                  # default: print the token stream
-emberc --emit=tokens   file.em  # token stream
-emberc --emit=ast      file.em  # parsed AST
-emberc --emit=bytecode file.em  # bytecode disassembly (with source lines)
-emberc --emit=run      file.em  # compile and execute; prints "=> <value>"
-emberc --emit=c        file.em  # emit the native C lowering to stdout
-emberc -o prog         file.em  # compile to a standalone native binary
-emberc --emit=trace    file.em  # execution tape, JSON Lines (alias: --tape)
-emberc --emit=check    file.em  # property-check contracts (see Contracts)
-emberc --emit=prove    file.em  # statically prove contracts where decidable
-emberc --emit=replay   file.em  # record/replay determinism check
-emberc --emit=docs     file.em  # render /// doc comments to a Markdown page
-emberc --lsp                    # run the language server
-emberc --doctor                 # environment / toolchain self-check
+inglec file.ig                  # default: print the token stream
+inglec --emit=tokens   file.ig  # token stream
+inglec --emit=ast      file.ig  # parsed AST
+inglec --emit=bytecode file.ig  # bytecode disassembly (with source lines)
+inglec --emit=run      file.ig  # compile and execute; prints "=> <value>"
+inglec --emit=c        file.ig  # emit the native C lowering to stdout
+inglec -o prog         file.ig  # compile to a standalone native binary
+inglec --emit=trace    file.ig  # execution tape, JSON Lines (alias: --tape)
+inglec --emit=check    file.ig  # property-check contracts (see Contracts)
+inglec --emit=prove    file.ig  # statically prove contracts where decidable
+inglec --emit=replay   file.ig  # record/replay determinism check
+inglec --emit=docs     file.ig  # render /// doc comments to a Markdown page
+inglec --lsp                    # run the language server
+inglec --doctor                 # environment / toolchain self-check
 ```
 
 Combinable flags: **`--release`** elides contract checks (see *Contracts*),
@@ -1912,25 +1912,25 @@ Compile errors are designed to **explain the fix in terms of your program, not t
 moved, and suggests how to fix it:
 
 ```
-prog.em:6:12: error: use of 'p' after it was moved
-prog.em:6:12: help: a move transfers ownership; pass it without `move` to borrow it instead, or make a copy before the move
-prog.em:5:13: note: value moved here
+prog.ig:6:12: error: use of 'p' after it was moved
+prog.ig:6:12: help: a move transfers ownership; pass it without `move` to borrow it instead, or make a copy before the move
+prog.ig:5:13: note: value moved here
 ```
 
-Because Ember is designed LLM-first (§5b), diagnostics are also available **as data**: add
+Because Ingle is designed LLM-first (§5b), diagnostics are also available **as data**: add
 **`--diagnostics=json`** and each error is emitted as a JSON object (JSON Lines, on stderr) with
 its `file`/`line`/`col`/`message`, optional `near` context, a `help` fix suggestion, and a
 secondary `note` location — so a model that wrote the code can parse the error and apply the fix
 without scraping text:
 
 ```
-emberc --emit=run --diagnostics=json prog.em
-{"severity":"error","file":"prog.em","line":6,"col":12,"message":"use of 'p' after it was moved","near":null,"help":"a move transfers ownership; …","note":{"line":5,"col":13,"message":"value moved here"}}
+inglec --emit=run --diagnostics=json prog.ig
+{"severity":"error","file":"prog.ig","line":6,"col":12,"message":"use of 'p' after it was moved","near":null,"help":"a move transfers ownership; …","note":{"line":5,"col":13,"message":"value moved here"}}
 ```
 
 ## The execution tape — [runs]
 
-`emberc --tape file.em` runs the program and writes a **tape**: one JSON object per executed
+`inglec --tape file.ig` runs the program and writes a **tape**: one JSON object per executed
 instruction, in order, to stdout. Each event records the instruction offset, the opcode, the
 **source line** it came from, and a snapshot of the value stack at that moment:
 
@@ -1942,9 +1942,9 @@ instruction, in order, to stdout. Each event records the instruction offset, the
 
 It is **observer-only** — recording a tape never changes how the program runs — and costs
 effectively nothing when not enabled. The tape is designed to be read by an LLM (or any tool)
-to debug a run step by step; it is one of Ember's deliberate LLM-first features, not an
+to debug a run step by step; it is one of Ingle's deliberate LLM-first features, not an
 afterthought. Richer semantic events (error propagation, task lifecycle) and the ability to
-register your own hook from Ember code will layer onto the same mechanism as those features
+register your own hook from Ingle code will layer onto the same mechanism as those features
 land.
 
 ---

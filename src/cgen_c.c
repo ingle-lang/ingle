@@ -4,7 +4,7 @@
 // ember_rt.h. The bytecode VM stays the reference semantics; this output is held to
 // it by the differential test in tests/native/.
 //
-// Milestone M1 — the scalar walking skeleton. Each Ember function becomes a C
+// Milestone M1 — the scalar walking skeleton. Each Ingle function becomes a C
 // function over the uniform `Value` (mirroring the VM's stack discipline, which is
 // what makes results bit-identical); native-typed scalars are a later optimisation.
 // Covered: int/float/bool literals, the operators, locals, assignment, if/else,
@@ -23,7 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-// One in-scope binding: the Ember name and the C identifier it lowered to (a
+// One in-scope binding: the Ingle name and the C identifier it lowered to (a
 // parameter "a<i>" or a local "v<n>"). `drop` marks an owned value (a struct/array/
 // string the binding must release at scope exit). Lookups scan from the top so an
 // inner `let` shadows an outer binding of the same name.
@@ -139,7 +139,7 @@ static void cgc_push(CgcGen *g, const char *name, const char *cname, int drop, i
         int nc = g->scope_cap ? g->scope_cap * 2 : 64;
         g->scope = realloc(g->scope, (size_t)nc * sizeof(CgcBinding));
         if (g->scope == NULL) {
-            fprintf(stderr, "emberc: out of memory growing the native scope table\n");
+            fprintf(stderr, "inglec: out of memory growing the native scope table\n");
             exit(70);
         }
         g->scope_cap = nc;
@@ -873,7 +873,7 @@ static void emit_binary(CgcGen *g, const Expr *e) {
     const Expr *l = e->as.binary.left;
     const Expr *r = e->as.binary.right;
 
-    // Logical operators short-circuit; C's && / || do too, and Ember's operands are
+    // Logical operators short-circuit; C's && / || do too, and Ingle's operands are
     // always bools (int 0/1), so the operand-value result the VM keeps is exactly the
     // 0/1 these produce.
     if (op == TOK_AND || op == TOK_OR) {
@@ -1057,7 +1057,7 @@ static const char *ember_ctype_of(const Type *t) {
     if (strcmp(n, "u64") == 0) { return "uint64_t"; }
     if (strcmp(n, "f32") == 0) { return "float"; }
     if (strcmp(n, "f64") == 0) { return "double"; }
-    if (strcmp(n, "bool") == 0) { return "int"; }        // Ember bool crosses as a 0/1 int
+    if (strcmp(n, "bool") == 0) { return "int"; }        // Ingle bool crosses as a 0/1 int
     if (strcmp(n, "Ptr")  == 0) { return "void *"; }
     return NULL;
 }
@@ -2572,7 +2572,7 @@ static void emit_match(CgcGen *g, const Stmt *s) {
     snprintf(scn, sizeof scn, "v%d", sv);
     cgc_push(g, "", scn, s->as.match.subject_drop, -1);   // anonymous subject
 
-    // Dispatch on the variant tag with an if / else-if CHAIN, not a C `switch`: an Ember
+    // Dispatch on the variant tag with an if / else-if CHAIN, not a C `switch`: an Ingle
     // `break`/`continue` in a case body must target the enclosing loop, but a C `switch` would
     // swallow `break` (e.g. `loop { match recv(c) { case None { break } } }` — the channel-drain
     // idiom). The chain has no switch to swallow it.
@@ -3380,7 +3380,7 @@ static void emit_struct_typedefs(FILE *out, const StructLayout *layouts, int n, 
     }
     char *done = calloc((size_t)n, 1);
     if (done == NULL) {
-        fprintf(stderr, "emberc: out of memory\n");
+        fprintf(stderr, "inglec: out of memory\n");
         exit(70);
     }
     for (int sid = 0; sid < n; sid++) {
@@ -3437,7 +3437,7 @@ int cgen_c_program(const Program *ast, const ModuleSet *modules,
     int                 *owner_generic_ct  = malloc((size_t)total_functions * sizeof *owner_generic_ct);
     if (fn_by_fi == NULL || fn_owner_sid == NULL ||
         owner_generics == NULL || owner_generic_ct == NULL) {
-        fprintf(stderr, "emberc: out of memory\n");
+        fprintf(stderr, "inglec: out of memory\n");
         exit(70);
     }
     int fi = 0, si = 0;
@@ -3473,7 +3473,7 @@ int cgen_c_program(const Program *ast, const ModuleSet *modules,
     if (layout_count > 0) {
         snames = calloc((size_t)layout_count, sizeof *snames);
         if (snames == NULL) {
-            fprintf(stderr, "emberc: out of memory\n");
+            fprintf(stderr, "inglec: out of memory\n");
             exit(70);
         }
         int sid = 0;
@@ -3487,7 +3487,7 @@ int cgen_c_program(const Program *ast, const ModuleSet *modules,
             snames[sid].field_count = nf;
             snames[sid].names = malloc((size_t)(nf > 0 ? nf : 1) * sizeof(const char *));
             if (snames[sid].names == NULL) {
-                fprintf(stderr, "emberc: out of memory\n");
+                fprintf(stderr, "inglec: out of memory\n");
                 exit(70);
             }
             for (int f = 0; f < nf; f++) {
@@ -3512,7 +3512,7 @@ int cgen_c_program(const Program *ast, const ModuleSet *modules,
     if (total_variants > 0) {
         cg_variants = malloc((size_t)total_variants * sizeof *cg_variants);
         if (cg_variants == NULL) {
-            fprintf(stderr, "emberc: out of memory\n");
+            fprintf(stderr, "inglec: out of memory\n");
             exit(70);
         }
         int ei = 0, vix = 0;
@@ -3532,7 +3532,7 @@ int cgen_c_program(const Program *ast, const ModuleSet *modules,
         }
     }
 
-    fprintf(out, "// Generated by `emberc --emit=c%s` from %s. Do not edit.\n",
+    fprintf(out, "// Generated by `inglec --emit=c%s` from %s. Do not edit.\n",
             freestanding ? " --freestanding" : "", source_name);
     fprintf(out, "// The bytecode VM is the reference semantics; tests/native diffs the two.\n");
     if (freestanding) {
@@ -3616,7 +3616,7 @@ int cgen_c_program(const Program *ast, const ModuleSet *modules,
     if (direct_extern_count > 0) {
         direct_externs = malloc((size_t)direct_extern_count * sizeof *direct_externs);
         if (direct_externs == NULL) {
-            fprintf(stderr, "emberc: out of memory\n");
+            fprintf(stderr, "inglec: out of memory\n");
             exit(70);
         }
         int di = 0;
@@ -3813,7 +3813,7 @@ int cgen_c_program(const Program *ast, const ModuleSet *modules,
         // FREESTANDING entry (docs/design/kernel-freestanding.md): no OS underneath, so no
         // argc/argv (the boot stub passes nothing), no stdio result-echo (output is whatever the
         // program wrote through its direct externs, e.g. the UART), and no exit heap sweep (the
-        // heap-free subset never allocates; a future bump-arena resets wholesale). Ember main's
+        // heap-free subset never allocates; a future bump-arena resets wholesale). Ingle main's
         // int result becomes the return value, which the boot stub forwards as the machine's
         // exit code — so a bare-metal test can assert on an EMBER-COMPUTED value.
         const FnDecl *mainfn = fn_by_fi[plan->main_index];
@@ -3837,7 +3837,7 @@ int cgen_c_program(const Program *ast, const ModuleSet *modules,
         const FnDecl *mainfn = fn_by_fi[plan->main_index];
         fprintf(out, "int main(int argc, char **argv) {\n");
         // args() = the args AFTER the program name, matching the VM (which returns everything
-        // after the .em source file). So skip argv[0], the binary's own name.
+        // after the .ig source file). So skip argv[0], the binary's own name.
         fprintf(out, "    em_argc = argc - 1; em_argv = argv + 1;\n");
         fprintf(out, "    g_em.structs = %s;\n", layout_count > 0 ? "em_structs" : "0");
         fprintf(out, "    g_em.struct_count = %d;\n", layout_count);

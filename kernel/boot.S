@@ -2,7 +2,7 @@
 //
 // QEMU's `-kernel` loads this image at 0x4008_0000 and enters at `_start` on the primary CPU with
 // the MMU off. We park any secondary CPUs, point sp at a stack carved from .bss, zero argc/argv, and
-// branch to the C `main` the emitted Ember program provides. If `main` ever returns there is no OS
+// branch to the C `main` the emitted Ingle program provides. If `main` ever returns there is no OS
 // to return to, so we hang.
 
 .section .text.boot, "ax"
@@ -15,8 +15,8 @@ _start:
 
     // Enable FP/SIMD access at EL1 (CPACR_EL1.FPEN = 0b11). FP/SIMD traps at reset, but clang copies
     // the runtime's 16-byte `Value` (its union holds a double) with 128-bit SIMD loads/stores — so
-    // without this ANY non-trivial Ember code takes an "SIMD trapped" exception. Mandatory for a
-    // bare-metal Ember target (kernel milestone 1 / OFI-167).
+    // without this ANY non-trivial Ingle code takes an "SIMD trapped" exception. Mandatory for a
+    // bare-metal Ingle target (kernel milestone 1 / OFI-167).
     mov     x0, #(3 << 20)
     msr     cpacr_el1, x0
     isb
@@ -32,7 +32,7 @@ _start:
     isb
 
     // Enable the MMU with a flat identity map (kernel milestone 2). With the MMU off, every data
-    // access is Device memory and faults on unaligned access — which the Ember runtime does
+    // access is Device memory and faults on unaligned access — which the Ingle runtime does
     // constantly. mmu_init (platform.c) maps RAM as Normal cacheable, then turns the MMU on.
     bl      mmu_init
 
@@ -42,13 +42,13 @@ _start:
 
     // main returned — on bare metal there is no OS to go back to. Request a clean shutdown via ARM
     // semihosting SYS_EXIT (QEMU `-semihosting`), forwarding main's return value (w0) as the exit
-    // code: the freestanding entry returns Ember main's int result, so the host-visible exit code
+    // code: the freestanding entry returns Ingle main's int result, so the host-visible exit code
     // is COMPUTED BY EMBER on bare metal — a differential hook the smoke test asserts on. x1 points
     // at a writable {reason, exit_code} block. If semihosting is off the hlt is ignored and we fall
     // through to the hang loop.
     ldr     x1, =semi_exit_block
     sxtw    x0, w0                  // main's int return, widened
-    str     x0, [x1, #8]            // block.exit_code = Ember main's result
+    str     x0, [x1, #8]            // block.exit_code = Ingle main's result
     mov     x0, #0x18               // SYS_EXIT
     hlt     #0xf000
 

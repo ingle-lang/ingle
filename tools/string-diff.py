@@ -4,12 +4,12 @@
 # Python strings ARE code-point indexed, so CPython is a ground-truth reference for what
 # str.cp_count / cp_at / cp_prefix / cp_slice / cp_insert / cp_delete must do. This tool fuzzes
 # random UTF-8 strings (mixing 1-, 2-, 3- and 4-byte code points — ASCII, Latin-1, CJK, emoji,
-# combining marks) and random indices (in- AND out-of-range), generates ONE Ember program that
+# combining marks) and random indices (in- AND out-of-range), generates ONE Ingle program that
 # runs every case through std/string, and compares its output to the Python reference — element by
 # element as code-point integers, so the comparison itself can't be confused by encoding/escaping.
 #
 # It is the repeatable proof that the string library is UTF-8 correct: re-run it after any change to
-# std/string.em, chars()/from_char_code, or the string runtime.
+# std/string.ig, chars()/from_char_code, or the string runtime.
 #
 #   tools/string-diff.py [N] [seed]     N random strings (default 150), reproducible by seed (default 1)
 #
@@ -17,7 +17,7 @@
 import os, sys, subprocess, random
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EMBERC = os.path.join(ROOT, "build", "emberc")
+EMBERC = os.path.join(ROOT, "build", "inglec")
 N    = int(sys.argv[1]) if len(sys.argv) > 1 else 150
 SEED = int(sys.argv[2]) if len(sys.argv) > 2 else 1
 rng  = random.Random(SEED)
@@ -67,7 +67,7 @@ for _ in range(N):
         add("at", cps, i); add("prefix", cps, i); add("insert", cps, i); add("delete", cps, i)
         add("slice", cps, i, rng.randint(-2, n + 2))
 
-# ---- emit one Ember program that runs every case and prints `id|cp,cp,...` of each result ----
+# ---- emit one Ingle program that runs every case and prints `id|cp,cp,...` of each result ----
 lines = ['import "std/string" as str', "",
          "fn emit(id: int, s: string) {",
          "    var parts: [string] = []",
@@ -94,11 +94,11 @@ for cid, op, cps, a, b in cases:
 lines += ["    return 0", "}"]
 prog = "\n".join(lines) + "\n"
 
-tmp = os.path.join("/tmp", "ember_string_diff.em")
+tmp = os.path.join("/tmp", "ember_string_diff.ig")
 open(tmp, "w").write(prog)
 r = subprocess.run([EMBERC, "--emit=run", tmp], capture_output=True, text=True)
 if r.returncode != 0:
-    sys.stderr.write("string-diff: emberc failed:\n" + r.stdout + r.stderr); sys.exit(2)
+    sys.stderr.write("string-diff: inglec failed:\n" + r.stdout + r.stderr); sys.exit(2)
 
 got = {}
 for ln in r.stdout.splitlines():

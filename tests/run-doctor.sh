@@ -27,8 +27,8 @@ echo "$out" | grep -q "make install" || {
 
 # --version prints one line; --help shows usage with the SAME version (one constant, no drift).
 ver=$("$BIN" --version) || { echo "FAIL: --version exited non-zero"; exit 1; }
-echo "$ver" | grep -q "^emberc " || {
-    echo "FAIL: --version should print 'emberc <version>', got: $ver"; exit 1; }
+echo "$ver" | grep -q "^inglec " || {
+    echo "FAIL: --version should print 'inglec <version>', got: $ver"; exit 1; }
 "$BIN" --help | grep -q "usage:" || { echo "FAIL: --help is missing the usage block"; exit 1; }
 "$BIN" --help | grep -qF "$ver" || {
     echo "FAIL: --help header version should match --version ($ver)"; exit 1; }

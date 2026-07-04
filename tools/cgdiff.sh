@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # tools/cgdiff.sh — the self-hosted bytecode-backend DIFFERENTIAL HARNESS.
 #
-# Compares the self-hosted codegen (selfhost/codegen.em, driven by codegen_dump.em) against the stage-0
-# oracle `emberc --emit=bytecode`, on BOTH execution paths:
-#   • VM     — `emberc --emit=run selfhost/codegen_dump.em <file>`
-#   • NATIVE — the self-hosted codegen compiled to a binary (`emberc -o … codegen_dump.em`)
+# Compares the self-hosted codegen (selfhost/codegen.ig, driven by codegen_dump.ig) against the stage-0
+# oracle `inglec --emit=bytecode`, on BOTH execution paths:
+#   • VM     — `inglec --emit=run selfhost/codegen_dump.ig <file>`
+#   • NATIVE — the self-hosted codegen compiled to a binary (`inglec -o … codegen_dump.ig`)
 # Byte-identical disassembly (incl. the source-line column) is the bar, exactly as `make selfhost` Stage 4
 # gates — but this is the fast DEV loop: point it at a probe and it shows the first divergence (function +
 # offset + the differing instructions), so an unbuilt/miscompiled construct is found in one shot.
 #
 # Usage:
-#   tools/cgdiff.sh <file.em> [more.em …]   # diff specific files; shows the first divergent hunk per file
-#   tools/cgdiff.sh -d <dir>                # every *.em under <dir>
+#   tools/cgdiff.sh <file.ig> [more.ig …]   # diff specific files; shows the first divergent hunk per file
+#   tools/cgdiff.sh -d <dir>                # every *.ig under <dir>
 #   tools/cgdiff.sh -c                      # corpus sweep (examples tests std selfhost) + cause histogram
 #   tools/cgdiff.sh -q  …                   # quiet: one status line per file, no diff bodies
 #   tools/cgdiff.sh -v  …                   # verbose: full diff per failing file (not just the first hunk)
@@ -25,8 +25,8 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-EMBERC="${EMBERC:-./build/emberc}"
-DRIVER="selfhost/codegen_dump.em"
+EMBERC="${EMBERC:-./build/inglec}"
+DRIVER="selfhost/codegen_dump.ig"
 CACHE="${TMPDIR:-/tmp}/cgdiff_native_$$"
 LIST="${TMPDIR:-/tmp}/cgdiff_list_$$"
 CAUSE="${TMPDIR:-/tmp}/cgdiff_cause_$$"
@@ -38,8 +38,8 @@ trap 'rm -f "$CACHE" "$LIST" "$CAUSE"' EXIT
 # -------- arg parse --------
 while [ $# -gt 0 ]; do
     case "$1" in
-        -d) mode="dir"; shift; find "${1:?-d needs a directory}" -name '*.em' 2>/dev/null | sort >> "$LIST"; shift ;;
-        -c) mode="corpus"; find examples tests std selfhost -name '*.em' 2>/dev/null | sort >> "$LIST"; shift ;;
+        -d) mode="dir"; shift; find "${1:?-d needs a directory}" -name '*.ig' 2>/dev/null | sort >> "$LIST"; shift ;;
+        -c) mode="corpus"; find examples tests std selfhost -name '*.ig' 2>/dev/null | sort >> "$LIST"; shift ;;
         -q) verbosity="quiet"; shift ;;
         -v) verbosity="verbose"; shift ;;
         -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;

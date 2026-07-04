@@ -1,7 +1,7 @@
 #!/bin/sh
-# tests/run-lsp.sh — regression harness for the Ember language server (emberc --lsp).
+# tests/run-lsp.sh — regression harness for the Ingle language server (emberc --lsp).
 #
-# The LSP speaks JSON-RPC with Content-Length framing over stdio, so unlike the .em golden suites
+# The LSP speaks JSON-RPC with Content-Length framing over stdio, so unlike the .ig golden suites
 # this drives a real session and asserts the protocol responses. A tiny Python driver builds the
 # frames and checks them (Python is a TEST dependency only — the compiler/LSP link nothing). It is
 # kept out of the dependency-free `make test`; run it with `make test-lsp`. Covers slices 1-4:
@@ -27,7 +27,7 @@ def frame(obj):
     b = json.dumps(obj).encode()
     return b"Content-Length: %d\r\n\r\n%s" % (len(b), b)
 
-URI = "file:///tmp/ember_lsp_regression.em"
+URI = "file:///tmp/ember_lsp_regression.ig"
 BAD  = "fn main() -> int {\n    return \"oops\"\n}\n"
 GOOD = ("struct Point {\n    x: int\n    y: int\n}\n\n"
         "/// Add two integers and return the sum.\n"
@@ -39,7 +39,7 @@ glines = GOOD.split("\n")
 
 # A second document with a nested struct + a method, to exercise `self.` and chained `a.b.`
 # member completion (Phase 2c). Both resolve through the same semantic index.
-URI2 = "file:///tmp/ember_lsp_nested.em"
+URI2 = "file:///tmp/ember_lsp_nested.ig"
 NEST = ("struct Inner {\n    v: int\n}\n\n"
         "struct Outer {\n    inner: Inner\n"
         "    fn get(self) -> int {\n        return self.inner.v\n    }\n}\n\n"
@@ -54,9 +54,9 @@ methrow = next(i for i, l in enumerate(nlines) if "o.get()" in l)
 pos_method = {"line": methrow, "character": nlines[methrow].index("o.get()") + len("o.")}
 
 # A third document that IMPORTS a std module, to exercise CROSS-MODULE hover + cross-file
-# go-to-definition (A3/A4): `str.contains(...)` resolves to std/string.em. EMBER_STD is set
+# go-to-definition (A3/A4): `str.contains(...)` resolves to std/string.ig. EMBER_STD is set
 # above, so the import resolves against the real stdlib.
-URI3 = "file:///tmp/ember_lsp_xmod.em"
+URI3 = "file:///tmp/ember_lsp_xmod.ig"
 XMOD = ('import "std/string" as str\n\n'
         'fn has_err(line: string) -> bool {\n'
         '    return str.contains(line, "ERROR")\n'
@@ -68,8 +68,8 @@ pos_xmod = {"line": xrow, "character": xlines[xrow].index("contains")}
 # A fourth document exercising BUILT-IN array/string method hover (OFI-038). These intrinsics are
 # special-cased in the checker (not resolved through a struct's method table), so before the fix they
 # left no semantic-index entry and hovering them returned nothing — the bug Karl hit on
-# `tokens.append(...)` in 06_calculator.em. Each now records an SK_METHOD card.
-URI4 = "file:///tmp/ember_lsp_intrinsic.em"
+# `tokens.append(...)` in 06_calculator.ig. Each now records an SK_METHOD card.
+URI4 = "file:///tmp/ember_lsp_intrinsic.ig"
 INTR = ("fn go() -> int {\n"
         "    var xs: [int] = []\n"
         "    xs.append(7)\n"
@@ -86,9 +86,9 @@ pos_split  = iloc('"a,b".split(",")', "split")  # string .split → [string], se
 
 # A fifth document exercising CHANNEL builtin hover (channel/send/recv/close). These are
 # special-cased in the checker by name and were missing from vocab.def, so hovering them in
-# examples/05_concurrency.em returned nothing — the bug Karl hit on `send`/`close`. Each now
+# examples/05_concurrency.ig returned nothing — the bug Karl hit on `send`/`close`. Each now
 # has an EMBER_BUILTIN doc card.
-URI5 = "file:///tmp/ember_lsp_channel.em"
+URI5 = "file:///tmp/ember_lsp_channel.ig"
 CHAN = ("fn main() {\n"
         "    let c: Channel<int> = channel(8)\n"
         "    send(c, 1)\n"
@@ -357,13 +357,13 @@ hx = byid.get(19, {}).get("result")
 hxv = hx["contents"]["value"] if hx else ""
 if not hx or "fn contains(s: string, sub: string) -> bool" not in hxv:
     fail("cross-module hover did not show the imported function's signature: " + hxv)
-if "(function)" not in hxv or "module str" not in hxv or "declared in string.em" not in hxv:
+if "(function)" not in hxv or "module str" not in hxv or "declared in string.ig" not in hxv:
     fail("cross-module hover is missing the module / cross-file declaration: " + hxv)
 
-# CROSS-FILE go-to-definition (A4): `str.contains` jumps INTO std/string.em (a different file).
+# CROSS-FILE go-to-definition (A4): `str.contains` jumps INTO std/string.ig (a different file).
 dx = byid.get(20, {}).get("result")
-if not dx or "range" not in dx or not dx.get("uri", "").endswith("string.em"):
-    fail("cross-file go-to-definition did not resolve into std/string.em: " + str(dx))
+if not dx or "range" not in dx or not dx.get("uri", "").endswith("string.ig"):
+    fail("cross-file go-to-definition did not resolve into std/string.ig: " + str(dx))
 
 # BUILT-IN method hover (OFI-038): hovering an array/string intrinsic now shows an SK_METHOD card
 # with a signature rendered from the receiver/param/return types — previously these returned null.
@@ -430,7 +430,7 @@ print("lsp: passed — diagnostics, hover (+locals, +fields, +methods, +function
 # clients commonly negotiate utf-8, alongside any utf-16-only client). 'héllo ' — é (U+00E9) is 2
 # UTF-8 bytes but 1 UTF-16 unit; `nme` after it is undefined, giving a diagnostic whose start column
 # differs by 1 between the two encodings.
-NAURI = "file:///tmp/ember_lsp_nonascii.em"
+NAURI = "file:///tmp/ember_lsp_nonascii.ig"
 NASRC = ('fn greet(name: string) -> string {\n'
          '    return "héllo " + nme\n'
          '}\n')
@@ -484,18 +484,18 @@ print("lsp: passed — positionEncoding negotiation (utf-8 preferred, utf-16 fal
 
 # ---- project-wide find-references + rename (the semantic index, inverted) -----------------------
 # References/rename need real files on disk (the server walks the workspace root), so build a tiny
-# two-file project in a temp dir: lib.em defines `greet`, main.em imports it and calls it twice. A
+# two-file project in a temp dir: lib.ig defines `greet`, main.ig imports it and calls it twice. A
 # symbol's identity is (def_file, def_line, spelling) — def_col is too coarse — so guard that
 # (a) cross-file references find the declaration + every call, (b) rename edits span BOTH files, and
 # (c) two same-named locals in different scopes are NOT conflated.
 import tempfile, shutil
 rp = tempfile.mkdtemp(prefix="ember_lsp_refs_")
-open(os.path.join(rp, "lib.em"), "w").write(
+open(os.path.join(rp, "lib.ig"), "w").write(
     "fn greet(name: string) -> string {\n    return name\n}\n")
-open(os.path.join(rp, "main.em"), "w").write(
+open(os.path.join(rp, "main.ig"), "w").write(
     'import "lib" as lib\n\nfn main() -> int {\n    println(lib.greet("a"))\n'
     '    println(lib.greet("b"))\n    return 0\n}\n')
-open(os.path.join(rp, "calc.em"), "w").write(
+open(os.path.join(rp, "calc.ig"), "w").write(
     "fn a() -> int {\n    let total = 1\n    return total + total\n}\n\n"
     "fn b() -> int {\n    let total = 2\n    return total\n}\n")
 
@@ -518,8 +518,8 @@ def colof(path_file, line_sub, sub):
     row = next(i for i, l in enumerate(ls) if line_sub in l)
     return row, ls[row].index(line_sub) + line_sub.index(sub)
 
-MAINU = "file://" + os.path.join(rp, "main.em")
-GROW, GCOL = colof("main.em", "lib.greet", "greet")    # cursor on `greet` in the first call
+MAINU = "file://" + os.path.join(rp, "main.ig")
+GROW, GCOL = colof("main.ig", "lib.greet", "greet")    # cursor on `greet` in the first call
 
 def proj_msgs(extra):
     return ([
@@ -528,7 +528,7 @@ def proj_msgs(extra):
             "workspaceFolders":[{"uri":"file://"+rp,"name":"refs"}]}},
         {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
             "uri":MAINU,"languageId":"ember","version":1,
-            "text":open(os.path.join(rp,"main.em")).read()}}},
+            "text":open(os.path.join(rp,"main.ig")).read()}}},
     ] + extra + [{"jsonrpc":"2.0","id":9,"method":"shutdown"}, {"jsonrpc":"2.0","method":"exit"}])
 
 proj_caps = lsp_session(proj_msgs([])).get(1, {}).get("result", {}).get("capabilities", {})
@@ -536,15 +536,15 @@ for need in ("referencesProvider", "renameProvider"):
     if need not in proj_caps:
         fail("initialize did not advertise " + need)
 
-# (a) cross-file references: the `greet` declaration (lib.em) + both calls (main.em).
+# (a) cross-file references: the `greet` declaration (lib.ig) + both calls (main.ig).
 refs = lsp_session(proj_msgs([
     {"jsonrpc":"2.0","id":2,"method":"textDocument/references","params":{
         "textDocument":{"uri":MAINU}, "position":{"line":GROW,"character":GCOL}}}])).get(2, {}).get("result", [])
 rfiles = sorted({r["uri"].split("/")[-1] for r in refs})
-if len(refs) != 3 or rfiles != ["lib.em", "main.em"]:
+if len(refs) != 3 or rfiles != ["lib.ig", "main.ig"]:
     fail("cross-file references for `greet` wrong: %d refs in %s" % (len(refs), rfiles))
 
-# (b) rename spans BOTH files: 2 edits in main.em, 1 in lib.em, all -> the new name.
+# (b) rename spans BOTH files: 2 edits in main.ig, 1 in lib.ig, all -> the new name.
 ren = lsp_session(proj_msgs([
     {"jsonrpc":"2.0","id":3,"method":"textDocument/rename","params":{
         "textDocument":{"uri":MAINU}, "position":{"line":GROW,"character":GCOL},
@@ -555,13 +555,13 @@ if not all(e["newText"] == "hello" for v in ren.values() for e in v):
     fail("rename produced the wrong newText")
 
 # (c) scope safety: renaming `total` in a() touches a()'s 3 sites only — never b()'s same-named local.
-CALCU = "file://" + os.path.join(rp, "calc.em")
-trow, tcol = colof("calc.em", "let total", "total")
+CALCU = "file://" + os.path.join(rp, "calc.ig")
+trow, tcol = colof("calc.ig", "let total", "total")
 calc = lsp_session([
     {"jsonrpc":"2.0","id":1,"method":"initialize","params":{
         "capabilities":{"general":{"positionEncodings":["utf-8"]}}, "workspaceFolders":[{"uri":"file://"+rp}]}},
     {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
-        "uri":CALCU,"languageId":"ember","version":1,"text":open(os.path.join(rp,"calc.em")).read()}}},
+        "uri":CALCU,"languageId":"ember","version":1,"text":open(os.path.join(rp,"calc.ig")).read()}}},
     {"jsonrpc":"2.0","id":4,"method":"textDocument/rename","params":{
         "textDocument":{"uri":CALCU}, "position":{"line":trow,"character":tcol}, "newName":"sum"}},
     {"jsonrpc":"2.0","id":9,"method":"shutdown"}, {"jsonrpc":"2.0","method":"exit"}]).get(4, {}).get("result", {}).get("changes", {})
@@ -580,7 +580,7 @@ print("lsp: passed — project-wide find-references + rename (cross-file, scope-
 # An unannotated binding is the token pattern `let`/`var` · IDENT · `=`; the hint shows the type the
 # checker inferred (from the binding's uses), placed right after the name. Annotated bindings get
 # nothing (the type is already on screen).
-IHURI = "file:///tmp/ember_lsp_inlay.em"
+IHURI = "file:///tmp/ember_lsp_inlay.ig"
 IHSRC = ("fn main() -> int {\n"
          "    let sum = 1 + 2\n"
          '    let label = "hi"\n'
@@ -614,7 +614,7 @@ print("lsp: passed — inlay hints (inferred-type on unannotated let/var; annota
 # ---- signature help: the parameter popup while typing a call ------------------------------------
 # Inside foo(a, |b) the active parameter is the count of top-level commas before the cursor. A free
 # function renders per-parameter labels (so the client can highlight); builtins show the signature.
-SHURI = "file:///tmp/ember_lsp_sig.em"
+SHURI = "file:///tmp/ember_lsp_sig.ig"
 SHSRC = ("fn add(a: int, b: int) -> int {\n    return a + b\n}\n\n"
          "fn main() -> int {\n    let r = add(1, 2)\n    println(42)\n    return r\n}\n")
 shl = SHSRC.split("\n")
@@ -679,7 +679,7 @@ def diags(uri, src, root=None):
             return m["params"]["diagnostics"]
     return []
 
-GFXURI = "file:///tmp/ember_lsp_gfx.em"
+GFXURI = "file:///tmp/ember_lsp_gfx.ig"
 # (1) a program calling graphics primitives directly type-checks cleanly in the default build
 gok = ('fn main() -> int {\n    window_open(200, 150, "x")\n'
        '    draw_rect(0, 0, 10, 10, 255)\n    window_close()\n    return 0\n}\n')
@@ -695,11 +695,11 @@ if not any("undefined function" in d["message"]
     fail("a genuinely undefined function must still error")
 # (4) an error INSIDE an imported module does not leak onto the importer (attribution by file)
 lp = tempfile.mkdtemp(prefix="ember_lsp_leak_")
-open(os.path.join(lp, "badlib.em"), "w").write('fn boom() -> int {\n    return "not an int"\n}\n')
+open(os.path.join(lp, "badlib.ig"), "w").write('fn boom() -> int {\n    return "not an int"\n}\n')
 imp_src = 'import "badlib" as b\n\nfn main() -> int {\n    return b.boom()\n}\n'
-open(os.path.join(lp, "app.em"), "w").write(imp_src)
-leaked = diags("file://" + os.path.join(lp, "app.em"), imp_src, root=lp)
-if leaked:                                # app.em's own code is correct; badlib's error must not leak in
+open(os.path.join(lp, "app.ig"), "w").write(imp_src)
+leaked = diags("file://" + os.path.join(lp, "app.ig"), imp_src, root=lp)
+if leaked:                                # app.ig's own code is correct; badlib's error must not leak in
     fail("an imported module's error leaked onto the importer: %s" % leaked)
 shutil.rmtree(lp, ignore_errors=True)
 print("lsp: passed — graphics signatures type-check in the default build (still enforced, not swallowed); "
@@ -710,7 +710,7 @@ print("lsp: passed — graphics signatures type-check in the default build (stil
 # The prover statically discharges `ensures` clauses in the linear-integer fragment; the LSP marks
 # each with a proved / runtime-checked inlay (the verification-loop differentiator, shown inline) and
 # offers code actions that scaffold a `requires`/`ensures` clause before the body brace.
-PVURI = "file:///tmp/ember_lsp_prove.em"
+PVURI = "file:///tmp/ember_lsp_prove.ig"
 PVSRC = ("fn add_nonneg(a: int, b: int) -> int\n    requires a >= 0\n    requires b >= 0\n"
          "    ensures result >= 0\n{\n    return a + b\n}\n\n"
          "fn shift(x: int, k: int) -> int\n    ensures result >= x\n{\n    return x + k\n}\n")
@@ -752,7 +752,7 @@ print("lsp: passed — contract verification (prover-verdict inlays: proved vs r
 # A re-lexed string-interpolation hole carried line-1 positions, which painted semantic tokens onto
 # the file's header comment (and cross-module index entries leaked too). Guard: every token lands on
 # a real identifier, never inside a `//` comment — INCLUDING identifiers inside `{ }` interpolations.
-STC_URI = "file:///tmp/ember_lsp_semtok_comments.em"
+STC_URI = "file:///tmp/ember_lsp_semtok_comments.ig"
 STC_SRC = ("// header comment mentioning send, channel, close — none of these may be coloured\n"
            "fn greet(who: string) -> string {\n"
            "    let label = who\n"
@@ -792,10 +792,10 @@ print("lsp: passed — semantic tokens stay out of comments + cover real identif
 # Type.qualifier on a bare struct-literal type (annotation_type strcmp'd a garbage pointer). They
 # bite a real, multi-module program that imports std (many top-level `let` constants + `Name{…}`
 # struct literals across modules); the cumulative arena churn matters, so we sweep hover/definition/
-# completion over EVERY position of examples/graphics/09_ui.em. Pre-fix this SIGSEGV'd around request ~2365;
+# completion over EVERY position of examples/graphics/09_ui.ig. Pre-fix this SIGSEGV'd around request ~2365;
 # now it must complete cleanly. ROOT is derived from EMBER_STD (which `make test-lsp` sets to ROOT/std).
 import os.path
-ex = os.path.join(os.path.dirname(os.environ["EMBER_STD"]), "examples", "graphics", "09_ui.em")
+ex = os.path.join(os.path.dirname(os.environ["EMBER_STD"]), "examples", "graphics", "09_ui.ig")
 if not os.path.exists(ex):
     print("lsp: skip crash regression — %s not found" % ex)
 else:
@@ -822,8 +822,8 @@ else:
                         capture_output=True, env=os.environ)
     if sp.returncode != 0:
         fail("server crashed under request churn (returncode %d) — uninitialised-memory "
-             "regression in the front end (sweep of examples/graphics/09_ui.em)" % sp.returncode)
-    print("lsp: passed — crash regression (%d requests over examples/graphics/09_ui.em, no crash)" % (rid - 100))
+             "regression in the front end (sweep of examples/graphics/09_ui.ig)" % sp.returncode)
+    print("lsp: passed — crash regression (%d requests over examples/graphics/09_ui.ig, no crash)" % (rid - 100))
 
 
 # ---- OFI-102: malformed-input hardening (giant Content-Length + pathologically deep JSON) ---------

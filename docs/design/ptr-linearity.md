@@ -8,10 +8,10 @@ fully closed. Compiler-decision record: `docs/architecture.md` (`## Decision: Pt
 ## Problem
 
 An opaque C handle (`Ptr` — a `FILE*` from `fopen`, a curl handle from `http_open`, …)
-round-trips through Ember. The **double-close half** of OFI-049 (closed 2026-06-18) made
+round-trips through Ingle. The **double-close half** of OFI-049 (closed 2026-06-18) made
 `Ptr` *move-only* (affine — "used **at most** once"): `is_move_type(TY_PTR)==1`, a closing
 call `fclose(move f: Ptr)` consumes the binding, and reuse-after-close is a use-after-move
-compile error. Deliberately, a `Ptr` got **no scope-exit destructor** (Ember can't know how
+compile error. Deliberately, a `Ptr` got **no scope-exit destructor** (Ingle can't know how
 to free an arbitrary C handle — `fclose` vs `free` vs `sqlite3_close` differ).
 
 The **leak half** is still open: a handle that is **never** consumed leaks silently —
@@ -23,7 +23,7 @@ Linear = affine (already have: at most once) **+** must-consume (new: at least o
 A value of type `Ptr` that is *owned* must be **consumed on every control-flow path** before
 its binding leaves scope. "Consumed" = ownership transferred out via exactly one of:
 
-1. passed to a `move` parameter — `fclose(move f)` (the C side frees), or an Ember
+1. passed to a `move` parameter — `fclose(move f)` (the C side frees), or an Ingle
    `fn takes(move f: Ptr)` (which re-inherits the obligation);
 2. `return`ed — ownership transfers to the caller, which re-inherits the obligation;
 3. moved into another `Ptr` binding — `let g = f` / `g = f` — `g` re-inherits the obligation.
@@ -119,9 +119,9 @@ if f == null_ptr() {
 
 ## What must keep compiling (the corpus)
 
-`examples/16_ffi.em`, `tests/run/ffi_pointers.em`, `tests/run/ffi_null_handle.em`,
-`tests/run/ptr_move.em`, `tests/native/ptr_move.em`, and `public/.../flare_chat.em` all
-close their handles unconditionally → all stay green. `error_ptr_double_close.em` stays a
+`examples/16_ffi.ig`, `tests/run/ffi_pointers.ig`, `tests/run/ffi_null_handle.ig`,
+`tests/run/ptr_move.ig`, `tests/native/ptr_move.ig`, and `public/.../flare_chat.ig` all
+close their handles unconditionally → all stay green. `error_ptr_double_close.ig` stays a
 compile error. New negative tests assert the leak shapes are now rejected.
 
 ## Verification
@@ -163,7 +163,7 @@ test. Typed-handles-with-`Drop` (future) will lift the ban.
 ### R2 — Linearity is value-based, not binding-based
 Two new leak sites beyond the v1 table: a **discarded fresh `Ptr` temporary** (`fopen(...)` as an
 expression statement — not a binding, and `is_owning_temp(TY_PTR)==0`) and the **bare `return`**
-branch (unit fns). Keep the `is_owning_temp`/`drop_locals` `TY_PTR` carve-outs (Ptr has *no Ember
+branch (unit fns). Keep the `is_owning_temp`/`drop_locals` `TY_PTR` carve-outs (Ptr has *no Ingle
 destructor*) but separate that fact from *is a linear obligation* (new check).
 
 ### R3 — One shared leak-scan helper at EVERY divergence site

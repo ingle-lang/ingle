@@ -45,7 +45,7 @@ void chunk_write(Chunk *chunk, uint8_t byte, int line, int col) {
         int *grown_lines = realloc(chunk->lines, new_cap * sizeof(int));
         int *grown_cols = realloc(chunk->cols, new_cap * sizeof(int));
         if (grown_code == NULL || grown_lines == NULL || grown_cols == NULL) {
-            fprintf(stderr, "emberc: out of memory writing bytecode\n");
+            fprintf(stderr, "inglec: out of memory writing bytecode\n");
             exit(70);
         }
         chunk->code     = grown_code;
@@ -68,7 +68,7 @@ size_t chunk_add_const(Chunk *chunk, Value value) {
         size_t new_cap = chunk->const_cap ? chunk->const_cap * 2 : 8;
         Value *grown = realloc(chunk->consts, new_cap * sizeof(Value));
         if (grown == NULL) {
-            fprintf(stderr, "emberc: out of memory adding constant\n");
+            fprintf(stderr, "inglec: out of memory adding constant\n");
             exit(70);
         }
         chunk->consts    = grown;
@@ -87,7 +87,7 @@ size_t chunk_add_string(Chunk *chunk, const char *data, size_t length) {
         size_t new_cap = chunk->string_cap ? chunk->string_cap * 2 : 8;
         StringConst *grown = realloc(chunk->strings, new_cap * sizeof(StringConst));
         if (grown == NULL) {
-            fprintf(stderr, "emberc: out of memory adding a string\n");
+            fprintf(stderr, "inglec: out of memory adding a string\n");
             exit(70);
         }
         chunk->strings    = grown;
@@ -95,7 +95,7 @@ size_t chunk_add_string(Chunk *chunk, const char *data, size_t length) {
     }
     char *copy = malloc(length + 1);
     if (copy == NULL) {
-        fprintf(stderr, "emberc: out of memory adding a string\n");
+        fprintf(stderr, "inglec: out of memory adding a string\n");
         exit(70);
     }
     memcpy(copy, data, length);

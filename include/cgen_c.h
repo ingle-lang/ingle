@@ -11,7 +11,7 @@
 // The native backend (docs/architecture.md "Decision: native backend"): a SECOND
 // lowering of the same checked AST — alongside codegen_program's AST→bytecode — that
 // emits a self-contained C translation unit. The C links the runtime in
-// include/ember_rt.h and runs as a standalone binary (`emberc -o`), with the
+// include/ember_rt.h and runs as a standalone binary (`inglec -o`), with the
 // bytecode VM kept as the reference semantics the generated code is diffed against.
 //
 // Milestone M1 covers the scalar walking skeleton: int/float/bool, the operators,
@@ -28,8 +28,8 @@
 //
 // `freestanding` (the kernel/bare-metal target, docs/design/kernel-freestanding.md): emit a
 // FREESTANDING entry — `int main(void)`, no argc/argv, no printf result-echo, no exit heap sweep —
-// returning Ember main's int result as the process exit code (the boot stub forwards it, so QEMU's
-// exit code is computed by Ember). Hosted-only constructs are rejected at emit time with a clear
+// returning Ingle main's int result as the process exit code (the boot stub forwards it, so QEMU's
+// exit code is computed by Ingle). Hosted-only constructs are rejected at emit time with a clear
 // error rather than a late link failure: spawn/nursery (needs pthreads) and hosted-REGISTRY extern
 // calls (dispatched via em_ffi/the in-tree registry — only direct externs, OFI-167, reach bare
 // metal). Everything else the heap-free subset doesn't cover still fails honestly at link time by

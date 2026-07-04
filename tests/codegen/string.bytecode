@@ -1,6 +1,6 @@
 == fn main (arity 0) ==
 0000    3  STRING   0  (= "Hello, ")
-0002    |  STRING   1  (= "Ember")
+0002    |  STRING   1  (= "Ingle")
 0004    |  CONCAT  
 0005    |  STRING   2  (= "!")
 0007    |  CONCAT  

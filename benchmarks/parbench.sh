@@ -1,5 +1,5 @@
 #!/bin/sh
-# parbench.sh — run benchmarks/parallel_bench.em under the serial compiler (cooperative
+# parbench.sh — run benchmarks/parallel_bench.ig under the serial compiler (cooperative
 # green threads, one core) and the parallel compiler (real OS threads, all cores) and
 # print the per-section wall-clock speedup. Same program both times; the checksum must
 # match or the row is flagged — a parallel speedup that broke the answer is not a win.
@@ -8,9 +8,9 @@
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-SER="$ROOT/build/emberc-release"
-PAR="$ROOT/build/emberc-par"
-BENCH="$ROOT/benchmarks/parallel_bench.em"
+SER="$ROOT/build/inglec-release"
+PAR="$ROOT/build/inglec-par"
+BENCH="$ROOT/benchmarks/parallel_bench.ig"
 
 for bin in "$SER" "$PAR"; do
     [ -x "$bin" ] || { echo "missing $bin — run: make release && make parallel" >&2; exit 2; }
@@ -20,7 +20,7 @@ ser_out=$("$SER" --emit=run "$BENCH" 2>&1)
 par_out=$("$PAR" --emit=run "$BENCH" 2>&1)
 
 cores=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo "?")
-printf '\n== Ember parallel benchmark (%s logical cores) ==\n' "$cores"
+printf '\n== Ingle parallel benchmark (%s logical cores) ==\n' "$cores"
 printf '%-12s %10s %10s %9s   %s\n' "section" "serial" "parallel" "speedup" "checksum"
 printf '%-12s %10s %10s %9s   %s\n' "-------" "------" "--------" "-------" "--------"
 

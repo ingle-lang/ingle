@@ -185,7 +185,7 @@ static void cg_ensure_locals_cap(Codegen *cg, int need) {
     cg->local_struct = realloc(cg->local_struct, (size_t)cap * sizeof(*cg->local_struct));
     if (cg->locals == NULL || cg->local_drop == NULL || cg->local_phys == NULL ||
         cg->local_span == NULL || cg->local_struct == NULL) {
-        fprintf(stderr, "emberc: out of memory growing the codegen locals table\n");
+        fprintf(stderr, "inglec: out of memory growing the codegen locals table\n");
         exit(70);
     }
     cg->locals_cap = cap;
@@ -751,7 +751,7 @@ static void gen_expr_raw(Codegen *cg, const Expr *e) {
             if (e->as.call.extern_direct) {
                 fprintf(stderr,
                         "%s: error: extern \"c\" function '%s' is not in the hosted FFI registry, so "
-                        "it has no bytecode-VM binding; build native with `emberc --emit=c` / `-o`\n",
+                        "it has no bytecode-VM binding; build native with `inglec --emit=c` / `-o`\n",
                         cg->src, e->as.call.extern_cname ? e->as.call.extern_cname : "?");
                 cg->had_error = 1;
                 break;
@@ -768,7 +768,7 @@ static void gen_expr_raw(Codegen *cg, const Expr *e) {
                 int op   = (rsid < 0) ? 0xFFFF : rsid;
                 int mask = e->as.call.drop_mask;
                 // Borrowed heap args that are fresh owning temps (e.g. the literals in
-                // fopen("f","r")) must be released after the call — Ember keeps ownership across
+                // fopen("f","r")) must be released after the call — Ingle keeps ownership across
                 // the borrow (§5h pointers). Keep a copy of each below the arg region, re-fetch
                 // it as a borrow alias with OP_PICK, call, then OP_DROP_UNDER it from under the
                 // single-slot result. Mirrors the direct-call drop path (OFI-027).
@@ -2291,7 +2291,7 @@ static char *dup_str(const char *s) {
     size_t n = strlen(s);
     char *p = malloc(n + 1);
     if (p == NULL) {
-        fprintf(stderr, "emberc: out of memory\n");
+        fprintf(stderr, "inglec: out of memory\n");
         exit(70);
     }
     memcpy(p, s, n + 1);
@@ -2309,7 +2309,7 @@ static char *mangle(const char *type_name, const char *method_name) {
     size_t b = strlen(method_name);
     char *p = malloc(a + 1 + b + 1);
     if (p == NULL) {
-        fprintf(stderr, "emberc: out of memory\n");
+        fprintf(stderr, "inglec: out of memory\n");
         exit(70);
     }
     memcpy(p, type_name, a);
@@ -2503,7 +2503,7 @@ static void structtype_alloc_fields(StructType *st, int n) {
     st->kind         = malloc((size_t)m * sizeof(int));
     st->field_struct = malloc((size_t)m * sizeof(int));
     if (st->offset == NULL || st->kind == NULL || st->field_struct == NULL) {
-        fprintf(stderr, "emberc: out of memory building a struct layout\n");
+        fprintf(stderr, "inglec: out of memory building a struct layout\n");
         exit(70);
     }
 }
@@ -2513,7 +2513,7 @@ static void structtype_alloc_fields(StructType *st, int n) {
 static const char **alloc_field_names(int n) {
     const char **names = malloc((size_t)(n > 0 ? n : 1) * sizeof(const char *));
     if (names == NULL) {
-        fprintf(stderr, "emberc: out of memory building a struct's field names\n");
+        fprintf(stderr, "inglec: out of memory building a struct's field names\n");
         exit(70);
     }
     return names;
@@ -2566,7 +2566,7 @@ int codegen_program(const Program *ast, const ModuleSet *modules,
                                                            : total_functions;
     out->functions = malloc((size_t)total_slots * sizeof(Function));
     if (out->functions == NULL) {
-        fprintf(stderr, "emberc: out of memory\n");
+        fprintf(stderr, "inglec: out of memory\n");
         exit(70);
     }
     memset(out->functions, 0, (size_t)total_slots * sizeof(Function));   // checkable=0 default
@@ -2584,7 +2584,7 @@ int codegen_program(const Program *ast, const ModuleSet *modules,
         out->structs = malloc((size_t)total_structs * sizeof(StructType));
         cg_structs   = malloc((size_t)total_structs * sizeof(CgStruct));
         if (out->structs == NULL || cg_structs == NULL) {
-            fprintf(stderr, "emberc: out of memory\n");
+            fprintf(stderr, "inglec: out of memory\n");
             exit(70);
         }
         out->struct_count = total_structs;
@@ -2658,7 +2658,7 @@ int codegen_program(const Program *ast, const ModuleSet *modules,
         int nf = cg_structs[s].field_count;
         out->structs[s].field_names = malloc((size_t)(lf > 0 ? lf : 1) * sizeof(char *));
         if (out->structs[s].field_names == NULL) {
-            fprintf(stderr, "emberc: out of memory\n");
+            fprintf(stderr, "inglec: out of memory\n");
             exit(70);
         }
         for (int f = 0; f < lf; f++) {
@@ -2675,7 +2675,7 @@ int codegen_program(const Program *ast, const ModuleSet *modules,
     if (total_variants > 0) {
         cg_variants = malloc((size_t)total_variants * sizeof(CgVariant));
         if (cg_variants == NULL) {
-            fprintf(stderr, "emberc: out of memory\n");
+            fprintf(stderr, "inglec: out of memory\n");
             exit(70);
         }
     }
@@ -2685,7 +2685,7 @@ int codegen_program(const Program *ast, const ModuleSet *modules,
     out->variants = total_variants > 0
         ? malloc((size_t)total_variants * sizeof(EnumVariantInfo)) : NULL;
     if (total_variants > 0 && out->variants == NULL) {
-        fprintf(stderr, "emberc: out of memory\n");
+        fprintf(stderr, "inglec: out of memory\n");
         exit(70);
     }
     int ei = 0;   // enum id (DECL_ENUM order)
@@ -2729,7 +2729,7 @@ int codegen_program(const Program *ast, const ModuleSet *modules,
     const char   **struct_of   = malloc((size_t)total_functions * sizeof(char *));
     int           *decl_of_fi  = malloc((size_t)total_functions * sizeof(int));   // OFI-111a: fn slot -> decl index
     if (fn_by_fi == NULL || struct_of == NULL || decl_of_fi == NULL) {
-        fprintf(stderr, "emberc: out of memory\n");
+        fprintf(stderr, "inglec: out of memory\n");
         exit(70);
     }
     int fi = 0;

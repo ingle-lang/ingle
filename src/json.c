@@ -6,7 +6,7 @@
 
 // In-tree JSON (see json.h). The reader is a small recursive-descent parser over a NUL-terminated
 // buffer; the writer is a geometric-growth text buffer. No third-party dependency, in keeping with
-// Ember's empty-dependency-tree rule — the language server links nothing the compiler doesn't.
+// Ingle's empty-dependency-tree rule — the language server links nothing the compiler doesn't.
 
 struct JsonValue {
     JsonKind kind;

@@ -1,10 +1,10 @@
 #ifndef EMBER_RT_H
 #define EMBER_RT_H
 
-// The Ember native runtime, the support library that compiled-to-C Ember programs
-// link against (the `emberc --emit=c` / `emberc -o` backend, docs/architecture.md
+// The Ingle native runtime, the support library that compiled-to-C Ingle programs
+// link against (the `inglec --emit=c` / `inglec -o` backend, docs/architecture.md
 // "Decision: native backend"). It is the COUNTERPART to the bytecode VM: the VM is
-// Ember's reference semantics, and this header re-expresses those same semantics as
+// Ingle's reference semantics, and this header re-expresses those same semantics as
 // ordinary C so generated straight-line code produces bit-identical results (the
 // differential test in tests/native/ is what holds the two in lockstep).
 //
@@ -37,7 +37,7 @@
 // The reference-count primitive and the recycle-pool size, authored ONCE here so
 // the VM (src/vm.c) and the C backend's runtime (src/runtime.c) can't drift. Under
 // -DEMBER_PARALLEL the count is atomic — the only contended heap field, since
-// Ember's ownership model keeps user data race-free — else a plain inc/dec.
+// Ingle's ownership model keeps user data race-free — else a plain inc/dec.
 // OBJ_RELEASE returns the new count.
 // EMBER_MN selects the M:N green-thread scheduler (OFI-071): many lightweight fibers multiplexed
 // over a small worker pool, replacing the 1:1 pthread-per-spawn model. It is layered ON the
@@ -73,7 +73,7 @@ typedef struct EmberRt {
     Obj              *pool[POOL_CLASSES];  // size-classed recycle freelist
     const StructType *structs;             // struct-layout table (indexed by struct type id)
     int               struct_count;
-    // OFI-122: invoke an Ember function by its table index — args[0..] are its arguments, the result
+    // OFI-122: invoke an Ingle function by its table index — args[0..] are its arguments, the result
     // is returned. Each backend sets this at startup (VM: a re-entrant interpreter call; native:
     // em_invoke). drop_value uses it to run a `resource`'s user `drop(self)` during teardown. NULL
     // when unset (a program with no resources never needs it).
@@ -362,7 +362,7 @@ static inline int em_nk_bits(int nk) {
 // own process, prints the same line and exits non-zero. The differential test
 // compares stdout, so neither emits a `=> N` line on the faulting path.
 static inline void em_panic(const char *msg) {
-    fprintf(stderr, "emberc: runtime error: %s\n", msg);
+    fprintf(stderr, "inglec: runtime error: %s\n", msg);
     exit(70);
 }
 

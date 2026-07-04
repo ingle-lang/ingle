@@ -1,4 +1,4 @@
-// ledger.c — the GENERATOR half of Ledger, Ember's resource-LINEARITY fuzzer.
+// ledger.c — the GENERATOR half of Ledger, Ingle's resource-LINEARITY fuzzer.
 //
 // Crucible fuzzes runtime MEMORY ownership; Ceilings fuzzes narrow bytecode operands; Ledger fuzzes
 // the third recurring class — the compile-time MUST-CONSUME analysis for a linear `Ptr` FFI handle
@@ -11,7 +11,7 @@
 // verdict matches — catching BOTH unsoundness (a leak that compiles) and over-strictness (correct
 // code rejected, e.g. the textbook close-on-break read loop).
 //
-//   tools/ledger <seed>        prints one Ember program to stdout, prefixed with `//EXPECT:accept`
+//   tools/ledger <seed>        prints one Ingle program to stdout, prefixed with `//EXPECT:accept`
 //                              or `//EXPECT:reject` (a leak on some path).
 //
 // The generator is intentionally SIMPLE so its oracle is self-evidently correct: closes happen only at

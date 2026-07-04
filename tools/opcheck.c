@@ -1,4 +1,4 @@
-// opcheck.c — the codec half of `make opcheck` (a build-time dev tool, not shipped in emberc).
+// opcheck.c — the codec half of `make opcheck` (a build-time dev tool, not shipped in inglec).
 // It proves the operand CODEC is self-consistent: that encode∘decode is the identity for every
 // operand kind, that each opcode's spec round-trips as a whole instruction, and that the declared
 // total width matches what the codec actually reads. Paired with the -DEMBER_OPCHECK VM build

@@ -21,7 +21,7 @@ typedef struct VM VM;
 VM *vm_create(const CompiledProgram *prog);
 
 // Sets the program's command-line arguments (everything after the source file), surfaced
-// to Ember through the `args()` builtin. Called once by the `run` driver before execution.
+// to Ingle through the `args()` builtin. Called once by the `run` driver before execution.
 void vm_set_program_args(int argc, char **argv);
 
 // Sets the entry source path, used as the `file` of a runtime Fault. Called once by the

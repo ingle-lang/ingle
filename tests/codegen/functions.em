@@ -1,7 +1,0 @@
-// functions.em — locks multi-function bytecode and the OP_CALL instruction.
-fn add(a: int, b: int) -> int {
-    return a + b
-}
-fn main() -> int {
-    return add(2, 3)
-}

@@ -1,1 +1,1 @@
-tests/run/error_scope_exit.em:6:12: error: undefined variable
+tests/run/error_scope_exit.ig:6:12: error: undefined variable

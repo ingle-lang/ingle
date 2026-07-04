@@ -5,4 +5,4 @@ set -e
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
 make net-graphics >/dev/null
-exec build/emberc-net-gfx --emit=run public/claude-desktop/flare_chat.em
+exec build/inglec-net-gfx --emit=run public/claude-desktop/flare_chat.ig

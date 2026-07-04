@@ -1,6 +1,6 @@
 // gen_editor_assets — emit editors/vscode/syntaxes/ember.tmLanguage.json from the single
-// source of truth (include/vocab.def). A build-time-only developer tool, NOT part of emberc:
-// emberc is what users and editors run; tools/ is what we run to maintain checked-in artifacts
+// source of truth (include/vocab.def). A build-time-only developer tool, NOT part of inglec:
+// inglec is what users and editors run; tools/ is what we run to maintain checked-in artifacts
 // (OFI-033). The structural grammar rules (strings, numbers, operators, the fn-name capture)
 // are authored here as literals; only the keyword / primitive / builtin alternations come from
 // the table — so adding a word to vocab.def reflows the grammar with no hand-editing.
@@ -78,9 +78,9 @@ int main(void) {
 
     L("{");
     L("  \"$schema\": \"https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json\",");
-    L("  \"name\": \"Ember\",");
+    L("  \"name\": \"Ingle\",");
     L("  \"scopeName\": \"source.ember\",");
-    L("  \"fileTypes\": [\"em\"],");
+    L("  \"fileTypes\": [\"ig\"],");
     L("  \"patterns\": [");
     L("    { \"include\": \"#comments\" },");
     L("    { \"include\": \"#strings\" },");

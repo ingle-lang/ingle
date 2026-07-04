@@ -5,4 +5,4 @@ set -e
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
 make net >/dev/null
-exec build/emberc-net --emit=run public/claude-desktop/chat.em "$@"
+exec build/inglec-net --emit=run public/claude-desktop/chat.ig "$@"

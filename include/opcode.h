@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// The single source of truth for Ember's bytecode instruction set.
+// The single source of truth for Ingle's bytecode instruction set.
 //
 // Each row is  X(enum-name, "mnemonic", OPERANDS)  where OPERANDS is OPS0()..OPS5(...) listing each
 // inline operand's KIND in stream order (OperandKind below). One declaration drives four things that

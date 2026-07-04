@@ -29,7 +29,7 @@ static size_t align_up(size_t n, size_t align) {
 static ArenaBlock *new_block(size_t capacity) {
     ArenaBlock *block = malloc(sizeof(ArenaBlock) + capacity);
     if (block == NULL) {
-        fprintf(stderr, "emberc: out of memory (arena)\n");
+        fprintf(stderr, "inglec: out of memory (arena)\n");
         exit(70);
     }
     block->next     = NULL;

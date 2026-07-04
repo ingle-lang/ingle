@@ -36,7 +36,7 @@ typedef int SemType;
 #define TY_INFER (-16)   // a lambda whose return type is inferred from its body
 #define TY_PTR   (-17)   // FFI (§5h): an opaque C pointer/handle (e.g. FILE*). Round-trips to
                          // and from `extern "c"` calls; its bits live in the int64 slot (the
-                         // erased value model), and it is never dereferenced from Ember.
+                         // erased value model), and it is never dereferenced from Ingle.
 
 // The non-negative range is partitioned into bands (no program approaches a
 // million of anything, so the split is safe and keeps existing id comparisons
@@ -251,7 +251,7 @@ typedef struct {
     int         move_line; // where the move happened (0 = not directly moved here),
     int         move_col;  // so a use-after-move can point a "moved here" note at it
     // Linearity (OFI-049 leak half). A `Ptr` is a LINEAR FFI handle: move-only (affine, the
-    // double-close half) AND must-consume (it has no Ember destructor, so leaving scope without
+    // double-close half) AND must-consume (it has no Ingle destructor, so leaving scope without
     // being closed/returned leaks). `consumed` is the AND-merge dual of `moved`'s OR-merge: it is 1
     // only when the binding has been moved out on EVERY path reaching this point (vs `moved` = on
     // SOME path). `leaked` is a monotonic latch so one un-closed handle is reported once, not at
@@ -421,7 +421,7 @@ typedef struct {
                                       // function (no bytecode slot); -1 for an ordinary function
     int         direct_extern;        // OFI-167: an `extern "c"` fn NOT in the hosted registry — the
                                       // native backend emits a direct call to `name`; the VM has no
-                                      // binding (native-only). 0 for a registry extern or Ember fn.
+                                      // binding (native-only). 0 for a registry extern or Ingle fn.
     const FnDecl *decl;               // the function's AST declaration — its source position and
                                       // (via the shared formatter) its signature, for the LSP index
 } FnSig;
@@ -592,7 +592,7 @@ static int is_move_type(Checker *c, SemType t) {
         // An opaque C handle (FILE*, …) is move-only (OFI-049): the move checker then tracks it
         // like a unique resource, so closing it (a `move` consume — fclose(move f: Ptr)) marks the
         // binding moved and any reuse is a use-after-move compile error (no double-close). It is NOT
-        // a refcounted shareable and has NO Ember-side destructor — see the TY_PTR carve-outs in
+        // a refcounted shareable and has NO Ingle-side destructor — see the TY_PTR carve-outs in
         // is_owning_temp, drop_locals, and the param release, which keep it from being freed.
         return 1;
     }
@@ -1233,7 +1233,7 @@ static void type_error(Checker *c, int line, int col, const char *msg) {
 
 // ptr_storage_error rejects a `Ptr` used where it would be STORED inside an aggregate — an array or
 // slice element, a struct/enum field, a channel element, or a generic type argument. A `Ptr` is a
-// LINEAR FFI handle with no Ember destructor (OFI-049): it must live in a local and be closed on every
+// LINEAR FFI handle with no Ingle destructor (OFI-049): it must live in a local and be closed on every
 // path. An aggregate cannot discharge that obligation (and under generic erasure the body is checked
 // once with the parameter as `PARAM_BASE+k`, so no value-site `TY_PTR` guard ever sees it), so the
 // only sound rule is to forbid the type from forming. `where` names the offending position. Returns 1
@@ -2753,7 +2753,7 @@ static int consume(Checker *c, Expr *e, SemType t, int line, int col) {
 // a value an existing owner still holds; and a bare local has its own scope-exit drop.
 // (Before this, an owned STRUCT temporary discarded at a statement leaked — OFI-027.)
 static int is_owning_temp(Checker *c, Expr *e, SemType t) {
-    // A Ptr is move-tracked (OFI-049) but is a raw C handle Ember never frees, so it is NEVER an
+    // A Ptr is move-tracked (OFI-049) but is a raw C handle Ingle never frees, so it is NEVER an
     // owning temp the caller must drop — without this, a fresh handle temp (`fclose(fopen(...))`)
     // would be drop-masked into a dead OP_DROP_UNDER (drop_value no-ops on it, but it is spurious).
     if (t == TY_PTR) {
@@ -2901,7 +2901,7 @@ static Expr *synth_show_call(Checker *c, Expr *recv, SemType recv_ty,
     call->as.call.box_result   = 0;
     call->as.call.cextern_index = -1;
     call->as.call.cextern_ret_sid = -1;
-    call->as.call.extern_direct = 0;   // OFI-167: show() is an Ember call, never a direct extern
+    call->as.call.extern_direct = 0;   // OFI-167: show() is an Ingle call, never a direct extern
     call->as.call.extern_cname  = NULL;
     return call;
 }
@@ -3138,7 +3138,7 @@ static SemType check_fn_call(Checker *c, Expr *e, FnSig *sig, SemType expected) 
     }
     // A foreign (C) call BORROWS its heap arguments for the call's duration (§5h pointers):
     // a `string`/buffer/`Ptr` is never consumed or moved — the wrapper only reads through it,
-    // and Ember keeps ownership. So skip the consume below; the only thing the caller must do
+    // and Ingle keeps ownership. So skip the consume below; the only thing the caller must do
     // is release a fresh OWNING TEMP afterward (e.g. the literals in `fopen("f","r")`), which
     // the drop_mask path handles exactly like an owned struct temp.
     int is_extern = sig->cextern_index >= 0 || sig->direct_extern;   // OFI-167: direct externs borrow too
@@ -3313,7 +3313,7 @@ static SemType check_fn_call(Checker *c, Expr *e, FnSig *sig, SemType expected) 
     if (wtotal > 0) {
         ws = malloc(sizeof(Witness) * (size_t)wtotal);
         if (ws == NULL) {
-            fprintf(stderr, "emberc: out of memory building witnesses\n");
+            fprintf(stderr, "inglec: out of memory building witnesses\n");
             exit(70);
         }
     }
@@ -4706,7 +4706,7 @@ static SemType check_expr_inner(Checker *c, Expr *e) {
             }
 
             // Built-in numeric conversions `to_float(int)` / `to_int(float)`.
-            // Ember performs no implicit int/float coercion, so a program crossing
+            // Ingle performs no implicit int/float coercion, so a program crossing
             // the two converts explicitly. `to_int` truncates toward zero.
             if (callee->kind == EXPR_IDENT && strcmp(callee->as.ident, "to_float") == 0) {
                 if (argc != 1) {
@@ -5203,7 +5203,7 @@ static SemType check_expr_inner(Checker *c, Expr *e) {
             if (si->witness_count > 0) {
                 Witness *ws = malloc(sizeof(Witness) * (size_t)si->witness_count);
                 if (ws == NULL) {
-                    fprintf(stderr, "emberc: out of memory building struct witnesses\n");
+                    fprintf(stderr, "inglec: out of memory building struct witnesses\n");
                     exit(70);
                 }
                 int wi = 0;
@@ -7245,7 +7245,7 @@ static void check_callable(Checker *c, const FnDecl *fn, SemType self_type,
     //
     // NOTE (OFI-026, CLOSED 2026-06-13): `ensures` on a unit-returning function IS
     // allowed — a void `mut self` mutator may state a postcondition on its own state
-    // (std/ui.em's `begin(mut self) ensures self.cx == self.style.pad` relies on it).
+    // (std/ui.ig's `begin(mut self) ensures self.cx == self.style.pad` relies on it).
     // Enabling it once surfaced an order-dependent corruption of cross-module call
     // resolution, but the root cause was an uninitialised `closure_call` field in
     // `new_expr` (the arena does not zero memory), NOT the contract check itself —
@@ -7434,7 +7434,7 @@ static void collect_signature(Checker *c, const FnDecl *fn) {
             p->is_self ? TY_ERROR : annotation_type(c, p->type);
     }
     sig->ret = fn->return_type ? annotation_type(c, fn->return_type) : TY_UNIT;
-    sig->cextern_index = -1;   // an ordinary Ember function (not a foreign C function)
+    sig->cextern_index = -1;   // an ordinary Ingle function (not a foreign C function)
     sig->direct_extern = 0;    // OFI-167: not an extern at all
     leave_type_params(c);
 }
@@ -7954,8 +7954,8 @@ static int type_satisfies_bound(Checker *c, SemType t, int iid) {
 
 
 // build_witness allocates the vtable for (type, interface): the method fn-indices in
-// interface-method order. For a STRUCT they are the impl's real Ember methods; for a
-// built-in scalar/string satisfying Hash/Eq there is no Ember method, so the slot holds
+// interface-method order. For a STRUCT they are the impl's real Ingle methods; for a
+// built-in scalar/string satisfying Hash/Eq there is no Ingle method, so the slot holds
 // a NATIVE id offset by WITNESS_NATIVE_BASE (the indirect-call opcodes detect and call
 // it). Used by generic-bound dispatch (witness passed as a hidden arg), dynamic dispatch
 // (witness boxed into the value), and Map's stored key witnesses. Caller owns the array.
@@ -7964,7 +7964,7 @@ static int *build_witness(Checker *c, SemType type, int iid, int *out_count) {
     int n = ii->method_count > 0 ? ii->method_count : 1;
     int *w = malloc(sizeof(int) * (size_t)n);
     if (w == NULL) {
-        fprintf(stderr, "emberc: out of memory building a witness\n");
+        fprintf(stderr, "inglec: out of memory building a witness\n");
         exit(70);
     }
     for (int m = 0; m < ii->method_count; m++) {
@@ -8395,7 +8395,7 @@ static void build_mono_instances(Checker *c, const Program *program,
     const FnDecl **fn_by_fi   = malloc((size_t)(table_fns > 0 ? table_fns : 1) * sizeof(*fn_by_fi));
     int           *fi_generic = malloc((size_t)(table_fns > 0 ? table_fns : 1) * sizeof(*fi_generic));
     if (fn_by_fi == NULL || fi_generic == NULL) {
-        fprintf(stderr, "emberc: out of memory enumerating functions\n");
+        fprintf(stderr, "inglec: out of memory enumerating functions\n");
         exit(70);
     }
     int fi = 0;
@@ -8489,7 +8489,7 @@ static void build_mono_instances(Checker *c, const Program *program,
     plan->res           = malloc(sizeof(MonoPlanRes) *
                                  (m.res_count > 0 ? m.res_count : 1));
     if (plan->base_of == NULL || plan->res == NULL) {
-        fprintf(stderr, "emberc: out of memory building the mono plan\n");
+        fprintf(stderr, "inglec: out of memory building the mono plan\n");
         exit(70);
     }
     for (int s = 0; s < appended; s++) {
@@ -8584,7 +8584,7 @@ static void build_layouts(Checker *c, StructLayout **out_layouts, int *out_count
     int n = c->struct_count + c->sinst_count;
     StructLayout *L = malloc(sizeof(StructLayout) * (n > 0 ? n : 1));
     if (L == NULL) {
-        fprintf(stderr, "emberc: out of memory building struct layouts\n");
+        fprintf(stderr, "inglec: out of memory building struct layouts\n");
         exit(70);
     }
     // The declared structs, in id order.

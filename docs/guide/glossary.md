@@ -11,7 +11,7 @@ nav_order: 7
 **Borrow** — using a value without taking ownership of it; the default for parameters.
 
 **Closure** — a function value that has captured variables from where it was created (by value,
-in Ember).
+in Ingle).
 
 **Contract** — a `requires`/`ensures` specification attached to a function; checked in debug,
 elided in release.
@@ -37,7 +37,7 @@ carrying typed fields.
 parameter or return type), which is the condition for using it as a value type for dynamic
 dispatch. Non-object-safe interfaces are still usable as generic bounds.
 
-**Option** — `Some(value)` or `None`; Ember's "maybe a value," replacing `null`.
+**Option** — `Some(value)` or `None`; Ingle's "maybe a value," replacing `null`.
 
 **Prelude** — the handful of types (`Option`, `Result`) injected into every program
 automatically.

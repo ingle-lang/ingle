@@ -1,7 +1,0 @@
-// call_add.em — a function call with arguments. add(2,3) = 5.
-fn add(a: int, b: int) -> int {
-    return a + b
-}
-fn main() -> int {
-    return add(2, 3)
-}

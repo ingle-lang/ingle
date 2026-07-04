@@ -1,5 +1,5 @@
 #!/bin/sh
-# crucible.sh — the DRIVER half of Crucible, Ember's memory-ownership fuzzer.
+# crucible.sh — the DRIVER half of Crucible, Ingle's memory-ownership fuzzer.
 #
 # Generates programs (tools/crucible <seed> <loops>) and runs each through five ORACLES — the
 # double-drop detector, a VM-fault check, ASan, an RSS leak check, and the VM↔native differential.
@@ -13,14 +13,14 @@
 
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-export EMBER_STD="$ROOT/std"
+export INGLE_STD="$ROOT/std"
 GEN="$ROOT/build/crucible"
 # Binaries are overridable so the same generated memory-ownership corpus can be re-run against a
-# different runtime — e.g. CRUCIBLE_EMB=build/emberc-mn CRUCIBLE_ASAN=build/emberc-asan-mn to check the
+# different runtime — e.g. CRUCIBLE_EMB=build/inglec-mn CRUCIBLE_ASAN=build/inglec-asan-mn to check the
 # value-struct/generic/aggregate bug class still holds when `main` runs as an M:N scheduler fiber.
-EMB="${CRUCIBLE_EMB:-$ROOT/build/emberc}"
-DT="${CRUCIBLE_DT:-$ROOT/build/emberc-dt}"
-ASAN="${CRUCIBLE_ASAN:-$ROOT/build/emberc-asan}"
+EMB="${CRUCIBLE_EMB:-$ROOT/build/inglec}"
+DT="${CRUCIBLE_DT:-$ROOT/build/inglec-dt}"
+ASAN="${CRUCIBLE_ASAN:-$ROOT/build/inglec-asan}"
 
 # ASan parity with macOS: gcc's ASan enables LeakSanitizer by default on Linux, which fires on the
 # compiler's intentional bump-arena retention at exit (a non-bug) and duplicates the RSS leak oracle
@@ -52,7 +52,7 @@ if [ ! -x "$ASAN" ] || [ "$newest_src" -nt "$ASAN" ]; then
     (cd "$ROOT" && make asan >/dev/null 2>&1)
 fi
 
-# rss_of <program.em> -> peak resident KB for one VM run (leak oracle uses this). macOS /usr/bin/time
+# rss_of <program.ig> -> peak resident KB for one VM run (leak oracle uses this). macOS /usr/bin/time
 # -l reports the peak in BYTES; GNU /usr/bin/time -v reports it in KBYTES — normalise both to KB. If
 # /usr/bin/time is absent (the `time` package isn't installed on Linux), return 0 so the leak oracle
 # is skipped cleanly rather than mis-firing on an empty reading.
@@ -66,10 +66,10 @@ rss_of() {
     fi
 }
 
-# classify <program.em> <seed> -> a one-line failure SIGNATURE, or "" if all oracles pass.
+# classify <program.ig> <seed> -> a one-line failure SIGNATURE, or "" if all oracles pass.
 classify() {
     em="$1"; seed="$2"
-    # 1) double-drop detector — and tell a RUNTIME error (a real fault) from a `file.em:line: error:`
+    # 1) double-drop detector — and tell a RUNTIME error (a real fault) from a `file.ig:line: error:`
     #    COMPILE error (a generator over-reach), since both contain "error:".
     dt=$("$DT" --emit=run "$em" 2>&1)
     if printf '%s' "$dt" | grep -q "DOUBLE-DROP"; then
@@ -78,7 +78,7 @@ classify() {
     if printf '%s' "$dt" | grep -qE "runtime error:"; then
         printf 'vm-fault:%s\n' "$(printf '%s' "$dt" | grep -oE 'runtime error: [a-z ]+' | head -1)"; return
     fi
-    if printf '%s' "$dt" | grep -qE "\.em:[0-9]+:[0-9]+: error:"; then echo "gen-compile-error"; return; fi
+    if printf '%s' "$dt" | grep -qE "\.ig:[0-9]+:[0-9]+: error:"; then echo "gen-compile-error"; return; fi
     # reference VM output (the drop-trace run above was clean, so this is the canonical result)
     vm=$("$EMB" --emit=run "$em" 2>&1)
     # 2) ASan
@@ -95,33 +95,33 @@ classify() {
         echo "native-compile-fail"; return
     fi
     # 4) RSS leak: regenerate the same seed small vs large; flag super-linear growth.
-    "$GEN" "$seed" 50   > "$TMP/lo.em"
-    "$GEN" "$seed" 6000 > "$TMP/hi.em"
-    rlo=$(rss_of "$TMP/lo.em"); rhi=$(rss_of "$TMP/hi.em")
+    "$GEN" "$seed" 50   > "$TMP/lo.ig"
+    "$GEN" "$seed" 6000 > "$TMP/hi.ig"
+    rlo=$(rss_of "$TMP/lo.ig"); rhi=$(rss_of "$TMP/hi.ig")
     if [ "$rhi" -gt $((rlo * 4)) ] && [ $((rhi - rlo)) -gt 40000 ]; then
         echo "leak"; return
     fi
     echo ""
 }
 
-# shrink <program.em> <signature> -> minimal repro (greedily delete op functions while the signature
+# shrink <program.ig> <signature> -> minimal repro (greedily delete op functions while the signature
 # holds). Prints the reduced program.
 shrink() {
-    cp "$1" "$TMP/work.em"; sig="$2"; changed=1
+    cp "$1" "$TMP/work.ig"; sig="$2"; changed=1
     while [ "$changed" = 1 ]; do
         changed=0
-        for k in $(grep -oE '^fn op[0-9]+' "$TMP/work.em" | grep -oE '[0-9]+'); do
+        for k in $(grep -oE '^fn op[0-9]+' "$TMP/work.ig" | grep -oE '[0-9]+'); do
             awk -v k="$k" '
                 $0 ~ ("^fn op" k "\\(\\) ") || $0 ~ ("^fn op" k "\\(\\)$") { skip=1 }
                 skip && /^}/ { skip=0; next }
                 skip { next }
                 $0 ~ ("total \\+ op" k "\\(\\)$") { next }
                 { print }
-            ' "$TMP/work.em" > "$TMP/cand.em"
-            if [ "$(classify "$TMP/cand.em" 0)" = "$sig" ]; then cp "$TMP/cand.em" "$TMP/work.em"; changed=1; fi
+            ' "$TMP/work.ig" > "$TMP/cand.ig"
+            if [ "$(classify "$TMP/cand.ig" 0)" = "$sig" ]; then cp "$TMP/cand.ig" "$TMP/work.ig"; changed=1; fi
         done
     done
-    cat "$TMP/work.em"
+    cat "$TMP/work.ig"
 }
 
 # A signature listed in tools/crucible-known.txt is a tracked, already-filed finding (so a run only
@@ -138,8 +138,8 @@ say "crucible: running $COUNT plain + $rc_count rc seeds through 5 oracles…"
 seen=" "; finds=0; new=0; clean=0
 run_seed() {
     s="$1"
-    "$GEN" "$s" 30 > "$TMP/p.em"
-    sig=$(classify "$TMP/p.em" "$s")
+    "$GEN" "$s" 30 > "$TMP/p.ig"
+    sig=$(classify "$TMP/p.ig" "$s")
     if [ -n "$sig" ]; then
         case "$seen" in
             *" $sig "*) : ;;
@@ -147,8 +147,8 @@ run_seed() {
                 seen="$seen$sig "
                 finds=$((finds + 1))
                 safe=$(printf '%s' "$sig" | tr -c 'A-Za-z0-9' '_')
-                out="$FINDS/find${finds}_${safe}.em"
-                shrink "$TMP/p.em" "$sig" > "$out"
+                out="$FINDS/find${finds}_${safe}.ig"
+                shrink "$TMP/p.ig" "$sig" > "$out"
                 ops=$(grep -c '^fn op' "$out")
                 if is_known "$sig"; then
                     say "── [known] [$sig]  seed=$s  (minimal: $ops op)"

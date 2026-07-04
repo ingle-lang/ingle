@@ -1,13 +1,13 @@
 #!/bin/sh
 # tests/run-selfhost.sh — differential harness for the self-hosting bootstrap (docs/design/self-hosting.md).
 #
-# Each tests/selfhost/*.em is a compiler-shaped program — recursive ASTs, symbol tables, the lex/parse/eval
+# Each tests/selfhost/*.ig is a compiler-shaped program — recursive ASTs, symbol tables, the lex/parse/eval
 # shapes the reference compiler is built from. The point of the tier is to prove the language can express
 # and run those shapes IDENTICALLY on both backends before any real stage is ported, so every case is run
 # two ways and their stdout compared:
 #
-#   * on the bytecode VM:        emberc --emit=run X.em
-#   * as a compiled native binary: emberc -o <bin> X.em  then run <bin>
+#   * on the bytecode VM:        emberc --emit=run X.ig
+#   * as a compiled native binary: emberc -o <bin> X.ig  then run <bin>
 #
 # PASS iff the two stdouts are byte-identical — the same drift guard tests/native applies to the native
 # backend, here pointed at the self-hosting prerequisites. (Only stdout is compared: structured Faults are
@@ -48,10 +48,10 @@ fi
 pass=0
 fail=0
 
-for src in "$ROOT"/tests/selfhost/*.em; do
+for src in "$ROOT"/tests/selfhost/*.ig; do
     [ -e "$src" ] || continue
     rel=${src#"$ROOT"/}
-    base=$(basename "${src%.em}")
+    base=$(basename "${src%.ig}")
 
     # Reference run: the bytecode VM. A non-zero exit (e.g. an uncaught Fault) makes the program's
     # behaviour undefined for the differential, so treat a VM compile/run failure as a hard FAIL.
@@ -98,31 +98,31 @@ for src in "$ROOT"/tests/selfhost/*.em; do
     fi
 done
 
-# ---- Stage 1: the self-hosted lexer (selfhost/lexer.em) ------------------------------------------
+# ---- Stage 1: the self-hosted lexer (selfhost/lexer.ig) ------------------------------------------
 # Its token dump must be byte-identical to stage-0's `emberc --emit=tokens` over the WHOLE corpus — the
-# Stage 1 differential (docs/design/self-hosting.md). Compile the Ember lexer ONCE to a native binary
-# (fast) and diff its output against the stage-0 oracle for every .em under examples/, tests/, std/,
+# Stage 1 differential (docs/design/self-hosting.md). Compile the Ingle lexer ONCE to a native binary
+# (fast) and diff its output against the stage-0 oracle for every .ig under examples/, tests/, std/,
 # selfhost/; with no cc, fall back to the VM (`--emit=run`, slower). The trailing `=> 0` line the run
 # driver/binary prints is stripped. Only stdout is compared (stage-0 lex diagnostics go to stderr).
-LEXSRC="$ROOT/selfhost/lex_dump.em"
+LEXSRC="$ROOT/selfhost/lex_dump.ig"
 if [ -f "$LEXSRC" ]; then
     lexbin=""
     if [ "$HAVE_CC" -eq 1 ]; then
         lexbin="${TMPDIR:-/tmp}/emberc_selfhost_lexer_$$"
-        if ! (cd "$ROOT" && "$BIN" -o "$lexbin" selfhost/lex_dump.em >/dev/null 2>&1); then
-            echo "FAIL    selfhost/lex_dump.em  (native compile failed)"
+        if ! (cd "$ROOT" && "$BIN" -o "$lexbin" selfhost/lex_dump.ig >/dev/null 2>&1); then
+            echo "FAIL    selfhost/lex_dump.ig  (native compile failed)"
             fail=$((fail + 1))
             lexbin=""
         fi
     fi
     lpass=0
     lfail=0
-    for src in $(cd "$ROOT" && find examples tests std selfhost -name '*.em' | sort); do
+    for src in $(cd "$ROOT" && find examples tests std selfhost -name '*.ig' | sort); do
         oracle=$(cd "$ROOT" && "$BIN" --emit=tokens "$src" 2>/dev/null)
         if [ -n "$lexbin" ]; then
             actual=$(cd "$ROOT" && "$lexbin" "$src" 2>/dev/null | sed '/^=> 0$/d')
         else
-            actual=$(cd "$ROOT" && "$BIN" --emit=run selfhost/lex_dump.em "$src" 2>/dev/null | sed '/^=> 0$/d')
+            actual=$(cd "$ROOT" && "$BIN" --emit=run selfhost/lex_dump.ig "$src" 2>/dev/null | sed '/^=> 0$/d')
         fi
         if [ "$oracle" = "$actual" ]; then
             lpass=$((lpass + 1))
@@ -145,17 +145,17 @@ if [ -f "$LEXSRC" ]; then
     fail=$((fail + lfail))
 fi
 
-# ---- Stage 2: the self-hosted parser (selfhost/parser.em via parse_dump.em) ----------------------
+# ---- Stage 2: the self-hosted parser (selfhost/parser.ig via parse_dump.ig) ----------------------
 # Its AST dump must be byte-identical to stage-0's `emberc --emit=ast` over the corpus's VALID programs
 # (docs/design/self-hosting.md). Files the stage-0 parser REJECTS (non-zero exit — deliberately malformed
 # error-recovery tests) are skipped: matching error-recovery trees is a separate, out-of-scope goal.
-PARSESRC="$ROOT/selfhost/parse_dump.em"
+PARSESRC="$ROOT/selfhost/parse_dump.ig"
 if [ -f "$PARSESRC" ]; then
     parsebin=""
     if [ "$HAVE_CC" -eq 1 ]; then
         parsebin="${TMPDIR:-/tmp}/emberc_selfhost_parser_$$"
-        if ! (cd "$ROOT" && "$BIN" -o "$parsebin" selfhost/parse_dump.em >/dev/null 2>&1); then
-            echo "FAIL    selfhost/parse_dump.em  (native compile failed)"
+        if ! (cd "$ROOT" && "$BIN" -o "$parsebin" selfhost/parse_dump.ig >/dev/null 2>&1); then
+            echo "FAIL    selfhost/parse_dump.ig  (native compile failed)"
             fail=$((fail + 1))
             parsebin=""
         fi
@@ -163,7 +163,7 @@ if [ -f "$PARSESRC" ]; then
     ppass=0
     pfail=0
     pskip=0
-    for src in $(cd "$ROOT" && find examples tests std selfhost -name '*.em' | sort); do
+    for src in $(cd "$ROOT" && find examples tests std selfhost -name '*.ig' | sort); do
         # Skip files the reference parser rejects (malformed / error-recovery tests).
         if ! (cd "$ROOT" && "$BIN" --emit=ast "$src" >/dev/null 2>&1); then
             pskip=$((pskip + 1))
@@ -173,7 +173,7 @@ if [ -f "$PARSESRC" ]; then
         if [ -n "$parsebin" ]; then
             actual=$(cd "$ROOT" && "$parsebin" "$src" 2>/dev/null | sed '/^=> 0$/d')
         else
-            actual=$(cd "$ROOT" && "$BIN" --emit=run selfhost/parse_dump.em "$src" 2>/dev/null | sed '/^=> 0$/d')
+            actual=$(cd "$ROOT" && "$BIN" --emit=run selfhost/parse_dump.ig "$src" 2>/dev/null | sed '/^=> 0$/d')
         fi
         if [ "$oracle" = "$actual" ]; then
             ppass=$((ppass + 1))
@@ -196,7 +196,7 @@ if [ -f "$PARSESRC" ]; then
     fail=$((fail + pfail))
 fi
 
-# ---- Stage 3: the self-hosted checker (selfhost/checker.em via check_dump.em) ---------------------
+# ---- Stage 3: the self-hosted checker (selfhost/checker.ig via check_dump.ig) ---------------------
 # The driver prints ACCEPT (no diagnostics) or REJECT; we compare its verdict to stage-0's
 # `emberc --emit=bytecode` (exit 0 = accepts, non-zero = a check error) over the corpus. M3 is built in
 # stages, so it does not yet REJECT every ill-typed program — the verdict-match rate is therefore REPORTED,
@@ -204,13 +204,13 @@ fi
 # stage-0 accepts (a false rejection is a real bug, where a missed rejection is just unfinished work). Files
 # whose accept/reject depends on an opt-in build profile (net/db/http/sqlite/sse) or that are lexer-error
 # fixtures are excluded — their builtins/shape are out of scope for the default-profile checker.
-CHECKSRC="$ROOT/selfhost/check_dump.em"
+CHECKSRC="$ROOT/selfhost/check_dump.ig"
 if [ -f "$CHECKSRC" ]; then
     checkbin=""
     if [ "$HAVE_CC" -eq 1 ]; then
         checkbin="${TMPDIR:-/tmp}/emberc_selfhost_checker_$$"
-        if ! (cd "$ROOT" && "$BIN" -o "$checkbin" selfhost/check_dump.em >/dev/null 2>&1); then
-            echo "FAIL    selfhost/check_dump.em  (native compile failed)"
+        if ! (cd "$ROOT" && "$BIN" -o "$checkbin" selfhost/check_dump.ig >/dev/null 2>&1); then
+            echo "FAIL    selfhost/check_dump.ig  (native compile failed)"
             fail=$((fail + 1))
             checkbin=""
         fi
@@ -218,7 +218,7 @@ if [ -f "$CHECKSRC" ]; then
     cmatch=0
     cmiss=0
     cfalse=0
-    for src in $(cd "$ROOT" && find examples tests std selfhost -name '*.em' | grep -vE 'tests/(net|db)/|std/(http|sqlite|sse)|tests/lexer/errors' | sort); do
+    for src in $(cd "$ROOT" && find examples tests std selfhost -name '*.ig' | grep -vE 'tests/(net|db)/|std/(http|sqlite|sse)|tests/lexer/errors' | sort); do
         if (cd "$ROOT" && "$BIN" --emit=bytecode "$src" >/dev/null 2>&1); then
             oracle="ACCEPT"
         else
@@ -227,7 +227,7 @@ if [ -f "$CHECKSRC" ]; then
         if [ -n "$checkbin" ]; then
             mine=$(cd "$ROOT" && "$checkbin" "$src" 2>/dev/null | grep -E 'REJECT|ACCEPT')
         else
-            mine=$(cd "$ROOT" && "$BIN" --emit=run selfhost/check_dump.em "$src" 2>/dev/null | grep -E 'REJECT|ACCEPT')
+            mine=$(cd "$ROOT" && "$BIN" --emit=run selfhost/check_dump.ig "$src" 2>/dev/null | grep -E 'REJECT|ACCEPT')
         fi
         if [ "$oracle" = "$mine" ]; then
             cmatch=$((cmatch + 1))
@@ -245,30 +245,30 @@ if [ -f "$CHECKSRC" ]; then
     fail=$((fail + cfalse))
 fi
 
-# ---- Stage 4: the self-hosted bytecode backend (selfhost/codegen.em via codegen_dump.em) -----------
+# ---- Stage 4: the self-hosted bytecode backend (selfhost/codegen.ig via codegen_dump.ig) -----------
 # Its disassembly must be BYTE-IDENTICAL to stage-0 `emberc --emit=bytecode` (offsets, opcodes, operands,
-# constant pool, AND the source-line column) over the M4 codegen fixtures (tests/selfhost/codegen/*.em —
+# constant pool, AND the source-line column) over the M4 codegen fixtures (tests/selfhost/codegen/*.ig —
 # the scalar subset implemented so far: int/bool arithmetic, locals, user-fn calls, returns). The fixture
 # set grows as M4 coverage grows; a hard FAIL on any divergence locks in each increment.
-CGSRC="$ROOT/selfhost/codegen_dump.em"
+CGSRC="$ROOT/selfhost/codegen_dump.ig"
 if [ -f "$CGSRC" ]; then
     cgbin=""
     if [ "$HAVE_CC" -eq 1 ]; then
         cgbin="${TMPDIR:-/tmp}/emberc_selfhost_codegen_$$"
-        if ! (cd "$ROOT" && "$BIN" -o "$cgbin" selfhost/codegen_dump.em >/dev/null 2>&1); then
-            echo "FAIL    selfhost/codegen_dump.em  (native compile failed)"
+        if ! (cd "$ROOT" && "$BIN" -o "$cgbin" selfhost/codegen_dump.ig >/dev/null 2>&1); then
+            echo "FAIL    selfhost/codegen_dump.ig  (native compile failed)"
             fail=$((fail + 1))
             cgbin=""
         fi
     fi
     cgpass=0
     cgfail=0
-    for src in $(cd "$ROOT" && find tests/selfhost/codegen -name '*.em' 2>/dev/null | sort); do
+    for src in $(cd "$ROOT" && find tests/selfhost/codegen -name '*.ig' 2>/dev/null | sort); do
         oracle=$(cd "$ROOT" && "$BIN" --emit=bytecode "$src" 2>/dev/null)
         if [ -n "$cgbin" ]; then
             actual=$(cd "$ROOT" && "$cgbin" "$src" 2>/dev/null | sed '/^=> 0$/d')
         else
-            actual=$(cd "$ROOT" && "$BIN" --emit=run selfhost/codegen_dump.em "$src" 2>/dev/null | sed '/^=> 0$/d')
+            actual=$(cd "$ROOT" && "$BIN" --emit=run selfhost/codegen_dump.ig "$src" 2>/dev/null | sed '/^=> 0$/d')
         fi
         if [ "$oracle" = "$actual" ]; then
             cgpass=$((cgpass + 1))
@@ -287,12 +287,12 @@ if [ -f "$CGSRC" ]; then
     done
     # Self-compiling WHOLE MODULES: real compiler modules the self-hosted backend now reproduces
     # byte-identically end-to-end (not just curated fixtures). The list grows as each module goes green.
-    for m in selfhost/lexer.em selfhost/parser.em selfhost/checker.em selfhost/codegen.em; do
+    for m in selfhost/lexer.ig selfhost/parser.ig selfhost/checker.ig selfhost/codegen.ig; do
         oracle=$(cd "$ROOT" && "$BIN" --emit=bytecode "$m" 2>/dev/null)
         if [ -n "$cgbin" ]; then
             actual=$(cd "$ROOT" && "$cgbin" "$m" 2>/dev/null | sed '/^=> 0$/d')
         else
-            actual=$(cd "$ROOT" && "$BIN" --emit=run selfhost/codegen_dump.em "$m" 2>/dev/null | sed '/^=> 0$/d')
+            actual=$(cd "$ROOT" && "$BIN" --emit=run selfhost/codegen_dump.ig "$m" 2>/dev/null | sed '/^=> 0$/d')
         fi
         if [ "$oracle" = "$actual" ]; then
             cgpass=$((cgpass + 1))
@@ -308,18 +308,18 @@ if [ -f "$CGSRC" ]; then
     fail=$((fail + cgfail))
 fi
 
-# ---- Stage 5: the UNIFIED self-hosted compiler (selfhost/emberc.em) --------------------------------
+# ---- Stage 5: the UNIFIED self-hosted compiler (selfhost/emberc.ig) --------------------------------
 # The whole pipeline (lex → parse → CHECK → codegen) as ONE program, compiled to a native self-built
 # compiler BINARY. We gate two properties: (1) it reproduces every self-hosted module's bytecode
 # byte-identically to stage-0 (the fixed point through one driver), and (2) it REJECTS an ill-typed
 # program with exit 65 while ACCEPTING a valid one. This is the first standalone-bootstrap milestone.
-EMBERCSRC="$ROOT/selfhost/emberc.em"
+EMBERCSRC="$ROOT/selfhost/emberc.ig"
 if [ -f "$EMBERCSRC" ] && [ "$HAVE_CC" -eq 1 ]; then
     selfbin="${TMPDIR:-/tmp}/emberc_self_$$"
-    if (cd "$ROOT" && "$BIN" -o "$selfbin" selfhost/emberc.em >/dev/null 2>&1); then
+    if (cd "$ROOT" && "$BIN" -o "$selfbin" selfhost/emberc.ig >/dev/null 2>&1); then
         ubpass=0
         ubfail=0
-        for m in selfhost/lexer.em selfhost/parser.em selfhost/checker.em selfhost/codegen.em; do
+        for m in selfhost/lexer.ig selfhost/parser.ig selfhost/checker.ig selfhost/codegen.ig; do
             oracle=$(cd "$ROOT" && "$BIN" --emit=bytecode "$m" 2>/dev/null)
             actual=$(cd "$ROOT" && "$selfbin" "$m" 2>/dev/null)
             if [ "$oracle" = "$actual" ]; then
@@ -330,12 +330,12 @@ if [ -f "$EMBERCSRC" ] && [ "$HAVE_CC" -eq 1 ]; then
             fi
         done
         # the check gate: an ill-typed program must be REJECTED (exit 65), a valid one ACCEPTED (exit 0)
-        if (cd "$ROOT" && "$selfbin" tests/run/error_newtype_arith.em >/dev/null 2>&1); then
+        if (cd "$ROOT" && "$selfbin" tests/run/error_newtype_arith.ig >/dev/null 2>&1); then
             ubfail=$((ubfail + 1)); echo "FAIL    unified emberc-self accepted an ill-typed program"
         else
             ubpass=$((ubpass + 1))
         fi
-        if (cd "$ROOT" && "$selfbin" examples/01_hello.em >/dev/null 2>&1); then
+        if (cd "$ROOT" && "$selfbin" examples/01_hello.ig >/dev/null 2>&1); then
             ubpass=$((ubpass + 1))
         else
             ubfail=$((ubfail + 1)); echo "FAIL    unified emberc-self rejected a valid program"
@@ -344,33 +344,33 @@ if [ -f "$EMBERCSRC" ] && [ "$HAVE_CC" -eq 1 ]; then
         pass=$((pass + ubpass))
         fail=$((fail + ubfail))
     else
-        echo "FAIL    selfhost/emberc.em (native compile failed)"
+        echo "FAIL    selfhost/emberc.ig (native compile failed)"
         fail=$((fail + 1))
     fi
     rm -f "$selfbin"
 fi
 
-# ---- Stage 6: the self-hosted C-EMIT backend (selfhost/cgen_c.em via cgen_c_dump.em) ----------------
+# ---- Stage 6: the self-hosted C-EMIT backend (selfhost/cgen_c.ig via cgen_c_dump.ig) ----------------
 # The M5 native backend (AST → C). Each fixture's self-hosted C output must be byte-identical to stage-0
 # `emberc --emit=c`, on BOTH the VM and a native build — the same differential as every other stage. Built
 # incrementally (M5a = int scalars), so the gated set grows as features land.
-CCSRC="$ROOT/selfhost/cgen_c_dump.em"
+CCSRC="$ROOT/selfhost/cgen_c_dump.ig"
 if [ -f "$CCSRC" ]; then
     ccbin=""
     if [ "$HAVE_CC" -eq 1 ]; then
         ccbin="${TMPDIR:-/tmp}/emberc_selfhost_cgenc_$$"
-        if ! (cd "$ROOT" && "$BIN" -o "$ccbin" selfhost/cgen_c_dump.em >/dev/null 2>&1); then
-            echo "FAIL    selfhost/cgen_c_dump.em  (native compile failed)"
+        if ! (cd "$ROOT" && "$BIN" -o "$ccbin" selfhost/cgen_c_dump.ig >/dev/null 2>&1); then
+            echo "FAIL    selfhost/cgen_c_dump.ig  (native compile failed)"
             fail=$((fail + 1)); ccbin=""
         fi
     fi
     ccpass=0; ccfail=0
-    for src in $(cd "$ROOT" && find tests/selfhost/cgen_c -name '*.em' 2>/dev/null | sort); do
+    for src in $(cd "$ROOT" && find tests/selfhost/cgen_c -name '*.ig' 2>/dev/null | sort); do
         oracle=$(cd "$ROOT" && "$BIN" --emit=c "$src" 2>/dev/null)
         if [ -n "$ccbin" ]; then
             actual=$(cd "$ROOT" && "$ccbin" "$src" 2>/dev/null | sed '/^=> 0$/d')
         else
-            actual=$(cd "$ROOT" && "$BIN" --emit=run selfhost/cgen_c_dump.em "$src" 2>/dev/null | sed '/^=> 0$/d')
+            actual=$(cd "$ROOT" && "$BIN" --emit=run selfhost/cgen_c_dump.ig "$src" 2>/dev/null | sed '/^=> 0$/d')
         fi
         if [ "$oracle" = "$actual" ]; then
             ccpass=$((ccpass + 1))
@@ -384,14 +384,14 @@ if [ -f "$CCSRC" ]; then
 
     # The real payoff: whole self-hosted MODULES whose C-emit is byte-identical to stage-0 (not fixtures —
     # actual compiler source). The first native-bootstrap milestone. This list grows as each module's
-    # features land in cgen_c.em.
+    # features land in cgen_c.ig.
     cmpass=0; cmfail=0
-    for src in selfhost/lexer.em selfhost/parser.em selfhost/checker.em selfhost/codegen.em selfhost/cgen_c.em selfhost/cgen_c_dump.em; do
+    for src in selfhost/lexer.ig selfhost/parser.ig selfhost/checker.ig selfhost/codegen.ig selfhost/cgen_c.ig selfhost/cgen_c_dump.ig; do
         oracle=$(cd "$ROOT" && "$BIN" --emit=c "$src" 2>/dev/null)
         if [ -n "$ccbin" ]; then
             actual=$(cd "$ROOT" && "$ccbin" "$src" 2>/dev/null | sed '/^=> 0$/d')
         else
-            actual=$(cd "$ROOT" && "$BIN" --emit=run selfhost/cgen_c_dump.em "$src" 2>/dev/null | sed '/^=> 0$/d')
+            actual=$(cd "$ROOT" && "$BIN" --emit=run selfhost/cgen_c_dump.ig "$src" 2>/dev/null | sed '/^=> 0$/d')
         fi
         if [ "$oracle" = "$actual" ]; then
             cmpass=$((cmpass + 1))
@@ -404,7 +404,7 @@ if [ -f "$CCSRC" ]; then
     pass=$((pass + cmpass)); fail=$((fail + cmfail))
 
     # THE REPRODUCTION FIXED POINT (the promised land): the native C-emitter N1 (built by stage-0 from
-    # cgen_c_dump.em, = `ccbin`) emits the C for its OWN source; that C is compiled into a SECOND-GENERATION
+    # cgen_c_dump.ig, = `ccbin`) emits the C for its OWN source; that C is compiled into a SECOND-GENERATION
     # compiler N2; N2 must then emit BYTE-IDENTICAL C for the whole self-hosted source. A self-built native
     # compiler that regenerates an identical copy of itself — no stage-0 in the loop after N1 is built.
     if [ -n "$ccbin" ]; then
@@ -413,14 +413,14 @@ if [ -f "$CCSRC" ]; then
         rn2c="${TMPDIR:-/tmp}/emberc_repro_n2_$$.c"
         rok=1
         # N1 emits the C for its own driver source; compile it into N2 (link the same runtime `emberc -o` does)
-        (cd "$ROOT" && "$ccbin" selfhost/cgen_c_dump.em 2>/dev/null) | sed '/^=> 0$/d' > "$rn1c"
+        (cd "$ROOT" && "$ccbin" selfhost/cgen_c_dump.ig 2>/dev/null) | sed '/^=> 0$/d' > "$rn1c"
         if cc -std=c17 -O2 -D_DEFAULT_SOURCE -I"$ROOT/include" "$rn1c" "$ROOT/build/libember_rt.a" -lm -o "$rn2" 2>/dev/null; then
             # N2 must reproduce the SAME C for the whole self-hosted source (checker+codegen+cgen_c+driver+…).
             # Both run with the SAME relative path from $ROOT so the emitted `// … from <file>` header matches.
             for src in lexer parser checker codegen cgen_c cgen_c_dump; do
-                oracle=$(cd "$ROOT" && "$BIN" --emit=c "selfhost/$src.em" 2>/dev/null)
-                n2out=$(cd "$ROOT" && "$rn2" "selfhost/$src.em" 2>/dev/null | sed '/^=> 0$/d')
-                [ "$oracle" = "$n2out" ] || { rok=0; echo "FAIL    2nd-gen compiler N2 diverges on $src.em"; }
+                oracle=$(cd "$ROOT" && "$BIN" --emit=c "selfhost/$src.ig" 2>/dev/null)
+                n2out=$(cd "$ROOT" && "$rn2" "selfhost/$src.ig" 2>/dev/null | sed '/^=> 0$/d')
+                [ "$oracle" = "$n2out" ] || { rok=0; echo "FAIL    2nd-gen compiler N2 diverges on $src.ig"; }
             done
         else
             rok=0; echo "FAIL    could not compile N1's self-emitted C into a 2nd-gen compiler"
@@ -437,22 +437,22 @@ if [ -f "$CCSRC" ]; then
     [ -n "$ccbin" ] && rm -f "$ccbin"
 fi
 
-# ---- Stage 7: the runnable bytecode container (.emb) ------------------------------------------------
+# ---- Stage 7: the runnable bytecode container (.igb) ------------------------------------------------
 # docs/design/bytecode-container.md — Phase 1 of the standalone-toolchain campaign. `--emit=bytecode-bin`
-# serializes a program to a `.emb` container (the exact CompiledProgram); `--run-bytecode` loads and runs
+# serializes a program to a `.igb` container (the exact CompiledProgram); `--run-bytecode` loads and runs
 # it. A container's stdout AND exit code must be byte-identical to `--emit=run` on the source — proof the
 # emitted bytecode is genuinely RUNNABLE, not just a disassembly. Runs on the VM + C loader (no cc). The
 # flagship cases round-trip the self-hosted compiler ITSELF (multi-module, driven by a file argument).
 # stdin is /dev/null so a read_line() program cannot block the gate.
-BCEMB="${TMPDIR:-/tmp}/emberc_selfhost_bc_$$.emb"
+BCEMB="${TMPDIR:-/tmp}/emberc_selfhost_bc_$$.igb"
 bcpass=0
 bcfail=0
-# rt_case <source.em> [program args…] — round-trip one program, comparing --run-bytecode to --emit=run.
+# rt_case <source.ig> [program args…] — round-trip one program, comparing --run-bytecode to --emit=run.
 rt_case() {
     src=$1
     shift
     if ! (cd "$ROOT" && "$BIN" --emit=bytecode-bin -o "$BCEMB" "$src" >/dev/null 2>&1); then
-        echo "FAIL    bytecode container: $src did not compile to a .emb"
+        echo "FAIL    bytecode container: $src did not compile to a .igb"
         bcfail=$((bcfail + 1))
         return
     fi
@@ -461,94 +461,94 @@ rt_case() {
     if [ "$rout" = "$bout" ] && [ "$rrc" = "$brc" ]; then
         bcpass=$((bcpass + 1))
     else
-        echo "FAIL    .emb round-trip differs from --emit=run on $src $* (run rc=$rrc, .emb rc=$brc)"
+        echo "FAIL    .igb round-trip differs from --emit=run on $src $* (run rc=$rrc, .igb rc=$brc)"
         bcfail=$((bcfail + 1))
     fi
 }
 # Representative language coverage: recursive ASTs/enums/match, symbol tables, structs, generics,
 # contracts, interfaces, and the from_bytes serializer primitive.
-rt_case tests/selfhost/calc.em
-rt_case tests/selfhost/symtab.em
-rt_case tests/selfhost/recursion_scale.em
-rt_case tests/selfhost/file_io.em
-rt_case tests/native/from_bytes.em
-rt_case tests/native/struct_nested.em
-rt_case examples/04_generics.em
-rt_case examples/07_contracts.em
-rt_case tests/selfhost/codegen/contracts.em
-rt_case tests/selfhost/codegen/sized_scalar_kinds.em
-rt_case tests/selfhost/codegen/concurrency.em
-rt_case tests/selfhost/codegen/ffi.em
-rt_case tests/selfhost/codegen/ffi_ptr.em
-rt_case tests/selfhost/codegen/fn_values.em
-rt_case tests/selfhost/codegen/lambdas.em
-rt_case tests/selfhost/codegen/generic_fn_infer.em
-rt_case tests/selfhost/codegen/bounded_ctor.em
-rt_case examples/13_interfaces.em
+rt_case tests/selfhost/calc.ig
+rt_case tests/selfhost/symtab.ig
+rt_case tests/selfhost/recursion_scale.ig
+rt_case tests/selfhost/file_io.ig
+rt_case tests/native/from_bytes.ig
+rt_case tests/native/struct_nested.ig
+rt_case examples/04_generics.ig
+rt_case examples/07_contracts.ig
+rt_case tests/selfhost/codegen/contracts.ig
+rt_case tests/selfhost/codegen/sized_scalar_kinds.ig
+rt_case tests/selfhost/codegen/concurrency.ig
+rt_case tests/selfhost/codegen/ffi.ig
+rt_case tests/selfhost/codegen/ffi_ptr.ig
+rt_case tests/selfhost/codegen/fn_values.ig
+rt_case tests/selfhost/codegen/lambdas.ig
+rt_case tests/selfhost/codegen/generic_fn_infer.ig
+rt_case tests/selfhost/codegen/bounded_ctor.ig
+rt_case examples/13_interfaces.ig
 # The flagship: the self-hosted compiler drivers, run over a real module (multi-module program + args).
-rt_case selfhost/lex_dump.em selfhost/lexer.em
-rt_case selfhost/parse_dump.em selfhost/lexer.em
-rt_case selfhost/emberc.em selfhost/lexer.em
+rt_case selfhost/lex_dump.ig selfhost/lexer.ig
+rt_case selfhost/parse_dump.ig selfhost/lexer.ig
+rt_case selfhost/emberc.ig selfhost/lexer.ig
 rm -f "$BCEMB"
 if [ "$bcfail" -eq 0 ]; then
-    echo "selfhost bytecode: $bcpass/$bcpass .emb containers run byte-identical to --emit=run (incl. the self-hosted compiler itself)"
+    echo "selfhost bytecode: $bcpass/$bcpass .igb containers run byte-identical to --emit=run (incl. the self-hosted compiler itself)"
 else
-    echo "selfhost bytecode: $bcpass/$((bcpass + bcfail)) .emb round-trips byte-identical ($bcfail FAILED)"
+    echo "selfhost bytecode: $bcpass/$((bcpass + bcfail)) .igb round-trips byte-identical ($bcfail FAILED)"
 fi
 pass=$((pass + bcpass))
 fail=$((fail + bcfail))
 
-# ---- Stage 8: the self-hosted bytecode SERIALIZER (selfhost/serialize.em) ---------------------------
-# docs/design/bytecode-container.md, Phase 1c. The Ember serializer must produce a `.emb` container that is
+# ---- Stage 8: the self-hosted bytecode SERIALIZER (selfhost/serialize.ig) ---------------------------
+# docs/design/bytecode-container.md, Phase 1c. The Ingle serializer must produce a `.igb` container that is
 # BYTE-IDENTICAL to stage 0's `--emit=bytecode-bin` — the same self-hosting rigor as every other stage, now
 # for the container writer, so the SELF-HOSTED compiler can emit a runnable artifact identical to stage 0's.
 # Diffed over the codegen fixtures (the codegen-byte-identical set): where the self-hosted codegen matches
-# stage 0, the self-hosted serializer must reproduce stage 0's `.emb` exactly.
-SZA="${TMPDIR:-/tmp}/emberc_selfhost_sza_$$.emb"
-SZB="${TMPDIR:-/tmp}/emberc_selfhost_szb_$$.emb"
+# stage 0, the self-hosted serializer must reproduce stage 0's `.igb` exactly.
+SZA="${TMPDIR:-/tmp}/emberc_selfhost_sza_$$.igb"
+SZB="${TMPDIR:-/tmp}/emberc_selfhost_szb_$$.igb"
 szpass=0
 szfail=0
-for src in "$ROOT"/tests/selfhost/codegen/*.em; do
+for src in "$ROOT"/tests/selfhost/codegen/*.ig; do
     [ -e "$src" ] || continue
     rel=${src#"$ROOT"/}
     rm -f "$SZA" "$SZB"
     (cd "$ROOT" && "$BIN" --emit=bytecode-bin -o "$SZA" "$rel" >/dev/null 2>&1) || continue
-    (cd "$ROOT" && "$BIN" --emit=run selfhost/serialize_dump.em "$rel" "$SZB" </dev/null >/dev/null 2>&1)
+    (cd "$ROOT" && "$BIN" --emit=run selfhost/serialize_dump.ig "$rel" "$SZB" </dev/null >/dev/null 2>&1)
     if cmp -s "$SZA" "$SZB"; then
         szpass=$((szpass + 1))
     else
-        echo "FAIL    self-hosted serializer .emb differs from stage-0 --emit=bytecode-bin on $rel"
+        echo "FAIL    self-hosted serializer .igb differs from stage-0 --emit=bytecode-bin on $rel"
         szfail=$((szfail + 1))
     fi
 done
 rm -f "$SZA" "$SZB"
-echo "selfhost serializer: $szpass/$((szpass + szfail)) .emb containers byte-identical to stage-0 --emit=bytecode-bin"
+echo "selfhost serializer: $szpass/$((szpass + szfail)) .igb containers byte-identical to stage-0 --emit=bytecode-bin"
 pass=$((pass + szpass))
 fail=$((fail + szfail))
 
 # ---- The CAPSTONE: the UNIFIED self-hosted compiler serializes ITSELF to a RUNNABLE bytecode image --
-# emberc.em is the unified self-hosted compiler (lex → parse → CHECK → codegen → SERIALIZE). In two-arg
-# form (`emberc.em <file> <out.emb>`) it emits a runnable `.emb` container, not a disassembly — so here it
+# emberc.ig is the unified self-hosted compiler (lex → parse → CHECK → codegen → SERIALIZE). In two-arg
+# form (`emberc.ig <file> <out.igb>`) it emits a runnable `.igb` container, not a disassembly — so here it
 # serializes its OWN whole source, and running that image (`--run-bytecode`) as a compiler produces output
-# IDENTICAL to running emberc.em from source. The Phase 1 payoff: a working bytecode image of the compiler,
-# produced by the compiler itself, end to end. (Not yet byte-identical to stage 0 on emberc.em — generic-
+# IDENTICAL to running emberc.ig from source. The Phase 1 payoff: a working bytecode image of the compiler,
+# produced by the compiler itself, end to end. (Not yet byte-identical to stage 0 on emberc.ig — generic-
 # method monomorphization numbers the merged function table differently — but the image is internally
 # consistent and runs correctly; a behavioural check complementing the byte-identity diff above.)
-CAPEMB="${TMPDIR:-/tmp}/emberc_selfhost_cap_$$.emb"
+CAPEMB="${TMPDIR:-/tmp}/emberc_selfhost_cap_$$.igb"
 capok=1
-if (cd "$ROOT" && "$BIN" --emit=run selfhost/emberc.em selfhost/emberc.em "$CAPEMB" </dev/null >/dev/null 2>&1); then
-    cap_src=$(cd "$ROOT" && "$BIN" --emit=run selfhost/emberc.em std/string.em </dev/null 2>/dev/null)
-    cap_emb=$(cd "$ROOT" && "$BIN" --run-bytecode "$CAPEMB" std/string.em </dev/null 2>/dev/null)
+if (cd "$ROOT" && "$BIN" --emit=run selfhost/emberc.ig selfhost/emberc.ig "$CAPEMB" </dev/null >/dev/null 2>&1); then
+    cap_src=$(cd "$ROOT" && "$BIN" --emit=run selfhost/emberc.ig std/string.ig </dev/null 2>/dev/null)
+    cap_emb=$(cd "$ROOT" && "$BIN" --run-bytecode "$CAPEMB" std/string.ig </dev/null 2>/dev/null)
     [ "$cap_src" = "$cap_emb" ] || capok=0
 else
     capok=0
 fi
 rm -f "$CAPEMB"
 if [ "$capok" -eq 1 ]; then
-    echo "selfhost serializer: 🎉 the UNIFIED self-hosted compiler (emberc.em) serializes ITSELF to a runnable .emb that compiles identically to emberc.em from source"
+    echo "selfhost serializer: 🎉 the UNIFIED self-hosted compiler (emberc.ig) serializes ITSELF to a runnable .igb that compiles identically to emberc.ig from source"
     pass=$((pass + 1))
 else
-    echo "FAIL    the self-hosted emberc.em .emb does not run identically to emberc.em from source"
+    echo "FAIL    the self-hosted emberc.ig .igb does not run identically to emberc.ig from source"
     fail=$((fail + 1))
 fi
 

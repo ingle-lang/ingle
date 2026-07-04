@@ -1,10 +1,10 @@
 #!/bin/sh
-# tests/run.sh — Ember regression harness (golden-file / snapshot testing).
+# tests/run.sh — Ingle regression harness (golden-file / snapshot testing).
 #
 # Two tiers:
-#   1. Snapshot cases under tests/<stage>/*.em, each compared against a sibling
+#   1. Snapshot cases under tests/<stage>/*.ig, each compared against a sibling
 #      golden file (.tokens for the lexer stage). These lock exact output.
-#   2. Smoke cases: every examples/*.em must still lex without a lexical error.
+#   2. Smoke cases: every examples/*.ig must still lex without a lexical error.
 #      The examples are the living integration baseline.
 #
 # Usage:
@@ -109,10 +109,10 @@ for dir in "$ROOT"/tests/*/; do
     emit=$(emit_flag "$stage")
     extra=$(extra_flags "$stage")
 
-    for em in "$dir"*.em; do
+    for em in "$dir"*.ig; do
         [ -e "$em" ] || continue
         rel=${em#"$ROOT"/}
-        golden="${em%.em}.$ext"
+        golden="${em%.ig}.$ext"
         # Run from ROOT with a repo-relative path and capture stderr too, so any
         # diagnostics in the golden are stable across machines (no absolute paths)
         # and error cases can be regression-tested by their messages.
@@ -143,17 +143,17 @@ for dir in "$ROOT"/tests/*/; do
 done
 
 # Tier 1b — native backend differential (docs/architecture.md "Decision: native
-# backend"). Each tests/native/*.em is run BOTH on the bytecode VM and as a binary
+# backend"). Each tests/native/*.ig is run BOTH on the bytecode VM and as a binary
 # compiled by `emberc -o`, and their STDOUT must match — the drift guard that keeps
 # AST→C in lockstep with the reference VM. (Only stdout: rich structured Faults are the
 # VM's job and go to stderr; native aborts via a bare em_panic by design — OFI-109.)
 # Skipped under --update (no goldens) and
 # if no C compiler is on PATH.
 if [ "$UPDATE" -eq 0 ] && [ -d "$ROOT/tests/native" ] && command -v cc >/dev/null 2>&1; then
-    for em in "$ROOT"/tests/native/*.em; do
+    for em in "$ROOT"/tests/native/*.ig; do
         [ -e "$em" ] || continue
         rel=${em#"$ROOT"/}
-        bin="${TMPDIR:-/tmp}/emberc_native_$$_$(basename "${em%.em}")"
+        bin="${TMPDIR:-/tmp}/emberc_native_$$_$(basename "${em%.ig}")"
         vm=$(cd "$ROOT" && "$BIN" --emit=run "$rel" 2>/dev/null)
         if ! (cd "$ROOT" && "$BIN" -o "$bin" "$rel" >/dev/null 2>&1); then
             echo "FAIL    $rel  (native — compile failed)"
@@ -182,7 +182,7 @@ fi
 # tests/run-graphics.sh under build/emberc-gfx.
 # Skipped during --update, since they carry no goldens to regenerate.
 if [ "$UPDATE" -eq 0 ]; then
-    for em in "$ROOT"/examples/*.em; do
+    for em in "$ROOT"/examples/*.ig; do
         [ -e "$em" ] || continue
         rel=${em#"$ROOT"/}
         if ! (cd "$ROOT" && "$BIN" --emit=tokens "$rel") >/dev/null 2>&1; then

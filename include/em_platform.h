@@ -3,7 +3,7 @@
 //
 // em_platform.h — the freestanding platform layer (compiled with -DEMBER_FREESTANDING).
 //
-// The Ember runtime (src/runtime.c) is written against a small slice of libc: an allocator, the
+// The Ingle runtime (src/runtime.c) is written against a small slice of libc: an allocator, the
 // mem/str functions, a printf family, and process termination. A bare-metal target has none of
 // these. Rather than fork the runtime (a second implementation would drift — see
 // docs/architecture.md "two extern mechanisms"), the SAME runtime.c is compiled freestanding, with

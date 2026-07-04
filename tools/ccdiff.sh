@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # tools/ccdiff.sh — the M5 self-hosted C-EMIT backend DIFFERENTIAL HARNESS (the native counterpart of
-# tools/cgdiff.sh). Compares the self-hosted C-emitter (selfhost/cgen_c.em, driven by cgen_c_dump.em)
-# against the stage-0 oracle `emberc --emit=c`, on BOTH execution paths:
-#   • VM     — `emberc --emit=run selfhost/cgen_c_dump.em <file>`
-#   • NATIVE — the self-hosted C-emitter compiled to a binary (`emberc -o … cgen_c_dump.em`)
+# tools/cgdiff.sh). Compares the self-hosted C-emitter (selfhost/cgen_c.ig, driven by cgen_c_dump.ig)
+# against the stage-0 oracle `inglec --emit=c`, on BOTH execution paths:
+#   • VM     — `inglec --emit=run selfhost/cgen_c_dump.ig <file>`
+#   • NATIVE — the self-hosted C-emitter compiled to a binary (`inglec -o … cgen_c_dump.ig`)
 # Byte-identical C output is the bar — exactly the proven differential methodology of every other stage,
 # now for the native backend that turns the bootstrap into a self-built native compiler.
 #
-# Usage:  tools/ccdiff.sh <file.em> [more.em …]   # diff specific files; first divergent hunk per file
-#         tools/ccdiff.sh -d <dir>                # every *.em under <dir>
+# Usage:  tools/ccdiff.sh <file.ig> [more.ig …]   # diff specific files; first divergent hunk per file
+#         tools/ccdiff.sh -d <dir>                # every *.ig under <dir>
 #         tools/ccdiff.sh -v <file>               # full diff
 #
 # Stage-0-rejected / empty-output files are SKIPped. Exit 0 iff every compared file is byte-identical on
@@ -18,8 +18,8 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-EMBERC="${EMBERC:-./build/emberc}"
-DRIVER="selfhost/cgen_c_dump.em"
+EMBERC="${EMBERC:-./build/inglec}"
+DRIVER="selfhost/cgen_c_dump.ig"
 CACHE="${TMPDIR:-/tmp}/ccdiff_native_$$"
 LIST="${TMPDIR:-/tmp}/ccdiff_list_$$"
 HUNK_LINES="${CCDIFF_HUNK:-16}"
@@ -29,7 +29,7 @@ trap 'rm -f "$CACHE" "$LIST"' EXIT
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        -d) shift; find "${1:?-d needs a directory}" -name '*.em' 2>/dev/null | sort >> "$LIST"; shift ;;
+        -d) shift; find "${1:?-d needs a directory}" -name '*.ig' 2>/dev/null | sort >> "$LIST"; shift ;;
         -v) verbosity="verbose"; shift ;;
         -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "ccdiff: unknown flag $1" >&2; exit 2 ;;

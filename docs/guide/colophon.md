@@ -6,7 +6,7 @@ nav_order: 8
 
 # Colophon
 
-This book describes the Ember language as it stood in **late June 2026**, early in its life and
+This book describes the Ingle language as it stood in **late June 2026**, early in its life and
 moving fast. This edition was refreshed as several features landed in quick succession —
 **dynamic dispatch** (interfaces as value types), the **bitwise and shift operators** plus the
 explicit **wrapping-arithmetic** builtins, the **generic-keyed `Map<K, V>`** and the bounded
@@ -29,14 +29,14 @@ Flare's **60fps** work (list virtualization, idle-CPU gating) with **enter/exit 
 toasts**. The toolchain also grew a **fourth gate** (`ledger`, the resource-linearity fuzzer) and now
 builds and runs on **Linux** alongside macOS.
 
-A later pass began Ember's **type-system campaign**: **newtypes** (`type UserId = int`, a distinct
+A later pass began Ingle's **type-system campaign**: **newtypes** (`type UserId = int`, a distinct
 nominal type over a scalar or string, erased to its base at zero cost) and **refinement types**
 (`type Percent = int where 0 <= self && self <= 100`, a predicate checked at construction) — both in
 [Chapter 7](/guide/ch-07). The run-time **fault** also grew sharper: an unhandled
 error now renders its payload as data (`values: error = IoErr { code: 5 }`) at a true `file:line:col`
 ([Chapter 19](/guide/ch-19)).
 
-Every Ember snippet in these pages was compiled and run with the reference compiler before being
+Every Ingle snippet in these pages was compiled and run with the reference compiler before being
 written down, and the outputs shown are the outputs produced. Where this book and the language's
 formal specification disagreed, the book follows **what the compiler actually does** — and
 refreshing it turned up a few places where the spec's prose had drifted behind its own
@@ -46,7 +46,7 @@ said to need `Copy` and Flare's inline Markdown still described as unrendered). 
 Opportunities For Improvement rather than copied, which is exactly the bargain this book makes
 with itself.
 
-Ember will have grown since you read this. Treat the *spirit* — safe by default, simple by
+Ingle will have grown since you read this. Treat the *spirit* — safe by default, simple by
 default, fast to build, honest about its edges — as the durable part, and check the current
 spec and examples for the details. The fire's only just been lit.
 

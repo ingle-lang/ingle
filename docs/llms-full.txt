@@ -1,7 +1,7 @@
 
-# Ember by Firelight
+# Ingle by Firelight
 
-### A friendly, honest field guide to writing Ember — as it actually stands today
+### A friendly, honest field guide to writing Ingle — as it actually stands today
 
 *Covering the language as built and tested in June 2026. Everything in this book was compiled and run before it was written down. Nothing here is aspirational.*
 
@@ -9,7 +9,7 @@
 
 > **The one promise this book makes**
 >
-> Ember is a young language in active design, and it is growing quickly. A book about a
+> Ingle is a young language in active design, and it is growing quickly. A book about a
 > moving target can lie to you in two directions: by describing features that don't exist
 > yet, or by going stale the moment something lands. This book solves the first problem
 > ruthlessly — **every single code sample was run through the compiler and produced the
@@ -19,7 +19,7 @@
 > nowhere else.
 >
 > If you can read one programming language already — any of them — you can learn to write
-> working Ember from this book. That includes you, dear reader, even if your last program
+> working Ingle from this book. That includes you, dear reader, even if your last program
 > ended in a stack trace you emailed to a friend.
 
 ---
@@ -38,7 +38,7 @@ A few conventions:
 
   ```ember
   fn main() -> int {
-      println("Hello from Ember")
+      println("Hello from Ingle")
       return 0
   }
   ```
@@ -49,7 +49,7 @@ A few conventions:
   => 0
   ```
 
-> **Fireside trivia.** Ember's reference compiler is written in C — about a dozen thousand
+> **Fireside trivia.** Ingle's reference compiler is written in C — about a dozen thousand
 > lines of it — and has *no third-party dependencies at all* for its default build. It links
 > the C standard library and nothing else. The entire toolchain (compiler, language server,
 > property fuzzer, contract prover, JSON reader) is written in-tree. The one exception is
@@ -58,12 +58,12 @@ A few conventions:
 
 ---
 
-## Running Ember at all
+## Running Ingle at all
 
-Ember programs end in `.em`. You compile and run one with the `emberc` compiler:
+Ingle programs end in `.ig`. You compile and run one with the `inglec` compiler:
 
 ```
-emberc --emit=run hello.em
+inglec --emit=run hello.ig
 ```
 
 That compiles the program *and* executes it, printing any output, then a final line showing
@@ -87,17 +87,17 @@ couldn't be read.
 
 ---
 
-## Building Ember from source
+## Building Ingle from source
 
-The samples above assume you already have an `emberc`. Producing one is deliberately dull:
-Ember's compiler is written in C with **no third-party dependencies**, so on any machine with a
+The samples above assume you already have an `inglec`. Producing one is deliberately dull:
+Ingle's compiler is written in C with **no third-party dependencies**, so on any machine with a
 C compiler and `make` — **macOS or Linux, on x86-64 or arm64** — a single command does it.
 
 ```
 make
 ```
 
-That builds the everyday compiler at `build/emberc` — a debuggable `-O0 -g` build — together with
+That builds the everyday compiler at `build/inglec` — a debuggable `-O0 -g` build — together with
 the small runtime libraries that native binaries link against. To confirm everything actually
 works, run the regression suite, which rebuilds whatever is stale and then runs every example in
 this book:
@@ -113,22 +113,22 @@ below, grouped by why you'd reach for it.
 
 | Target | Produces | Notes |
 |--------|----------|-------|
-| `make` (`make all`) | `build/emberc` + `libember_rt.a`, `libember_rt_par.a` | The dev build: `-O0 -g`, quick to rebuild and debuggable. The two `.a` files are the runtime `emberc -o` links into native programs. |
-| `make release` | `build/emberc-release` | The optimized `-O2` compiler — the one `make install` ships. |
-| `make parallel` | `build/emberc-par` | Same language, multicore runtime: `spawn`/`nursery`/channels run on real OS threads ([Chapter 14](#chapter-14--concurrency)). |
-| `make mn` | `build/emberc-mn` | The **M:N** green-thread scheduler — many fibers multiplexed onto a few OS threads, with structured cancellation-on-failure. Opt-in while it clears a wider soak ([Chapter 14](#chapter-14--concurrency)). |
-| `make graphics` | `build/emberc-gfx` | Links raylib + FreeType. *Needs an external library* (see below). |
-| `make net` | `build/emberc-net` | Links libcurl for HTTPS. *Needs an external library.* |
-| `make net-graphics` | `build/emberc-net-gfx` | Networking + graphics + threads at once — the build the desktop demo uses. *Needs both libraries.* |
-| `make db` | `build/emberc-db` | Links the vendored SQLite amalgamation so a program can `import "std/sqlite"` ([Chapter 15](#chapter-15--modules-and-the-standard-library)). The one C file lives in-tree, so this still needs no system package. |
+| `make` (`make all`) | `build/inglec` + `libember_rt.a`, `libember_rt_par.a` | The dev build: `-O0 -g`, quick to rebuild and debuggable. The two `.a` files are the runtime `inglec -o` links into native programs. |
+| `make release` | `build/inglec-release` | The optimized `-O2` compiler — the one `make install` ships. |
+| `make parallel` | `build/inglec-par` | Same language, multicore runtime: `spawn`/`nursery`/channels run on real OS threads ([Chapter 14](#chapter-14--concurrency)). |
+| `make mn` | `build/inglec-mn` | The **M:N** green-thread scheduler — many fibers multiplexed onto a few OS threads, with structured cancellation-on-failure. Opt-in while it clears a wider soak ([Chapter 14](#chapter-14--concurrency)). |
+| `make graphics` | `build/inglec-gfx` | Links raylib + FreeType. *Needs an external library* (see below). |
+| `make net` | `build/inglec-net` | Links libcurl for HTTPS. *Needs an external library.* |
+| `make net-graphics` | `build/inglec-net-gfx` | Networking + graphics + threads at once — the build the desktop demo uses. *Needs both libraries.* |
+| `make db` | `build/inglec-db` | Links the vendored SQLite amalgamation so a program can `import "std/sqlite"` ([Chapter 15](#chapter-15--modules-and-the-standard-library)). The one C file lives in-tree, so this still needs no system package. |
 
 **Finding bugs**
 
 | Target | Produces | Notes |
 |--------|----------|-------|
-| `make asan` | `build/emberc-asan` | AddressSanitizer build — running a `.em` program flags use-after-free / overflow with a stack trace. |
-| `make asan-par` | `build/emberc-asan-par` | The same, exercising the cross-thread (parallel) paths. |
-| `make asan-trace` | `build/emberc-trace` | ASan plus the double-drop detector — the "memory tape" of [Chapter 19](#chapter-19--the-tape-and-errors-as-data). |
+| `make asan` | `build/inglec-asan` | AddressSanitizer build — running a `.ig` program flags use-after-free / overflow with a stack trace. |
+| `make asan-par` | `build/inglec-asan-par` | The same, exercising the cross-thread (parallel) paths. |
+| `make asan-trace` | `build/inglec-trace` | ASan plus the double-drop detector — the "memory tape" of [Chapter 19](#chapter-19--the-tape-and-errors-as-data). |
 
 **Testing, and the four gates**
 
@@ -156,7 +156,7 @@ below, grouped by why you'd reach for it.
 | Target | What it does |
 |--------|--------------|
 | `make gen-editor-assets` | Regenerate the VS Code syntax grammar from the single source of truth, `include/vocab.def`. |
-| `make install` | Build release, then install `emberc` + the standard library to `~/.ember` (override with `PREFIX=`) so editors and tools find it from any folder. |
+| `make install` | Build release, then install `inglec` + the standard library to `~/.ingle` (override with `PREFIX=`) so editors and tools find it from any folder. |
 | `make install-vscode` | Package and install the VS Code extension globally. Needs Node/npm and VS Code. |
 | `make clean` | Delete `build/`. |
 
@@ -184,7 +184,7 @@ machine.
 # Index
 
 **Part I — First Light**
-- [Chapter 1 — Hello, Ember](#chapter-1--hello-ember)
+- [Chapter 1 — Hello, Ingle](#chapter-1--hello-ingle)
 - [Chapter 2 — Values and Bindings](#chapter-2--values-and-bindings)
 - [Chapter 3 — Numbers, Text, and Truth](#chapter-3--numbers-text-and-truth)
 
@@ -227,14 +227,14 @@ machine.
 
 # Part I — First Light
 
-## Chapter 1 — Hello, Ember
+## Chapter 1 — Hello, Ingle
 
-Here is a complete, working Ember program. Not a fragment, not "imagine the rest" — the whole
+Here is a complete, working Ingle program. Not a fragment, not "imagine the rest" — the whole
 thing.
 
 ```ember
 fn main() {
-    let name = "Ember"
+    let name = "Ingle"
     let year = 2026
     println("Hello from {name}, {year}.")
 }
@@ -243,13 +243,13 @@ fn main() {
 Run it:
 
 ```
-emberc --emit=run hello.em
+inglec --emit=run hello.ig
 ```
 
-and Ember says:
+and Ingle says:
 
 ```
-Hello from Ember, 2026.
+Hello from Ingle, 2026.
 => 0
 ```
 
@@ -261,14 +261,14 @@ starts at the one called `main`. The `fn` keyword introduces a function; the emp
 it takes no arguments. We didn't write a return type, and that's allowed for `main` — it
 quietly returns `0`, which is the `=> 0` you saw at the end.
 
-**`let name = "Ember"` binds a name to a value.** We didn't say `name` is a string; Ember
+**`let name = "Ingle"` binds a name to a value.** We didn't say `name` is a string; Ingle
 worked it out. More on `let` (and its mutable sibling `var`) in the next chapter.
 
 **`println(...)` prints a line.** There's also `print`, which doesn't add the newline. Both
 are built into the language — you don't import anything to get them.
 
 **`"Hello from {name}, {year}."` is an interpolated string.** Anything inside `{ }` is an
-expression that gets computed and slotted into the text. Every string in Ember can interpolate;
+expression that gets computed and slotted into the text. Every string in Ingle can interpolate;
 there's no special prefix to opt in.
 
 ### A function with a job
@@ -290,7 +290,7 @@ fn main() -> int {
 => 42
 ```
 
-Two new things. First, **function parameters must have types** — `a: int, b: int`. Ember will
+Two new things. First, **function parameters must have types** — `a: int, b: int`. Ingle will
 happily infer the type of a local `let`, but at the boundary of a function it insists you
 spell things out. That boundary is a contract between the caller and the callee, and it's
 exactly where being explicit pays off (for you, for the next person, and — as we'll see — for
@@ -299,7 +299,7 @@ so its result `42` shows up as `=> 42`.
 
 ### Comments, and the comment that becomes documentation
 
-Ordinary comments run from `//` to the end of the line. There are no block comments; Ember
+Ordinary comments run from `//` to the end of the line. There are no block comments; Ingle
 doesn't have them, and after a while you won't miss them.
 
 ```ember
@@ -308,8 +308,8 @@ let tau = 6   // comments can sit at the end of a line, too
 ```
 
 But three slashes — `///` — make a **doc comment**, and those are special. Placed on the
-line(s) just above a declaration, they *document* it, and Ember can render them two ways from
-the one source: the editor shows them when you hover, and `emberc --emit=docs` turns them into
+line(s) just above a declaration, they *document* it, and Ingle can render them two ways from
+the one source: the editor shows them when you hover, and `inglec --emit=docs` turns them into
 a Markdown page. Write the explanation once; get the tooltip and the manual for free.
 
 ```ember
@@ -322,15 +322,15 @@ struct Point {
 }
 ```
 
-Four or more slashes (`////`) are just an ordinary comment again. Ember reserves exactly three
+Four or more slashes (`////`) are just an ordinary comment again. Ingle reserves exactly three
 for documentation, which is a pleasingly specific decision.
 
 ### No semicolons
 
-You may have noticed the lack of semicolons. This is not an oversight. **Ember has no
+You may have noticed the lack of semicolons. This is not an oversight. **Ingle has no
 statement terminator; a newline ends a statement** — but only when the line could sensibly
 end there. If a line ends on something that obviously wants more (a `+`, a comma, an open
-bracket, an `=`), Ember knows you're mid-thought and reads on:
+bracket, an `=`), Ingle knows you're mid-thought and reads on:
 
 ```ember
 let total = 1 +     // the trailing '+' means "more coming" — the line continues
@@ -344,7 +344,7 @@ never think about this again.
 
 > **Fireside trivia.** Languages disagree fiercely about semicolons. C demands them. Python
 > banned them. Go made them optional by having the *lexer* secretly insert them at line
-> breaks — and Ember does essentially the same trick, emitting an invisible terminator only
+> breaks — and Ingle does essentially the same trick, emitting an invisible terminator only
 > after a token that can legally end a statement. So the semicolons are still there, in a
 > sense. They've just gone into hiding and taken your shift-key's workload with them.
 
@@ -352,11 +352,11 @@ never think about this again.
 
 ## Chapter 2 — Values and Bindings
 
-A binding gives a name to a value. Ember has two keywords for it, and the entire difference
+A binding gives a name to a value. Ingle has two keywords for it, and the entire difference
 between them is whether you're allowed to change your mind later.
 
 ```ember
-let name = "Ember"   // immutable: this name will always mean "Ember"
+let name = "Ingle"   // immutable: this name will always mean "Ingle"
 var count = 0        // mutable: this one can change
 count = count + 1    // ...like so
 ```
@@ -376,7 +376,7 @@ a = 6
 error: cannot assign to an immutable 'let' binding; declare it with 'var'
 ```
 
-This is a theme you'll see again and again: **Ember's error messages are written to be
+This is a theme you'll see again and again: **Ingle's error messages are written to be
 read.** They name your problem in the words of your program and, where they can, tell you the
 move that fixes it. The compiler is trying to be a teacher, not a bouncer.
 
@@ -409,7 +409,7 @@ named value fixed at compile time:
 
 ```ember
 let WIDTH = 800
-let TITLE = "Ember"
+let TITLE = "Ingle"
 
 fn main() -> int {
     println(TITLE)
@@ -418,7 +418,7 @@ fn main() -> int {
 ```
 
 ```
-Ember
+Ingle
 => 800
 ```
 
@@ -426,15 +426,15 @@ Constants must be initialised with a literal — a number, a string, `true`/`fal
 negative number. A constant may carry a type annotation, and the compiler honours it: the
 literal *adopts* the declared width — `let MAX: u8 = 200` is a `u8`, not an `int` — and a value
 that doesn't fit or match the annotation is a compile error (`let MAX: u8 = 300` is out of
-range; `let TITLE: int = "Ember"` is a type mismatch), caught at build, not left to surprise you.
+range; `let TITLE: int = "Ingle"` is a type mismatch), caught at build, not left to surprise you.
 You can't yet write `let x = some_function()` at the top level; general
-mutable globals aren't a thing in Ember today, and honestly they're a misfeature you'll not
+mutable globals aren't a thing in Ingle today, and honestly they're a misfeature you'll not
 miss. Constants cost nothing at runtime: each use is substituted with the value directly. They
 also make excellent colours, key codes, size limits, and configuration knobs.
 
 ### The discard: `_`
 
-Sometimes you want a value's *effect* but not the value itself. The underscore `_` is Ember's
+Sometimes you want a value's *effect* but not the value itself. The underscore `_` is Ingle's
 write-only **discard**: bind to it and the right-hand side is evaluated, then thrown away.
 
 ```ember
@@ -451,14 +451,14 @@ usable name`.
 > **Fireside trivia.** "Immutable by default" sounds like a modern fad, but it's closer to a
 > return to manners. The earliest functional languages treated reassignment as the unusual,
 > slightly suspicious operation. Decades of C-family languages then made `x = 5` so cheap and
-> so default that we forgot it was a choice. Ember is quietly siding with the old guard: you
+> so default that we forgot it was a choice. Ingle is quietly siding with the old guard: you
 > *can* change a value, but you have to look it in the eye and type `var` first.
 
 ---
 
 ## Chapter 3 — Numbers, Text, and Truth
 
-Three kinds of value will carry most of your programs: numbers, strings, and booleans. Ember
+Three kinds of value will carry most of your programs: numbers, strings, and booleans. Ingle
 has firm opinions about all three, and the opinions are mostly "be explicit, and don't let
 anything happen behind your back."
 
@@ -482,7 +482,7 @@ let x = 200u8       // or pin the width with a suffix
 
 Two rules will save you a great deal of confusion:
 
-**1. There is no implicit coercion.** Ember will never quietly turn an `i32` into an `i64`, or
+**1. There is no implicit coercion.** Ingle will never quietly turn an `i32` into an `i64`, or
 an `int` into a `float`, to make an expression type-check. Mixing them is an error you must
 resolve on purpose:
 
@@ -519,11 +519,11 @@ fn main() -> int {
 ```
 
 ```
-emberc: runtime error: integer overflow
+inglec: runtime error: integer overflow
 ```
 
 This is a deliberate safety choice. A silent wrap is one of the great sources of
-catastrophic, hard-to-find bugs; Ember would rather halt and tell you. (Floating-point follows
+catastrophic, hard-to-find bugs; Ingle would rather halt and tell you. (Floating-point follows
 the usual IEEE-754 rules — dividing by zero gives infinity, not a trap.)
 
 One small display quirk worth knowing now, so it doesn't startle you later: **a `float` that
@@ -547,7 +547,7 @@ let greeting = "Hello, " + "world"
 let same = ("ab" == "a" + "b")   // true
 ```
 
-Strings carry a handful of built-in methods. Ember strings are **UTF-8** — multi-byte Unicode
+Strings carry a handful of built-in methods. Ingle strings are **UTF-8** — multi-byte Unicode
 characters are fully supported. Most methods operate in *bytes* (fast, ASCII-safe), and a separate
 family of `cp_*` functions lets you work in *code points* when you need Unicode-correct behaviour:
 
@@ -602,7 +602,7 @@ fn main() -> int {
 error: 'if' condition must be a bool
 ```
 
-**There is no "truthiness" in Ember.** `1` is not "truthy," `0` is not "falsy," the empty
+**There is no "truthiness" in Ingle.** `1` is not "truthy," `0` is not "falsy," the empty
 string is just a string. A condition must be an actual `bool`. This feels strict for about a
 day and then feels like a handrail for the rest of your life — a whole category of "oops, that
 was zero" bugs simply cannot be written.
@@ -613,7 +613,7 @@ just as you'd expect: the right side isn't evaluated if the left already decides
 ### Working at the bit level
 
 When you want to manipulate the actual bits of an integer — packing flags, masking, hashing,
-writing a codec — Ember has the full set of bitwise operators: `&` (and), `|` (or), `^` (xor),
+writing a codec — Ingle has the full set of bitwise operators: `&` (and), `|` (or), `^` (xor),
 `~` (not), and the shifts `<<` and `>>`. These are **integer-only and width-aware**: they refuse
 floats, and they respect the type's width, so `~` on a `u8` flips eight bits, not sixty-four.
 
@@ -644,7 +644,7 @@ not  252
 Two details that keep shifts honest. The shift *amount* must land in `[0, width)` — shifting a
 `u8` by 8 or more is a runtime trap, not a quiet zero — and `>>` is **arithmetic** (sign-preserving)
 on signed types but **logical** (zero-filling) on unsigned ones, so a negative `i32 >> 1` stays
-negative while a `u32 >> 1` always pulls in zeros. The shipped `examples/12_bits.em` puts all this
+negative while a `u32 >> 1` always pulls in zeros. The shipped `examples/12_bits.ig` puts all this
 to work twice over: a complete xorshift PRNG built from nothing but `<<`, `>>`, and `^`, and a set
 of Unix-style permission flags packed into a single byte and toggled with masks.
 
@@ -655,14 +655,14 @@ of Unix-style permission flags packed into a single byte and toggled with masks.
 
 > **When you actually want wrap-around.** Trapping on overflow is the right default, but a whole
 > family of primitives — non-cryptographic hashes like FNV-1a and MurmurHash, multiply-mixing PRNGs
-> like PCG — *depend* on integer arithmetic wrapping round at the type's width. So Ember gives you
+> like PCG — *depend* on integer arithmetic wrapping round at the type's width. So Ingle gives you
 > exactly that, explicitly, through three builtins: `wrapping_add`, `wrapping_sub`, and
 > `wrapping_mul` each take two integers of one width and compute modulo 2ʷ with no trap (there's no
 > wrapping `/` or `%` — overflow there isn't a real thing). It's the same philosophy as `move`: the
 > dangerous-looking operation is available, but you have to *name* it, so nobody — and no model —
 > reaches for silent wraparound by accident. With it, a real FNV-1a hash is a six-line loop in pure
-> Ember; without it you'd be back in C. (Shift-and-xor designs like xorshift never overflow at all,
-> so they need none of this — `examples/12_bits.em` stays library-free.)
+> Ingle; without it you'd be back in C. (Shift-and-xor designs like xorshift never overflow at all,
+> so they need none of this — `examples/12_bits.ig` stays library-free.)
 
 ### The precedence table, once, so you never wonder
 
@@ -688,7 +688,7 @@ bind tightest of all. When in doubt, parenthesise — it's free and it's kind to
 This mirrors C exactly, which means it inherits C's one genuinely surprising row: the bitwise
 operators bind *looser* than the comparisons, so `a & b == c` parses as `a & (b == c)`, almost
 never what you meant. The fix is the same as in C — parenthesise mixed bitwise-and-comparison
-expressions — and Ember's strict typing tends to catch the rest, since `b == c` is a `bool` and
+expressions — and Ingle's strict typing tends to catch the rest, since `b == c` is a `bool` and
 `&` wants integers.
 
 > **Fireside trivia.** The `%` operator is "remainder," and it insists on integer operands —
@@ -727,9 +727,9 @@ The shape is `fn name(params) -> ReturnType { body }`. A few firm rules:
   can read it all you like, but you can't reassign it. If you want a mutable working copy,
   make one with `var`.
 - **Arguments are checked for count and type**, with no coercion. Call `add(fib(10), 1)` and
-  Ember confirms you passed exactly two `int`s.
+  Ingle confirms you passed exactly two `int`s.
 - **Order doesn't matter.** `fib` can call itself, and any function can call any other
-  function defined anywhere in the file. Ember reads all the signatures first, then checks the
+  function defined anywhere in the file. Ingle reads all the signatures first, then checks the
   bodies, so forward references and mutual recursion Just Work — no forward declarations, no
   header files.
 
@@ -745,7 +745,7 @@ fn greet(name: string) {
 }
 
 fn main() {
-    greet("Ember")
+    greet("Ingle")
 }
 ```
 
@@ -754,10 +754,10 @@ closing brace returns nothing at all. What you *can't* do is return a value from
 (`return 5` in a unit function is an error), and you can't capture its non-existent result:
 
 ```ember
-let x = greet("Ember")   // error: there's no value here to bind
+let x = greet("Ingle")   // error: there's no value here to bind
 ```
 
-This is the same principle as the strict `bool`: Ember won't let you pretend a nothing is a
+This is the same principle as the strict `bool`: Ingle won't let you pretend a nothing is a
 something. `main` is allowed to be a unit function too — as you saw in Chapter 1, it then
 quietly hands back `0`.
 
@@ -794,7 +794,7 @@ chains as far as you need.
 
 ### `loop`, `break`, `continue`
 
-Ember's one looping primitive is `loop`, which loops forever until you `break` out of it.
+Ingle's one looping primitive is `loop`, which loops forever until you `break` out of it.
 `continue` skips to the next turn.
 
 ```ember
@@ -835,7 +835,7 @@ fn main() -> int {
 
 This is exactly the block scoping you know from C-family languages, with no surprises. The
 shadowing is the one thing C# doesn't let you do (it forbids a local shadowing another local);
-Ember permits it, because it's genuinely useful for refining a value step by step, and the
+Ingle permits it, because it's genuinely useful for refining a value step by step, and the
 strict immutability of `let` keeps it from being confusing.
 
 ---
@@ -926,7 +926,7 @@ for (i, name) in names {
 That's the whole iteration story, and it's deliberately small: `for x in a` for elements,
 `for i in a..b` for a counter, `for (i, x) in a` for both. Three forms, three distinct jobs,
 no overlap. There's exactly one range operator (`..`, exclusive) on purpose — an inclusive
-version would just be a second way to write `lo..hi+1`, and Ember dislikes having two ways to
+version would just be a second way to write `lo..hi+1`, and Ingle dislikes having two ways to
 say one thing.
 
 > **A small performance note you can mostly ignore.** The `for` forms aren't just tidier than
@@ -995,13 +995,13 @@ fn main() -> int {
 `x.clone()` copies recursively — array elements, struct fields, and everything they own — so
 changing the clone never reaches the original, and vice versa. It works on arrays and on structs,
 including the generic ones like `Map<K, V>` and `Set<K>`. The cost is always **visible at the
-call site**; Ember never deep-copies a value behind your back.
+call site**; Ingle never deep-copies a value behind your back.
 
 > **Fireside trivia.** "Off-by-one errors are the two hardest problems in computer science."
 > The exclusive-end range is the industry's hard-won answer to half of them: when the top is
 > exclusive, the length of `0..n` is just `n`, two adjacent ranges `0..k` and `k..n` meet
 > perfectly with no overlap or gap, and you almost never write `<=` by mistake. Dijkstra wrote
-> an entire note in 1982 arguing for exactly this convention. Ember simply makes it the only
+> an entire note in 1982 arguing for exactly this convention. Ingle simply makes it the only
 > option and saves you the argument.
 
 ---
@@ -1031,7 +1031,7 @@ fn main() -> int {
 ```
 
 You **construct** a struct with `Type { field: value, ... }`, and you must set *every* field
-exactly once — Ember won't let you forget one or leave it to chance. You read a field with
+exactly once — Ingle won't let you forget one or leave it to chance. You read a field with
 `value.field`.
 
 ### Methods and `self`
@@ -1039,7 +1039,7 @@ exactly once — Ember won't let you forget one or leave it to chance. You read 
 A struct can carry **methods**, written inside its braces. A method takes `self` as its first
 parameter, explicitly — that's the receiver, the value the method was called on. Inside, you
 read its fields as `self.x` and call its other methods as `self.whatever()`. Dispatch is
-static: Ember knows the exact type at the call site, so there's no virtual-call overhead.
+static: Ingle knows the exact type at the call site, so there's no virtual-call overhead.
 
 Notice `distance` calls `sqrt`, which is a built-in maths function — no import needed. (Its
 friends `pow`, `abs`, `floor`, `ceil`, `round`, and `random` are all built in too; the rest of
@@ -1062,7 +1062,7 @@ fn main() -> int {
 }
 ```
 
-Notice you can reach right down a nested path — `ln.a.x = 10` — and Ember writes it back where
+Notice you can reach right down a nested path — `ln.a.x = 10` — and Ingle writes it back where
 it belongs. Try the same thing through a `let` and you'll get a polite compile error pointing
 you at `var`.
 
@@ -1172,16 +1172,16 @@ total 24.5664
 ```
 
 A `[Shape]` holds a `Circle` and a `Rect` side by side, and `s.area()` calls the *right* one for
-each. The moment you put a `Circle` where a `Shape` is expected, Ember **upcasts** it: the value
+each. The moment you put a `Circle` where a `Shape` is expected, Ingle **upcasts** it: the value
 becomes a small box pairing the receiver with a table of its methods. A call then looks the
 method up in that table at run time. One `fn report(s: Shape)` serves every implementer you'll
-ever write, with no shared base class in sight. The shipped `examples/13_interfaces.em` does
+ever write, with no shared base class in sight. The shipped `examples/13_interfaces.ig` does
 exactly this with three shapes and a `report` function.
 
 There's **one rule** on which interfaces can be used this way, and it's a sensible one: the
 interface must be **object-safe**, meaning no method may mention `Self` anywhere but the receiver.
 The reason is concrete — once a value is hidden behind `Shape`, its real type is erased, so a method
-like `compare(self, other: Self)` has nowhere to get a *second* value "of the same type." Ember
+like `compare(self, other: Self)` has nowhere to get a *second* value "of the same type." Ingle
 tells you so plainly if you try:
 
 ```ember
@@ -1202,7 +1202,7 @@ as a *generic bound*, where the concrete type is still known, which is the very 
 (methods comparing two of a kind) as bounds.
 
 > **Fireside trivia.** Type systems split into two camps on this. *Structural* typing says "if a
-> type has the methods, it qualifies." *Nominal* typing — Ember's choice — says "it qualifies only
+> type has the methods, it qualifies." *Nominal* typing — Ingle's choice — says "it qualifies only
 > if it *declares* that it does," which is what `implements` is for. The case for nominal is the
 > accidental match: two types with a `compare` method that mean entirely different things by it.
 > "It says `implements Ord` right there" is a hard line for a confused reader, human or machine,
@@ -1255,7 +1255,7 @@ with `to` and `from` reversed, or cents handed to code counting dollars — turn
 error. A newtype still inherits its base's `==`, ordering, hashing, and rendering, so it compares,
 sorts, serves as a `Map` key, and interpolates in `"{...}"` directly. The one thing it won't do
 behind your back is arithmetic: a `UserId` is an identity, not a quantity, so adding to one is a
-question Ember makes you ask out loud —
+question Ingle makes you ask out loud —
 
 ```
 error: arithmetic on a newtype requires unwrapping to its base first (e.g. `int(x)`), then re-wrapping the result
@@ -1385,7 +1385,7 @@ they're free to repeat, since each module sees only its own. Either way, you can
 reads better; they mean the same thing.
 
 And one syntactic quirk you'll meet eventually: in the *header* of an `if`, `for`, or `match`,
-Ember switches off struct-literal syntax so that the `{` can unambiguously start the block. If
+Ingle switches off struct-literal syntax so that the `{` can unambiguously start the block. If
 you ever genuinely need a struct literal right there, wrap it in parentheses. In practice this
 almost never comes up, but now it won't puzzle you when it does.
 
@@ -1393,7 +1393,7 @@ almost never comes up, but now it won't puzzle you when it does.
 > in the 1970s) and spent a long time confined to academic and functional languages while the
 > mainstream made do with null and inheritance. Their slow conquest of industry is one of the
 > quiet happy endings in language design: Rust, Swift, Kotlin, TypeScript, and modern C# all
-> have them now. Ember was never going to *not* have them. They were the first thing on the
+> have them now. Ingle was never going to *not* have them. They were the first thing on the
 > list.
 
 ---
@@ -1402,7 +1402,7 @@ almost never comes up, but now it won't puzzle you when it does.
 
 ## Chapter 9 — Errors and Optionals
 
-**Ember has no exceptions and no `null`.** Nothing is ever secretly absent, and nothing throws
+**Ingle has no exceptions and no `null`.** Nothing is ever secretly absent, and nothing throws
 past you up an invisible staircase of stack frames. When something can fail or be missing, that
 fact is written into the *type*, and you deal with it where it happens.
 
@@ -1480,7 +1480,7 @@ return an `Option`. The failure always has somewhere legal to go.
 
 > **Fireside trivia.** Tony Hoare introduced the null reference in 1965 and later called it
 > his "billion-dollar mistake," estimating the cost of the bugs, crashes, and security holes
-> it caused over the following decades. He was almost certainly low-balling it. Ember is one of
+> it caused over the following decades. He was almost certainly low-balling it. Ingle is one of
 > a growing number of languages built by people who took that confession seriously and simply
 > declined to include the feature.
 
@@ -1526,7 +1526,7 @@ behind `Option<T>` and `Result<T, E>` being library types rather than magic.
 ### Generic functions, and inference
 
 Functions and methods can be generic too, and here you usually *don't* write the type arguments
-— Ember infers them from what you pass and what you expect back:
+— Ingle infers them from what you pass and what you expect back:
 
 ```ember
 fn identity<T>(move x: T) -> T {
@@ -1548,7 +1548,7 @@ No "turbofish," no `identity<int>(7)` ceremony at the call. The type just flows 
 
 > **The `move` you may not have expected.** Did you notice `move x` up there? A plain
 > parameter only *borrows*, and you can't return a borrowed value — it would escape the
-> function. For a concrete type you'd hit the same rule; for a generic `T`, which Ember treats
+> function. For a concrete type you'd hit the same rule; for a generic `T`, which Ingle treats
 > as an owned value by default, returning the argument means taking it `move`. This is real and
 > the compiler enforces it. The whole ownership story is the next chapter; for now, just know
 > that "a generic function that hands its argument back out" is written `move`.
@@ -1623,7 +1623,7 @@ generic struct's individual *methods* and on generic *enums*, and inference stay
 [Chapter 23](#chapter-23--the-not-yet-list).
 
 > **Static versus dynamic, in one breath.** A bound (`<T: Ord>`) and an interface-as-a-value
-> ([Chapter 7](#chapter-7--structs-and-methods)) are the two halves of polymorphism, and Ember
+> ([Chapter 7](#chapter-7--structs-and-methods)) are the two halves of polymorphism, and Ingle
 > keeps them distinct. A bound is resolved when the concrete type is *known* — the compiler hands
 > the call a hidden table of the right methods (a "witness"), so there's no runtime lookup and no
 > boxing. An interface value is for when the type *isn't* known until runtime — there the lookup
@@ -1631,7 +1631,7 @@ generic struct's individual *methods* and on generic *enums*, and inference stay
 > a bound when you can, a value type when you must.
 
 > **How generics are compiled, today.** Because every value has a uniform representation,
-> Ember compiles a generic *once* — `Box<int>` and `Box<string>` share one compiled body. This
+> Ingle compiles a generic *once* — `Box<int>` and `Box<string>` share one compiled body. This
 > is the "erased" strategy, and it's why adding generics doesn't blow up your compile times.
 > (The plan is for release builds to also offer monomorphization — a specialised copy per type
 > for maximum speed — but that's a future build mode, not something you write differently.
@@ -1639,7 +1639,7 @@ generic struct's individual *methods* and on generic *enums*, and inference stay
 
 > **Fireside trivia.** The angle brackets `<T>` for generics are a C++ inheritance, and
 > they've caused parser writers grief ever since, because `<` is also "less than." Is `a < b >
-> c` a comparison or a generic? Ember resolves it with a lookahead rule: it reads a generic only
+> c` a comparison or a generic? Ingle resolves it with a lookahead rule: it reads a generic only
 > when a balanced `<...>`, every token inside it type-legal, is immediately followed by `{`.
 > That rule is total rather than a guess — no expression begins with `{`, so a `> {` can never
 > continue a comparison, and a non-type token inside the brackets proves the `<` was less-than. Every language in this family has a scar in exactly this spot.
@@ -1648,7 +1648,7 @@ generic struct's individual *methods* and on generic *enums*, and inference stay
 
 ## Chapter 11 — Functions as Values, and Closures
 
-Functions in Ember are values. You can put one in a binding, pass it to another function, and
+Functions in Ingle are values. You can put one in a binding, pass it to another function, and
 call it later. A function *type* is written `fn(ArgTypes) -> ReturnType`.
 
 ```ember
@@ -1705,7 +1705,7 @@ fn main() -> int {
 > from context — either by being passed straight into a function that expects a function type,
 > or from an explicit annotation on the binding. So `apply(|x| x + 1, 5)` is fine (the context
 > is `apply`'s parameter), and `let f: fn(int) -> int = |x| x + 1` is fine (the annotation).
-> But a bare, unannotated `let f = |x| x + 1` is an **error** — Ember can't guess what `x` is.
+> But a bare, unannotated `let f = |x| x + 1` is an **error** — Ingle can't guess what `x` is.
 > The compiler says so plainly: *"a lambda needs a function-typed context."* When in doubt,
 > annotate the binding or pass the lambda directly.
 
@@ -1779,7 +1779,7 @@ When a function takes a parameter, there are three relationships it can have wit
 
 The qualifier goes **before the binding**, and it reads the same for `self` and for named
 parameters: `mut self`, `move items`. There are no `&` or `&mut` symbols, and no lifetime
-annotations — Ember infers all of that. The *safe* direction (borrowing) is the one you get for
+annotations — Ingle infers all of that. The *safe* direction (borrowing) is the one you get for
 free; the *consequential* direction (giving a value away with `move`) is the one you have to
 type out. Hard to do the dangerous thing by accident.
 
@@ -1850,7 +1850,7 @@ fn main() -> int {
 ### Returning an owned value: use `move`
 
 A plain parameter is borrowed, and **you can't return a borrowed value** — it would outlive the
-call and dangle. Ember catches that too:
+call and dangle. Ingle catches that too:
 
 ```ember
 struct User { name: string  age: int }
@@ -1873,7 +1873,7 @@ fn pick(move u: User) -> User { return u }   // owns u, may return it. Fine.
 
 Here's a detail worth knowing: **small all-scalar structs held in a `let` are quietly *copied*,
 not moved.** A `Point { x: int, y: int }` bound
-with `let` can be read through two names at once — Ember duplicates it for you, because it's
+with `let` can be read through two names at once — Ingle duplicates it for you, because it's
 tiny and made entirely of numbers. The move rules above kick in fully for arrays, for structs
 that contain a string or an array, and for structs held in a `var`.
 
@@ -1898,7 +1898,7 @@ after it's gone, and nothing mutable is aliased":
 - **Scalars, strings, and enums copy freely.** None of this applies to them — only to the
   unique-owner aggregates (structs and arrays).
 
-> **Fireside trivia.** Earlier in Ember's development, a generic function that aliased a struct
+> **Fireside trivia.** Earlier in Ingle's development, a generic function that aliased a struct
 > argument managed to *free the same memory twice* at runtime — precisely the class of bug an
 > ownership system exists to abolish, committed by the ownership system's own compiler. It was
 > caught, written up, and fixed by making type parameters move-by-default (the `move`/`Copy`
@@ -1909,12 +1909,12 @@ after it's gone, and nothing mutable is aliased":
 
 ## Chapter 13 — Memory, the Quiet Way
 
-Here's a question you may not have thought to ask, because Ember has carefully arranged for you
+Here's a question you may not have thought to ask, because Ingle has carefully arranged for you
 not to need to: *when does all this memory get cleaned up?*
 
 The usual answers are two: call `free` yourself and hope you got it right, or run a garbage
 collector that periodically reclaims what's unreachable, at the cost of some runtime overhead and
-the occasional pause. **Ember does neither.** It has no garbage collector, and you never write
+the occasional pause. **Ingle does neither.** It has no garbage collector, and you never write
 `free`. Memory is reclaimed *deterministically* — at exactly known moments — and the ownership
 rules from the last chapter are what make that possible.
 
@@ -1946,7 +1946,7 @@ long-running program that loops forever (say, concurrent workers pulling jobs of
 doesn't slowly accumulate garbage. And here's the property that makes reference-counting
 *complete* rather than leaky: because the only mutable things (structs and arrays) are uniquely
 owned, and everything shared is immutable, **no reference cycle can ever form.** Cycles are the
-one thing naive reference-counting can't collect; Ember's value model makes them impossible to
+one thing naive reference-counting can't collect; Ingle's value model makes them impossible to
 build in the first place. There is nothing a tracing garbage collector would catch that this
 misses.
 
@@ -1954,7 +1954,7 @@ misses.
 
 Single ownership is the default precisely because it makes the two rules above hold. But some shapes —
 a config read from everywhere, a node with several parents, a graph — genuinely want more than one
-owner, and Ember gives you two blessed tools rather than leaving you to alias by hand.
+owner, and Ingle gives you two blessed tools rather than leaving you to alias by hand.
 
 An **`rc struct`** is a *shared, immutable, reference-counted* struct. Prefix a `struct` with `rc`, and
 assigning it is an incref rather than a move or a deep copy, so many names can point at one heap
@@ -1983,7 +1983,7 @@ them, the awkward shapes have a home, and the no-cycles guarantee above still ho
 
 > **Fireside trivia.** The "billion-dollar" sibling to Hoare's null mistake is arguably the
 > use-after-free, the bug where you keep using memory after it's been handed back. Whole
-> categories of security exploit are built on it. Ember's one set of rules — single ownership,
+> categories of security exploit are built on it. Ingle's one set of rules — single ownership,
 > immutable sharing — covers three things at once: memory safety, deterministic cleanup, and
 > data-race freedom (next chapter).
 
@@ -1991,7 +1991,7 @@ them, the awkward shapes have a home, and the no-cycles guarantee above still ho
 
 ## Chapter 14 — Concurrency
 
-Doing several things at once is where sharp edges tend to appear. Ember takes a deliberately
+Doing several things at once is where sharp edges tend to appear. Ingle takes a deliberately
 structured approach that keeps them blunt.
 
 The headline ideas:
@@ -2070,7 +2070,7 @@ draining.
 
 Because channels are shareable handles, you can `spawn` several workers all pulling from one
 jobs channel, and the work fans out across whichever worker is free — a worker pool, in a few
-lines. (The shipped example `examples/05_concurrency.em` does exactly this: one dispatcher, four
+lines. (The shipped example `examples/05_concurrency.ig` does exactly this: one dispatcher, four
 workers counting error lines, a results channel summed at the end. It runs today.)
 
 ### One source, three speeds
@@ -2111,17 +2111,17 @@ channel that can never deliver) and report it as a clean runtime error instead o
 
 ## Chapter 15 — Modules and the Standard Library
 
-As a program grows past one file, you split it into **modules**. In Ember, *a file is a
+As a program grows past one file, you split it into **modules**. In Ingle, *a file is a
 module*, and you pull one into another with `import`:
 
 ```ember
-// geom.em
+// geom.ig
 struct Point { x: int  y: int }
 fn sum(p: Point) -> int { return p.x + p.y }
 ```
 
 ```ember
-// main.em
+// main.ig
 import "geom" as geom
 
 fn main() -> int {
@@ -2145,7 +2145,7 @@ is private to its own module; everything else is exported. It's not a mere conve
 enforced:
 
 ```ember
-// in geom.em:  fn _secret() -> int { return 99 }
+// in geom.ig:  fn _secret() -> int { return 99 }
 import "geom" as geom
 fn main() -> int { return geom._secret() }
 ```
@@ -2160,10 +2160,10 @@ self-documents at the call site.
 ### The standard library
 
 Some of what you've used — `println`, `sqrt`, the string methods — is built right into the
-language. The rest of the standard library lives in real Ember source files under the reserved
+language. The rest of the standard library lives in real Ingle source files under the reserved
 `std/` prefix, and you import it exactly like your own modules. (`std/` always resolves to the
 toolchain's library directory, wherever you run the compiler from.) This is the model for how
-the library grows: written in Ember, over a small native base, imported like anything else.
+the library grows: written in Ingle, over a small native base, imported like anything else.
 
 What's there today:
 
@@ -2222,10 +2222,10 @@ like any other generic. There's no `Copy` requirement on the key, and this is ne
 the surrounding prose: a built-in key (a scalar or a string) copies cheaply, and a move-type
 *struct* key is **deep-cloned on store**, so the map owns its copy and you keep yours — value-semantic
 keys with no `clone()` ceremony. A key type need only be `Hash + Eq`. The shipped
-`examples/15_wordcount.em` is a real little tool built on this — tally the words in its command-line
-arguments — and `examples/06_calculator.em` leans on it too.
+`examples/15_wordcount.ig` is a real little tool built on this — tally the words in its command-line
+arguments — and `examples/06_calculator.ig` leans on it too.
 
-> **Fireside trivia.** `std/map` is itself written in Ember — a generic struct over an array of
+> **Fireside trivia.** `std/map` is itself written in Ingle — a generic struct over an array of
 > `Option<MapEntry<K, V>>` buckets, bounded `Map<K: Hash + Eq, V>`, with open-addressing and
 > linear probing, doubling when it gets 70% full. It dispatches each key's own `hash` and `eq`
 > through witnesses it stores per instance — which means the map isn't just *using* the language's
@@ -2238,7 +2238,7 @@ arguments — and `examples/06_calculator.em` leans on it too.
 **`std/set`** — a generic hash set, `Set<K: Hash + Eq>`. It is `std/map`'s twin: the same
 open-addressing table with linear probing and doubling past a 0.7 load factor, but storing only
 keys — no value. Membership, insertion, and iteration are amortised O(1)/O(n), and adding a key
-that's already present is a no-op. Like the map, it's written in Ember and is itself a proof that
+that's already present is a no-op. Like the map, it's written in Ingle and is itself a proof that
 bounded generic structs work.
 
 **`std/slotmap`** — a generic **generational-arena** `SlotMap<V>`. The store owns the values; you hold
@@ -2276,7 +2276,7 @@ build and `std/http` the networking one.
 
 The next several modules are the answer to a fair question — *can you build a real, networked,
 graphical program in this language?* — and each is small, pure where it can be, and written in
-Ember over a thin native base:
+Ingle over a thin native base:
 
 **`std/json`** — a real JSON parser and serializer. It dogfoods the language hard: a JSON value is
 a recursive `enum Json` walked with `match`, and an object keeps its members in insertion order so
@@ -2286,7 +2286,7 @@ unicode) is the library's job, not yours.
 
 **`std/markdown`** — parses Markdown into a list of **blocks** — paragraphs, headings, bullets,
 blockquotes, fenced code. The block model is, again, an `enum`, so a renderer is one exhaustive
-`match`: exactly the language's own machinery doing exactly what it's for. Any Ember GUI can reuse
+`match`: exactly the language's own machinery doing exactly what it's for. Any Ingle GUI can reuse
 it — a chat transcript, a docs viewer, a note app.
 
 **`std/highlight`** — syntax highlighting as a *lexer* that emits coloured spans instead of
@@ -2315,7 +2315,7 @@ precisely why it stays clean under the ownership model of
 
 **`std/draw`** — immediate-mode drawing over the native graphics backend: open a window, then each
 frame clear it and issue primitives (rectangles, text, lines). Colours are packed `0xRRGGBB` ints;
-key codes follow the backend. There is no retained scene, so your app state is just your own Ember
+key codes follow the backend. There is no retained scene, so your app state is just your own Ingle
 values.
 
 **`std/ui`** — an immediate-mode widget toolkit over `std/draw`: buttons, labels, text fields,
@@ -2337,8 +2337,8 @@ components as functions, props, local state, declarative composition. It gets it
 ## Chapter 16 — Talking to C
 
 Sometimes you need a function that already exists in C — a maths routine, a system call, a
-library. Ember reaches across to C through an **`extern "c"` block**, where you declare the
-foreign function using ordinary Ember syntax:
+library. Ingle reaches across to C through an **`extern "c"` block**, where you declare the
+foreign function using ordinary Ingle syntax:
 
 ```ember
 extern "c" {
@@ -2361,8 +2361,8 @@ maths library (`libm`, which ships with every C runtime, so it adds no dependenc
 `floor`, `ceil`, `round` — those are already built in.)
 
 **The `extern` declaration is the trust boundary.** There's no separate `unsafe` keyword in
-Ember; the signature you write *is* the contract the compiler type-checks against. That's the
-one place Ember's guarantees stop and you're vouching for the C side — so if you declare a
+Ingle; the signature you write *is* the contract the compiler type-checks against. That's the
+one place Ingle's guarantees stop and you're vouching for the C side — so if you declare a
 signature that doesn't match the real C function, you've told a lie the compiler can't catch.
 Keep your declarations honest.
 
@@ -2377,7 +2377,7 @@ extern "c" {
 }
 ```
 
-There's no marshalling library involved: Ember flattens the struct to its scalar fields, and a
+There's no marshalling library involved: Ingle flattens the struct to its scalar fields, and a
 tiny C wrapper reassembles a real C struct and passes it by value — so the *system C compiler*
 generates the platform's exact calling convention for you. No hand-rolled register juggling, no
 `libffi`.
@@ -2387,18 +2387,18 @@ generates the platform's exact calling convention for you. No hand-rolled regist
 Scalars and structs are enough for a maths library, but binding *real* C — file I/O, string
 routines, anything that takes a pointer — needs three more shapes to cross the boundary. They all
 now do, and the trick that keeps them safe is that each one is **borrowed for the duration of the
-call**: Ember lends C a pointer, C uses it while the call runs, and Ember keeps ownership and frees
+call**: Ingle lends C a pointer, C uses it while the call runs, and Ingle keeps ownership and frees
 nothing C owns.
 
-| Ember type | Arrives in C as | Notes |
+| Ingle type | Arrives in C as | Notes |
 |------------|-----------------|-------|
 | `string` | `const char*` | the string's bytes, NUL-terminated; read-only |
 | `[u8]` (any packed scalar array) | a buffer pointer | the array's contiguous native storage |
 | `mut [u8]` | a *writable* buffer | C may fill the elements in place |
-| `Ptr` | an opaque handle (`FILE*`, `void*`, …) | round-trips to and from C; never dereferenced in Ember |
+| `Ptr` | an opaque handle (`FILE*`, `void*`, …) | round-trips to and from C; never dereferenced in Ingle |
 
 A `Ptr` is the interesting one: it's a handle you *receive* from C (say, from `fopen`), hand back
-to C (`fread`, `fclose`), and never look inside from Ember — its lifetime is C's business. And the
+to C (`fread`, `fclose`), and never look inside from Ingle — its lifetime is C's business. And the
 compiler helps you not botch that lifetime: a `Ptr` is **linear** — you must use it **exactly once**.
 *At most once:* it's move-only, so an extern function that *takes ownership* declares it `move` —
 `fn fclose(move f: Ptr)` — and that **consumes** it. Close the same handle twice (`fclose(f);
@@ -2413,7 +2413,7 @@ it for you, you wrap it in a **`resource struct`** — the very next section. Th
 easy: `fclose(NULL)` is a safe no-op, so the idiom is open → use under a null-check → one
 unconditional close.) Borrowing calls (`fread`/`fwrite`) leave the `Ptr` plain, so
 you can keep using it. Put the four together and you can drive libc directly.
-Here's the heart of the shipped `examples/16_ffi.em`, which writes a file and reads it straight back:
+Here's the heart of the shipped `examples/16_ffi.ig`, which writes a file and reads it straight back:
 
 ```ember
 extern "c" {
@@ -2426,7 +2426,7 @@ extern "c" {
 ```
 
 ```
-wrote 5 bytes to /tmp/ember_ffi_demo.bin
+wrote 5 bytes to /tmp/ingle_ffi_demo.bin
 read back 5 bytes: EMBER
 strlen("EMBER") = 5
 => 5
@@ -2438,13 +2438,13 @@ call (a string literal, a freshly built array) lends it for the call and reclaim
 nothing leaks.
 
 One returning direction *is* handled now, and it's how `std/http` brings a whole response body
-home: a C function that returns a `char*` can be declared to **return a `string`**. Ember copies the
-bytes into an owned Ember string on the way back and lets C free its own buffer — the safe "copy on
+home: a C function that returns a `char*` can be declared to **return a `string`**. Ingle copies the
+bytes into an owned Ingle string on the way back and lets C free its own buffer — the safe "copy on
 return" rule, with no ownership puzzle to get wrong. That's exactly what
 `fn http_post(url: string, headers: string, body: string) -> string` does inside `std/http`.
 
 What's still left out is the *other* shapes of returned memory: a non-string `malloc`'d **buffer**
-(a `[u8]` has no NUL terminator, so it needs a length channel first) and the "Ember **adopts** the
+(a `[u8]` has no NUL terminator, so it needs a length channel first) and the "Ingle **adopts** the
 raw pointer and frees it later" form for APIs that transfer ownership across. Both need an explicit
 ownership rule at the boundary, so for a buffer the workaround stays the `fread` pattern above: hand
 C a `mut [u8]` to write into. Arbitrary dynamic linking is likewise future work. (And a small,
@@ -2503,7 +2503,7 @@ fuzzes exactly this close-on-every-path analysis.
 
 > **Fireside trivia.** `extern "C"` is one of the most quietly important incantations in
 > systems programming. It exists because C++ "mangles" function names (encoding types into the
-> symbol) while C does not, so `extern "C"` means "don't mangle this — speak plain C." Ember
+> symbol) while C does not, so `extern "C"` means "don't mangle this — speak plain C." Ingle
 > borrows the exact spelling, partly for the C/C++/Rust muscle memory and partly because, when
 > a tool or a model reads `extern "c"`, it knows precisely what it's looking at. Familiar
 > punctuation is a feature, not a lack of imagination.
@@ -2520,7 +2520,7 @@ them into one loop around a single executable contract is the bet the next four 
 ## Chapter 17 — Contracts
 
 A **contract** is a statement of what a function promises, written right next to its signature,
-in ordinary Ember. There are two halves: `requires` clauses (preconditions — what must be true
+in ordinary Ingle. There are two halves: `requires` clauses (preconditions — what must be true
 when you call it) and `ensures` clauses (postconditions — what will be true when it returns). An
 `ensures` clause may use the special name `result` for the return value.
 
@@ -2551,13 +2551,13 @@ fn main() -> int { return pos(-5) }
 ```
 
 ```
-emberc: runtime error: precondition failed in 'pos' (requires, line 1)
+inglec: runtime error: precondition failed in 'pos' (requires, line 1)
 ```
 
 A contract is just a `bool` expression, so the full language is available — including calling
 your own predicate functions. You can write `requires is_sorted(xs)` and define `is_sorted`
 normally. (Contracts should *read* their inputs, not change them.) Here's the shipped
-`examples/07_contracts.em`, which specifies Euclid's GCD precisely — the result is positive and
+`examples/07_contracts.ig`, which specifies Euclid's GCD precisely — the result is positive and
 divides both inputs:
 
 ```ember
@@ -2595,8 +2595,8 @@ entirely*: zero runtime cost. So you get correctness-checking while you develop 
 when you ship. Watch the same broken contract simply vanish under `--release`:
 
 ```
-emberc --emit=run           bad.em     # precondition failed in 'pos' ...
-emberc --emit=run --release bad.em     # => 6   (the check is gone)
+inglec --emit=run           bad.ig     # precondition failed in 'pos' ...
+inglec --emit=run --release bad.ig     # => 6   (the check is gone)
 ```
 
 This is the proven `debug_assert` model: the safety net is up the whole time you're working, and
@@ -2607,7 +2607,7 @@ that isn't a `bool` is a compile error no matter the profile. Only the *runtime 
 > **Fireside trivia.** Design by contract dates to Bertrand Meyer and the Eiffel language in
 > the 1980s, named by analogy with business contracts: the caller promises the precondition,
 > the function promises the postcondition, and if both keep their word the program is correct.
-> The idea spent decades admired-but-niche. What's new in Ember isn't contracts themselves —
+> The idea spent decades admired-but-niche. What's new in Ingle isn't contracts themselves —
 > it's *fusing* them with a machine-readable trace and automatic testing, which is the next
 > chapter, and the whole reason they're here.
 
@@ -2621,14 +2621,14 @@ three things with it.
 ### `--emit=check`: fuzz your contracts automatically
 
 Your contract says what *should* be true. So the compiler can go looking for an input that makes
-it *false*. `emberc --emit=check` generates many inputs that satisfy a function's `requires`,
+it *false*. `inglec --emit=check` generates many inputs that satisfy a function's `requires`,
 runs the function, and reports the first input that violates an `ensures` (or an `assert`) — as a
 concrete counterexample.
 
 Point it at the (correct) contracts example and everything passes:
 
 ```
-emberc --emit=check examples/07_contracts.em
+inglec --emit=check examples/07_contracts.ig
 ```
 ```
 check gcd: ok (300 cases)
@@ -2647,7 +2647,7 @@ fn dbl(x: int) -> int
 }
 ```
 ```
-emberc --emit=check bad.em
+inglec --emit=check bad.ig
 ```
 ```
 check dbl: FAILED
@@ -2665,7 +2665,7 @@ colleague to reproduce.
 ### `--emit=prove`: prove there's no counterexample
 
 Fuzzing can find a bug; it can't certify the absence of one. For contracts in a decidable
-fragment — **linear integer arithmetic** over a function's integer parameters — Ember can
+fragment — **linear integer arithmetic** over a function's integer parameters — Ingle can
 *prove* the postcondition holds for all inputs, with no external solver:
 
 ```ember
@@ -2678,7 +2678,7 @@ fn add_nonneg(a: int, b: int) -> int
 }
 ```
 ```
-emberc --emit=prove add_nonneg.em
+inglec --emit=prove add_nonneg.ig
 ```
 ```
 prove add_nonneg: ensures @line 5 — PROVED
@@ -2699,14 +2699,14 @@ anything that fails.**
 
 ### `--emit=replay`: make any run reproducible
 
-The bane of debugging is the bug you can't reproduce. Ember's nondeterminism comes from a small,
+The bane of debugging is the bug you can't reproduce. Ingle's nondeterminism comes from a small,
 known set of sources — `random()`, the clock, external reads, and C calls — so the runtime can
 *record* every nondeterministic value a run consumes and *replay* them to reproduce that run
 exactly. `--emit=replay` runs your program twice (once recording, once replaying) and checks the
 two runs are byte-for-byte identical:
 
 ```
-emberc --emit=replay program.em
+inglec --emit=replay program.ig
 ```
 ```
 replay: deterministic — 5 nondeterministic event(s) recorded (5 random, 0 clock, 0 read_line, 0 read_file, 0 ffi); both runs identical
@@ -2720,7 +2720,7 @@ identically.
 Put the three together — prove, check, replay — and you have a closed correctness loop: state
 what the code should do, have the machine prove it or hunt counterexamples, and reproduce any
 failure on demand. Plenty of languages offer one or two of these; having all three hang off the
-same executable contract, in one toolchain, is what Ember is reaching for.
+same executable contract, in one toolchain, is what Ingle is reaching for.
 
 > **Fireside trivia.** The prover's engine is **Fourier–Motzkin elimination**, a method for
 > deciding systems of linear inequalities that Joseph Fourier sketched in the 1820s — yes, the
@@ -2734,18 +2734,18 @@ same executable contract, in one toolchain, is what Ember is reaching for.
 
 ## Chapter 19 — The Tape, and Errors as Data
 
-The final piece of Ember's "knowing you're right" story is *observability*: the language is
+The final piece of Ingle's "knowing you're right" story is *observability*: the language is
 built so that what your program does, and what the compiler thinks of it, are available as
 structured data — not just text for a human to squint at.
 
 ### The execution tape
 
-Run any program with `--tape` (or `--emit=trace`) and Ember writes a **tape**: one JSON object
+Run any program with `--tape` (or `--emit=trace`) and Ingle writes a **tape**: one JSON object
 per executed instruction, in order, recording the function, the instruction offset, the opcode,
 the *source line*, and a snapshot of the value stack at that moment.
 
 ```
-emberc --tape program.em
+inglec --tape program.ig
 ```
 ```
 {"fn":"main","ip":0,"op":"CONST","line":6,"stack":[]}
@@ -2767,10 +2767,10 @@ own terms, with a fix suggestion — you've seen plenty in this book. But add `-
 and every error comes out as a JSON object instead:
 
 ```
-emberc --emit=run --diagnostics=json prog.em
+inglec --emit=run --diagnostics=json prog.ig
 ```
 ```
-{"severity":"error","file":"prog.em","line":5,"col":16,"message":"use of 'a' after it was moved","near":null,"help":"a move transfers ownership; pass it without `move` to borrow it instead, or make a copy before the move","note":{"line":4,"col":21,"message":"value moved here"}}
+{"severity":"error","file":"prog.ig","line":5,"col":16,"message":"use of 'a' after it was moved","near":null,"help":"a move transfers ownership; pass it without `move` to borrow it instead, or make a copy before the move","note":{"line":4,"col":21,"message":"value moved here"}}
 ```
 
 Same information as the friendly text version — file, line, column, message, a `help` fix, and a
@@ -2780,7 +2780,7 @@ act on without scraping strings.
 ### A run-time fault, as data
 
 Run-time failures get the same treatment. When an `Err` reaches `main` unhandled — or a contract
-or refinement is violated — Ember stops with a structured **fault** that carries the offending
+or refinement is violated — Ingle stops with a structured **fault** that carries the offending
 *value as data* and pins it to a true `file:line:col`:
 
 ```ember
@@ -2797,7 +2797,7 @@ fn main() -> Result<int, IoErr> {
 ```
 ```
 error[unhandled_error]: an Err returned by main was never handled
-  --> prog.em (in main)
+  --> prog.ig (in main)
   why:    a Result that reaches main must be handled (match its Err), not left to propagate out
   values: error = IoErr { code: 5, path: "/etc/data" }
   hint:   match the Result and handle the Err arm (or have main do something with the error)
@@ -2808,14 +2808,14 @@ opaque blob but the `IoErr` you actually returned, nested strings quoted. A scal
 `Err("disk offline")` prints just as plainly. Whoever reads the fault — a person or a model — gets
 the real error to act on, not a pointer to chase.
 
-Why would a language make its errors and traces machine-readable? Because Ember is built
+Why would a language make its errors and traces machine-readable? Because Ingle is built
 **LLM-first** — for a world where a lot of code is written and run by models — and a model works
 better with "here is precisely what's wrong, as data, and here's the fix" than with prose it has
 to parse. Everything in this part — contracts as specs, fuzzing into counterexamples,
 deterministic replay, the tape, JSON diagnostics — serves the same structured feedback loop, one
 a machine or a human can close on its own.
 
-> **Fireside trivia.** Ember's tape is emitted from inside the VM's instruction dispatch, so it
+> **Fireside trivia.** Ingle's tape is emitted from inside the VM's instruction dispatch, so it
 > grows automatically with every new opcode — the trace can't fall behind the language, because
 > emitting it is part of how the language runs. Observability that's built in rather than bolted
 > on tends to look like paranoia right up until the first time it saves your afternoon.
@@ -2827,13 +2827,13 @@ a machine or a human can close on its own.
 [Chapter 18](#chapter-18--the-verification-loop) showed you a machine that hunts for a *logic*
 bug: `--emit=check` invents inputs to a function until one of its contracts turns false. Crucible
 is the twin of that idea, pointed at *memory*. Instead of inputs to one function it invents whole
-**programs** — entire `.em` files — and runs each one through a battery of detectors that watch
+**programs** — entire `.ig` files — and runs each one through a battery of detectors that watch
 what the runtime does with memory: whether a value is freed twice, leaks, is read after it has
 been freed, or quietly comes back *wrong*. Logic correctness and memory correctness are different
-problems, so Ember hunts them with two different tools.
+problems, so Ingle hunts them with two different tools.
 
 Crucible is a build-time developer tool. It lives in `tools/` (a generator, `crucible.c`, and a
-driver, `crucible.sh`), it is never shipped inside `emberc`, and you run the whole thing with one
+driver, `crucible.sh`), it is never shipped inside `inglec`, and you run the whole thing with one
 command:
 
 ```
@@ -2856,7 +2856,7 @@ that proves otherwise.**
 
 ### Why a fuzzer, and not just more tests
 
-Every memory bug Ember has ever had lived at a *combination* of features that, taken one at a
+Every memory bug Ingle has ever had lived at a *combination* of features that, taken one at a
 time, all worked: a value-struct double-freed when it was borrowed into a multi-slot parameter; a
 string interpolation that leaked its intermediate pieces; a field assignment through an array
 index; a value-struct double-freed when shared through an erased generic. Nobody sits down and
@@ -2873,13 +2873,13 @@ back a corrupted, empty view — a combination no hand-written test had thought 
 
 > **Why this needs its own tool.** Property-based testing targets your *logic*, the way
 > `--emit=check` does. Crucible targets the *runtime memory model itself*: it pits two backends
-> against each other and watches the allocator for double-frees and leaks. Ember frees memory
+> against each other and watches the allocator for double-frees and leaks. Ingle frees memory
 > deterministically from tracked ownership ([Chapter 13](#chapter-13--memory-the-quiet-way)), and
 > that deterministic freedom is exactly the thing that needs a fuzzer pointed at it.
 
 ### The generator: one seed, one program
 
-The generator takes a seed and prints one valid Ember program to standard output. Same seed, same
+The generator takes a seed and prints one valid Ingle program to standard output. Same seed, same
 program, every time — so every finding is perfectly reproducible. You can watch it work:
 
 ```
@@ -2915,7 +2915,7 @@ silently dropped, duplicated, or read back wrong, the number changes — which i
 catches *wrong answers*, not merely crashes. Run the seed-1 program straight through the VM:
 
 ```
-emberc --emit=run seed1.em
+inglec --emit=run seed1.ig
 ```
 ```
 3722=> 0
@@ -2935,7 +2935,7 @@ What does the generator deliberately reach for? The places memory bugs live:
   reassignment.
 
 That list is not arbitrary. It is the union of every feature-combination that has ever produced a
-memory bug in Ember.
+memory bug in Ingle.
 
 ### The five oracles
 
@@ -3018,7 +3018,7 @@ fn main() -> int {
 Third, it prints one line per distinct finding — the signature, the seed, and the repro path:
 
 ```
-── [NEW]   [diff:VM-ne-native]  seed=3  → tools/crucible-finds/find2_diff_VM_ne_native.em  (minimal: 1 op)
+── [NEW]   [diff:VM-ne-native]  seed=3  → tools/crucible-finds/find2_diff_VM_ne_native.ig  (minimal: 1 op)
 ```
 
 When the oracle that fired was the double-drop detector, the underlying evidence — written by the
@@ -3048,21 +3048,21 @@ fixed on both backends, and Crucible is green.
 
 When `make crucible` hands you a `NEW` finding, the loop is short:
 
-1. **Open the minimal repro** under `tools/crucible-finds/`. It is a real `.em` file, already as
+1. **Open the minimal repro** under `tools/crucible-finds/`. It is a real `.ig` file, already as
    small as the tool could make it.
 2. **Reproduce it by hand under the oracle that fired**, so you can watch it happen. For a memory
    fault, reach for the tape — build the ASan + drop-trace compiler and run the repro under it:
 
    ```
    make asan-trace
-   ASAN_OPTIONS=detect_leaks=0 build/emberc-trace --emit=run tools/crucible-finds/find2_diff_VM_ne_native.em
+   ASAN_OPTIONS=detect_leaks=0 build/inglec-trace --emit=run tools/crucible-finds/find2_diff_VM_ne_native.ig
    ```
 
    For a `diff:VM-ne-native`, run both backends and compare the answers directly:
 
    ```
-   emberc --emit=run repro.em                  # the reference answer (the VM)
-   emberc -o /tmp/repro repro.em && /tmp/repro # the native answer
+   inglec --emit=run repro.ig                  # the reference answer (the VM)
+   inglec -o /tmp/repro repro.ig && /tmp/repro # the native answer
    ```
 3. **Fix the bug, then add a regression test** under `tests/` so it stays fixed — a fix without a
    test that exercises it isn't finished.
@@ -3085,23 +3085,23 @@ cannot describe: what the runtime does with your memory.
 
 ## Chapter 21 — The Whole Toolbox
 
-Everything `emberc` can do to a program, in one place. The general shape is
-`emberc [flags] <file.em>`.
+Everything `inglec` can do to a program, in one place. The general shape is
+`inglec [flags] <file.ig>`.
 
 | Command | What it does |
 |---------|--------------|
-| `emberc --emit=run file.em` | **Compile and execute.** The one you'll use most. Prints output, then `=> <value>`. |
-| `emberc --emit=tokens file.em` | Show the token stream (what the lexer saw). |
-| `emberc --emit=ast file.em` | Show the parsed syntax tree. |
-| `emberc --emit=bytecode file.em` | Show the compiled bytecode, annotated with source lines. |
-| `emberc --emit=trace file.em` | Execute and emit the execution **tape** (JSON Lines). |
-| `emberc --tape file.em` | Alias for `--emit=trace`. |
-| `emberc --emit=check file.em` | **Property-fuzz** every checkable contract; report counterexamples. |
-| `emberc --emit=prove file.em` | **Statically prove** the contracts in the decidable (linear-integer) fragment. |
-| `emberc --emit=replay file.em` | Record-and-**replay** the run; verify it's deterministic. |
-| `emberc --emit=docs file.em` | Render `///` doc comments to a Markdown reference page. |
-| `emberc --emit=c file.em` | **Lower to C.** Print the standalone C translation unit the native backend produces. |
-| `emberc -o <bin> file.em` | **Compile to a native binary.** Emit that C and link it against the runtime into a standalone executable — no VM. |
+| `inglec --emit=run file.ig` | **Compile and execute.** The one you'll use most. Prints output, then `=> <value>`. |
+| `inglec --emit=tokens file.ig` | Show the token stream (what the lexer saw). |
+| `inglec --emit=ast file.ig` | Show the parsed syntax tree. |
+| `inglec --emit=bytecode file.ig` | Show the compiled bytecode, annotated with source lines. |
+| `inglec --emit=trace file.ig` | Execute and emit the execution **tape** (JSON Lines). |
+| `inglec --tape file.ig` | Alias for `--emit=trace`. |
+| `inglec --emit=check file.ig` | **Property-fuzz** every checkable contract; report counterexamples. |
+| `inglec --emit=prove file.ig` | **Statically prove** the contracts in the decidable (linear-integer) fragment. |
+| `inglec --emit=replay file.ig` | Record-and-**replay** the run; verify it's deterministic. |
+| `inglec --emit=docs file.ig` | Render `///` doc comments to a Markdown reference page. |
+| `inglec --emit=c file.ig` | **Lower to C.** Print the standalone C translation unit the native backend produces. |
+| `inglec -o <bin> file.ig` | **Compile to a native binary.** Emit that C and link it against the runtime into a standalone executable — no VM. |
 
 The last two are the native backend, and they get their own chapter:
 [Chapter 22: Compiling to Native](#chapter-22--compiling-to-native).
@@ -3120,15 +3120,15 @@ has an error (lexical, syntax, type, or runtime) · `66` the source file couldn'
 
 ## Chapter 22 — Compiling to Native
 
-Every program in this book so far has run the same way: the compiler turns your `.em` file into
-bytecode, and a small virtual machine executes it. That VM is the beating heart of Ember — it is
+Every program in this book so far has run the same way: the compiler turns your `.ig` file into
+bytecode, and a small virtual machine executes it. That VM is the beating heart of Ingle — it is
 where contracts are checked, where the tape is recorded, where `--emit=prove`, `--emit=check` and
-`--emit=replay` live. It is the language's **reference semantics**: the definition of what an Ember
+`--emit=replay` live. It is the language's **reference semantics**: the definition of what an Ingle
 program *means*.
 
-But a virtual machine is not how you *ship* software. For that, Ember has a second path: it can
+But a virtual machine is not how you *ship* software. For that, Ingle has a second path: it can
 lower your program to **C**, hand that to the system C compiler, and produce a **standalone native
-binary** — a real executable, no interpreter, no runtime to install, nothing of Ember left on the
+binary** — a real executable, no interpreter, no runtime to install, nothing of Ingle left on the
 surface.
 
 ### Two commands
@@ -3136,7 +3136,7 @@ surface.
 The one you'll reach for is `-o`:
 
 ```
-emberc -o hello hello.em
+inglec -o hello hello.ig
 ./hello
 ```
 ```
@@ -3144,17 +3144,17 @@ the answer is 42
 => 0
 ```
 
-That is a native executable. It links against Ember's small runtime — allocation, the drop
+That is a native executable. It links against Ingle's small runtime — allocation, the drop
 machinery, strings, arrays, the handful of things the language needs while it runs — and depends on
 nothing else. Run it, ship it, drop it in a container without packing an interpreter alongside it.
 
-If you're curious what Ember handed the C compiler, ask to see it:
+If you're curious what Ingle handed the C compiler, ask to see it:
 
 ```
-emberc --emit=c hello.em
+inglec --emit=c hello.ig
 ```
 ```c
-// Generated by `emberc --emit=c` from hello.em. Do not edit.
+// Generated by `inglec --emit=c` from hello.ig. Do not edit.
 // The bytecode VM is the reference semantics; tests/native diffs the two.
 #include "ember_rt.h"
 
@@ -3175,12 +3175,12 @@ step.
 
 ### One front end, two lowerings — and a referee
 
-Here is the decision that makes this safe. Ember does **not** have two compilers. It has one front
+Here is the decision that makes this safe. Ingle does **not** have two compilers. It has one front
 end — one lexer, one parser, one type checker — and *two lowerings* hanging off the same checked
 syntax tree: the one to bytecode you've used all along, and a new one (in `src/cgen_c.c`) to C. The
 bytecode VM stays the canonical reference semantics; the native binary is the *release* build.
 
-Two implementations of anything drift apart unless something forces them together, so Ember runs a
+Two implementations of anything drift apart unless something forces them together, so Ingle runs a
 **differential test**: a corpus of programs is executed *both* ways — on the VM and as a compiled
 binary — and their output must match, byte for byte. A divergence fails the build.
 
@@ -3225,17 +3225,17 @@ fn main() -> int {
 Run it on the VM and the contract fires before `main` ever reaches the `println`:
 
 ```
-emberc --emit=run bad.em
+inglec --emit=run bad.ig
 ```
 ```
-emberc: runtime error: postcondition failed in 'bad' (ensures, line 2)
+inglec: runtime error: postcondition failed in 'bad' (ensures, line 2)
 ```
 
 Compile the very same program to native, and it runs straight through — the spec isn't in there
 anymore:
 
 ```
-emberc -o bad bad.em && ./bad
+inglec -o bad bad.ig && ./bad
 ```
 ```
 y=5
@@ -3249,16 +3249,16 @@ guaranteed. The native binary's job is to be fast and standalone. So the workflo
 two-step: **prove, check and replay on the VM until you trust the program, then `-o` it for the
 world.** You verify the meaning where meaning is defined, and ship the speed where speed is wanted.
 
-(One practical note while the toolchain is young: a freshly built `emberc -o` finds its runtime
+(One practical note while the toolchain is young: a freshly built `inglec -o` finds its runtime
 next to the compiler, in the build tree, so native compilation expects to run from there for now.
 Packaging it for a system-wide install is plumbing, tracked on the
 [Not Yet List](#chapter-23--the-not-yet-list).)
 
 ### Why C, and why this matters
 
-Ember lowers from the *typed AST*, not from the bytecode, and targets *C*, not assembly or LLVM IR.
+Ingle lowers from the *typed AST*, not from the bytecode, and targets *C*, not assembly or LLVM IR.
 Both choices point the same way. C gives natural output and a compiler on every platform with no new
-dependency — Ember's empty dependency tree survives intact. And lowering from the AST, where the
+dependency — Ingle's empty dependency tree survives intact. And lowering from the AST, where the
 expression `a + b` still exists *as an expression*, rather than from stack-based bytecode, where it
 has been flattened into pushes and pops, is what keeps the generated C readable instead of an
 unrolled interpreter.
@@ -3274,7 +3274,7 @@ in that direction.
 > into C and let the ordinary C compiler finish the job. That is how C++ reached every machine that
 > already had a C compiler, which in 1983 was very nearly all of them. Four decades on, the move
 > still works for the same reason: C is the closest thing computing has to a universal assembler, and
-> a language that learns to speak it inherits the entire world C already runs on. Ember's `--emit=c`
+> a language that learns to speak it inherits the entire world C already runs on. Ingle's `--emit=c`
 > is the newest entry in a long and respectable line.
 
 ---
@@ -3283,7 +3283,7 @@ in that direction.
 
 This is the most important chapter for keeping you honest, and it's the promise from the front
 of the book made good. Everything *else* in this book runs today. The things below are
-**designed but not yet built** — they appear in Ember's manifesto, its spec, or its examples as
+**designed but not yet built** — they appear in Ingle's manifesto, its spec, or its examples as
 intentions, and writing them today will not work. They're listed so you know where the edge is,
 not so you'll use them.
 
@@ -3333,11 +3333,11 @@ not so you'll use them.
 
 **Foreign functions and capabilities**
 
-- **FFI returning C-owned memory** — Ember passes scalars, all-scalar structs, strings
+- **FFI returning C-owned memory** — Ingle passes scalars, all-scalar structs, strings
   (`const char*`), packed buffers (`[u8]`/`mut [u8]`), and opaque `Ptr` handles across to C, and a
   returned `char*` now comes back as a copied-in `string` (the mechanism `std/http` uses to return a
   response body). What's left is the *other* returning shapes: a non-string `malloc`'d buffer (needs
-  a length channel) and an "Ember adopts and frees the pointer" form for ownership-transfer APIs —
+  a length channel) and an "Ingle adopts and frees the pointer" form for ownership-transfer APIs —
   plus arbitrary dynamic linking.
 - **Capabilities** — the designed model for bounding what code may do (gating the FFI, then
   filesystem and network) is in the manifesto, not the language yet.
@@ -3352,7 +3352,7 @@ compile for a reason on this list. That's the deal.
 
 > **Fireside trivia.** A language that keeps a careful, public list of what it *can't* do yet is
 > rarer than it should be — the temptation is always to describe the destination as if you'd
-> arrived. Ember keeps two such lists in its own repository: a manifesto of decisions and a
+> arrived. Ingle keeps two such lists in its own repository: a manifesto of decisions and a
 > dated log of every bug and design flaw found while building (the cheerfully-named
 > "Opportunities For Improvement"). The window that couldn't accept a click on its very first
 > frame; the uninitialised field that corrupted a function call; the generic that freed memory
@@ -3481,8 +3481,8 @@ fn clamp(x: int, lo: int, hi: int) -> int
 { if x < lo { return lo }  if x > hi { return hi }  return x }
 assert(cond, "message")           // inline check; elided in --release
 
-// emberc --emit=run | check | prove | replay | trace(--tape) | docs | c   [--release]
-// emberc -o <bin> file.em     // compile to a standalone native binary (Chapter 22)
+// inglec --emit=run | check | prove | replay | trace(--tape) | docs | c   [--release]
+// inglec -o <bin> file.ig     // compile to a standalone native binary (Chapter 22)
 ```
 
 ---
@@ -3491,32 +3491,32 @@ assert(cond, "message")           // inline check; elided in --release
 
 The chapters so far built the language up piece by piece: values, functions, structs and enums,
 generics, ownership, concurrency, contracts. This last part spends all of it at once. Flare —
-Ember's UI layer — is where structs become components, enums become the thing you `match` to paint
+Ingle's UI layer — is where structs become components, enums become the thing you `match` to paint
 a screen, closures hang off buttons, and the render loop from
 [Chapter 13](#chapter-13--memory-the-quiet-way) grows into an application. It's the book's capstone,
 and there's no new syntax in it — only the old syntax pointed at a window.
 
 ## Chapter 25 — Flare: Interfaces You Can Read
 
-Flare is Ember's component-style UI layer. Components are functions, props are arguments, state is
+Flare is Ingle's component-style UI layer. Components are functions, props are arguments, state is
 local, and the screen is a declarative description you re-evaluate each frame. There's no retained
 widget tree, no diffing layer, no separate effect system — and the reason there isn't is the whole
 design, so it's worth a minute.
 
 ### Immediate mode, not a retained tree
 
-Ember's graphics backend **redraws the whole frame every tick, cheaply**. That's the immediate-mode
+Ingle's graphics backend **redraws the whole frame every tick, cheaply**. That's the immediate-mode
 model from [Chapter 13](#chapter-13--memory-the-quiet-way): the UI is a pure function of your state,
 drawn fresh each frame, with no retained widget tree to keep in sync. There's nothing to diff and
 nothing to reconcile, because nothing is kept between frames to fall out of date. Components, props,
-local state, and declarative composition drop straight into Ember's `loop { …describe the frame… }`.
+local state, and declarative composition drop straight into Ingle's `loop { …describe the frame… }`.
 No retained tree means no graph-shaped mutable state, which means the ownership model from
 [Chapter 12](#chapter-12--ownership-without-tears) stays clean even while you build something live
 and interactive.
 
 ### The shape of a Flare program
 
-Here's a whole one — a window with a toolbar and a counter. It's `examples/graphics/17_flare.em`,
+Here's a whole one — a window with a toolbar and a counter. It's `examples/graphics/17_flare.ig`,
 shipped with the compiler:
 
 ```ember
@@ -3559,7 +3559,7 @@ fn main() -> int {
 Build the graphics compiler and run it:
 
 ```
-make graphics && EMBER_STD=./std build/emberc-gfx --emit=run examples/graphics/17_flare.em
+make graphics && INGLE_STD=./std build/inglec-gfx --emit=run examples/graphics/17_flare.ig
 ```
 
 Four things in that loop are the entire model. The next four sections take them one at a time.
@@ -3685,7 +3685,7 @@ f.end()                                        // close the body row
 
 Motion rides the **same keyed state** as everything else, and it steps on a **fixed timestep**, so an
 animation is a pure function of the frame count — deterministic, replayable, golden-testable, never
-tied to the wall clock. There are three pieces, and `examples/graphics/18_flare_anim.em` runs all of
+tied to the wall clock. There are three pieces, and `examples/graphics/18_flare_anim.ig` runs all of
 them.
 
 **A spring** eases a named value toward a target, one fixed step per frame. `f.spring("panel_w",
@@ -3731,7 +3731,7 @@ loop {
 
 Add or remove a row at the top and the rows below *slide* to their new places instead of jumping. The
 determinism is the quietly useful part: because motion is a function of frame count, the animation
-goldens (`tests/graphics/flare_spring.em`, `flare_flip.em`) reproduce frame-for-frame.
+goldens (`tests/graphics/flare_spring.ig`, `flare_flip.ig`) reproduce frame-for-frame.
 
 ### Appearing and disappearing
 
@@ -3849,7 +3849,7 @@ special-cased: Flare delegates
 everything to `std/ui`, so the theme, the per-frame UI tape (a record of input and draw commands, in
 the spirit of the execution tape from
 [Chapter 19](#chapter-19--the-tape-and-errors-as-data)), and contracts all carry over unchanged.
-Flare is a few hundred lines of Ember over `std/ui` and `std/layout` — you could have written it.
+Flare is a few hundred lines of Ingle over `std/ui` and `std/layout` — you could have written it.
 
 ### Staying at sixty
 
@@ -3880,7 +3880,7 @@ True to the book's deal ([Chapter 23](#chapter-23--the-not-yet-list)), here are 
 > (and every model trained on their code) knows cold. Pair it with events-as-return-values, where the
 > handler sits physically next to the widget, and you get a UI dialect with almost no hidden control
 > flow: no callback indirection, no effect scheduling, no retained tree mutating behind your back. The
-> whole stack, layout solver included, is itself a handful of readable Ember files.
+> whole stack, layout solver included, is itself a handful of readable Ingle files.
 
 ---
 
@@ -3891,7 +3891,7 @@ True to the book's deal ([Chapter 23](#chapter-23--the-not-yet-list)), here are 
 **Borrow** — using a value without taking ownership of it; the default for parameters.
 
 **Closure** — a function value that has captured variables from where it was created (by value,
-in Ember).
+in Ingle).
 
 **Contract** — a `requires`/`ensures` specification attached to a function; checked in debug,
 elided in release.
@@ -3917,7 +3917,7 @@ carrying typed fields.
 parameter or return type), which is the condition for using it as a value type for dynamic
 dispatch. Non-object-safe interfaces are still usable as generic bounds.
 
-**Option** — `Some(value)` or `None`; Ember's "maybe a value," replacing `null`.
+**Option** — `Some(value)` or `None`; Ingle's "maybe a value," replacing `null`.
 
 **Prelude** — the handful of types (`Option`, `Result`) injected into every program
 automatically.
@@ -3932,7 +3932,7 @@ automatically.
 
 ## Colophon
 
-This book describes the Ember language as it stood in **late June 2026**, early in its life and
+This book describes the Ingle language as it stood in **late June 2026**, early in its life and
 moving fast. This edition was refreshed as several features landed in quick succession —
 **dynamic dispatch** (interfaces as value types), the **bitwise and shift operators** plus the
 explicit **wrapping-arithmetic** builtins, the **generic-keyed `Map<K, V>`** and the bounded
@@ -3955,14 +3955,14 @@ Flare's **60fps** work (list virtualization, idle-CPU gating) with **enter/exit 
 toasts**. The toolchain also grew a **fourth gate** (`ledger`, the resource-linearity fuzzer) and now
 builds and runs on **Linux** alongside macOS.
 
-A later pass began Ember's **type-system campaign**: **newtypes** (`type UserId = int`, a distinct
+A later pass began Ingle's **type-system campaign**: **newtypes** (`type UserId = int`, a distinct
 nominal type over a scalar or string, erased to its base at zero cost) and **refinement types**
 (`type Percent = int where 0 <= self && self <= 100`, a predicate checked at construction) — both in
 [Chapter 7](#chapter-7--structs-and-methods). The run-time **fault** also grew sharper: an unhandled
 error now renders its payload as data (`values: error = IoErr { code: 5 }`) at a true `file:line:col`
 ([Chapter 19](#chapter-19--the-tape-and-errors-as-data)).
 
-Every Ember snippet in these pages was compiled and run with the reference compiler before being
+Every Ingle snippet in these pages was compiled and run with the reference compiler before being
 written down, and the outputs shown are the outputs produced. Where this book and the language's
 formal specification disagreed, the book follows **what the compiler actually does** — and
 refreshing it turned up a few places where the spec's prose had drifted behind its own
@@ -3972,7 +3972,7 @@ said to need `Copy` and Flare's inline Markdown still described as unrendered). 
 Opportunities For Improvement rather than copied, which is exactly the bargain this book makes
 with itself.
 
-Ember will have grown since you read this. Treat the *spirit* — safe by default, simple by
+Ingle will have grown since you read this. Treat the *spirit* — safe by default, simple by
 default, fast to build, honest about its edges — as the durable part, and check the current
 spec and examples for the details. The fire's only just been lit.
 

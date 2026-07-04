@@ -1,31 +1,31 @@
 #!/bin/sh
-# tools/embdiff.sh — the byte-diff dev loop for the self-hosted bytecode SERIALIZER (selfhost/serialize.em,
-# docs/design/bytecode-container.md, Phase 1c). For each source file it produces the `.emb` container two
+# tools/embdiff.sh — the byte-diff dev loop for the self-hosted bytecode SERIALIZER (selfhost/serialize.ig,
+# docs/design/bytecode-container.md, Phase 1c). For each source file it produces the `.igb` container two
 # ways and requires them byte-identical:
 #
-#   * stage 0 (the C reference):   emberc --emit=bytecode-bin -o <a.emb> FILE
-#   * the self-hosted serializer:  emberc --emit=run selfhost/serialize_dump.em FILE <b.emb>
+#   * stage 0 (the C reference):   inglec --emit=bytecode-bin -o <a.igb> FILE
+#   * the self-hosted serializer:  inglec --emit=run selfhost/serialize_dump.ig FILE <b.igb>
 #
 # On a divergence it prints the byte offset of the first difference and a hexdump window around it, plus
 # which section that offset falls in — the same "show me the first hunk" loop cgdiff/ccdiff gave the
 # bytecode and C-emit ports. PASS iff every file's two containers are identical.
 #
 # Usage:
-#   tools/embdiff.sh FILE.em [FILE.em ...]
-#   tools/embdiff.sh -d DIR          # every *.em under DIR (non-graphics)
+#   tools/embdiff.sh FILE.ig [FILE.ig ...]
+#   tools/embdiff.sh -d DIR          # every *.ig under DIR (non-graphics)
 
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-BIN="$ROOT/build/emberc"
-export EMBER_STD="$ROOT/std"
+BIN="$ROOT/build/inglec"
+export INGLE_STD="$ROOT/std"
 [ -x "$BIN" ] || { echo "embdiff: $BIN not built — run 'make' first" >&2; exit 2; }
 
-A="${TMPDIR:-/tmp}/embdiff_stage0_$$.emb"
-B="${TMPDIR:-/tmp}/embdiff_self_$$.emb"
+A="${TMPDIR:-/tmp}/embdiff_stage0_$$.igb"
+B="${TMPDIR:-/tmp}/embdiff_self_$$.igb"
 
 files=""
 if [ "${1:-}" = "-d" ]; then
-    files=$(find "$2" -name '*.em' | grep -v graphics | sort)
+    files=$(find "$2" -name '*.ig' | grep -v graphics | sort)
 else
     files="$*"
 fi
@@ -39,9 +39,9 @@ for f in $files; do
     if ! (cd "$ROOT" && "$BIN" --emit=bytecode-bin -o "$A" "$rel" >/dev/null 2>&1); then
         continue   # stage 0 can't compile it (checker error / no main) — not a serializer case
     fi
-    (cd "$ROOT" && "$BIN" --emit=run selfhost/serialize_dump.em "$rel" "$B" >/dev/null 2>&1)
+    (cd "$ROOT" && "$BIN" --emit=run selfhost/serialize_dump.ig "$rel" "$B" >/dev/null 2>&1)
     if [ ! -f "$B" ]; then
-        echo "FAIL    $rel  (self-hosted serializer produced no .emb)"
+        echo "FAIL    $rel  (self-hosted serializer produced no .igb)"
         fail=$((fail + 1))
         continue
     fi

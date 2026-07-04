@@ -1,7 +1,7 @@
 (* ===========================================================================
-   Ember grammar (EBNF)
+   Ingle grammar (EBNF)
    ---------------------------------------------------------------------------
-   This is the SPEC of Ember's surface syntax. The hand-written recursive-descent
+   This is the SPEC of Ingle's surface syntax. The hand-written recursive-descent
    parser in src/parser.c is the implementation of record; this grammar is the
    specification it implements. Keep the two in sync: any change to one updates
    the other in the same commit. The parser AST golden tests (tests/parser/) are
@@ -11,7 +11,7 @@
    ( ) grouping; | alternation; (* comment *).
 
    Three things EBNF cannot express are handled by the parser and noted inline:
-     (N) Newline termination — Ember has no semicolons. The lexer emits an
+     (N) Newline termination — Ingle has no semicolons. The lexer emits an
          implicit terminator at a line break only after a token that CAN end a
          statement: a literal, an identifier, "self", a closing ")" "]" "}", the
          postfix "?", or "return"/"break"/"continue". A line break after any OTHER

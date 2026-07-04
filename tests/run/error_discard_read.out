@@ -1,1 +1,1 @@
-tests/run/error_discard_read.em:7:13: error: undefined variable
+tests/run/error_discard_read.ig:7:13: error: undefined variable

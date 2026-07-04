@@ -1,1 +1,1 @@
-tests/run/error_int_literal_range.em:6:13: error: this integer literal exceeds the i64 range; only 'u64' can hold it (annotate the binding 'u64', or add the 'u64' suffix)
+tests/run/error_int_literal_range.ig:6:13: error: this integer literal exceeds the i64 range; only 'u64' can hold it (annotate the binding 'u64', or add the 'u64' suffix)
