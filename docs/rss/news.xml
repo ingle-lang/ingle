@@ -9,7 +9,7 @@
     <atom:link href="https://www.ingle-lang.org/rss/news.xml" rel="self" type="application/rss+xml"/>
     <item>
       <title>Ingle v0.3.42 — Unified Fault errors, interactive dock, and public launch</title>
-      <link>https://www.ingle-lang.org/news#2026-06-23-ember-v0-3-42-unified-fault-errors-interactive-dock-and-public-launch</link>
+      <link>https://www.ingle-lang.org/news#2026-06-23-ingle-v0-3-42-unified-fault-errors-interactive-dock-and-public-launch</link>
       <guid isPermaLink="false">ember-lang-news-2026-06-23-0</guid>
       <pubDate>Tue, 23 Jun 2026 00:00:00 -0000</pubDate>
       <description><![CDATA[Ingle v0.3.42 is the first publicly released version of the language and compiler.<br>

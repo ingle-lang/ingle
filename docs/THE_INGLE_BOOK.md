@@ -191,7 +191,7 @@ machine.
 # Index
 
 **Part I — First Light**
-- [Chapter 1 — Hello, Ingle](#chapter-1--hello-ember)
+- [Chapter 1 — Hello, Ingle](#chapter-1--hello-ingle)
 - [Chapter 2 — Values and Bindings](#chapter-2--values-and-bindings)
 - [Chapter 3 — Numbers, Text, and Truth](#chapter-3--numbers-text-and-truth)
 
@@ -2433,7 +2433,7 @@ extern "c" {
 ```
 
 ```
-wrote 5 bytes to /tmp/ember_ffi_demo.bin
+wrote 5 bytes to /tmp/ingle_ffi_demo.bin
 read back 5 bytes: EMBER
 strlen("EMBER") = 5
 => 5

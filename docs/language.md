@@ -203,7 +203,7 @@ A binding's initialiser is checked *before* the name is in scope, so `let a = a`
 outer `a`, never itself.
 
 A **top-level `let`** declares a module **constant** — a named, immutable, compile-time value
-(`let WIDTH = 800`, `let TITLE = "ember"`). Its initialiser must be a literal (int, float, bool,
+(`let WIDTH = 800`, `let TITLE = "ingle"`). Its initialiser must be a literal (int, float, bool,
 string, or a negated number); each use is substituted with that value at compile time, so a
 constant has no runtime cost. Constants are exported like functions and read qualified across
 modules (`draw.RED`); a leading `_` keeps one private (§5d). A top-level `var`, or a non-literal
