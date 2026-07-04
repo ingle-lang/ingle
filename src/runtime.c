@@ -17,6 +17,7 @@
 #include "ember_rt.h"
 #include "builtin.h"   // WITNESS_NATIVE_BASE + the Hash/Eq native-witness ids
 #include "cextern.h"   // the in-tree C FFI registry (em_ffi → cextern_call)
+#include "graphics.h" // EMBER_GRAPHICS: ember_gfx_* (self-guarded; a no-op in the default build)
 
 #if EMBER_DROP_TRACE
 #include <execinfo.h>  // backtrace() for the opt-in double-drop detector (memory tape)
@@ -2046,10 +2047,169 @@ char **em_argv = NULL;
 
 
 
+#if EMBER_GRAPHICS
+// ember_gfx_native dispatches a graphics builtin (NATIVE_GFX_* ids 100-142) to the isolated raylib
+// backend. SHARED by the VM's call_native AND the native runtime's em_native so both the interpreter
+// and native binaries behave identically — the checker has validated arity/types, so args[] are as
+// expected. `ctx` is the EmberRt whose heap clipboard_get / dropped_files allocate their result into.
+Value ember_gfx_native(EmberRt *ctx, int nid, const Value *args) {
+    switch (nid) {
+        // Graphics primitives (MANIFESTO §5g) — dispatch to the isolated backend.
+        // The checker has validated arity/types, so the arguments are as expected.
+        case NATIVE_GFX_WINDOW_OPEN:
+            ember_gfx_window_open((int)AS_INT(args[0]), (int)AS_INT(args[1]),
+                                  AS_CSTRING(args[2]));
+            return INT_VAL(0);
+        case NATIVE_GFX_WINDOW_CLOSE:
+            ember_gfx_window_close();
+            return INT_VAL(0);
+        case NATIVE_GFX_SHOULD_CLOSE:
+            return INT_VAL(ember_gfx_should_close());
+        case NATIVE_GFX_SET_EVENT_WAIT:
+            ember_gfx_set_event_waiting((int)AS_INT(args[0]));
+            return INT_VAL(0);
+        case NATIVE_GFX_HAD_INPUT:
+            return INT_VAL(ember_gfx_had_input());
+        case NATIVE_GFX_MEASURE_MISSES:
+            return INT_VAL(ember_gfx_measure_misses());
+        case NATIVE_GFX_FRAME_STEPS:
+            return INT_VAL(ember_gfx_frame_steps());
+        case NATIVE_GFX_SET_ALPHA:
+            ember_gfx_set_alpha((int)AS_INT(args[0]));
+            return INT_VAL(0);
+        case NATIVE_GFX_FRAME_BEGIN:
+            ember_gfx_frame_begin((int)AS_INT(args[0]));
+            return INT_VAL(0);
+        case NATIVE_GFX_FRAME_END:
+            ember_gfx_frame_end();
+            return INT_VAL(0);
+        case NATIVE_GFX_DRAW_RECT:
+            ember_gfx_draw_rect((int)AS_INT(args[0]), (int)AS_INT(args[1]),
+                                (int)AS_INT(args[2]), (int)AS_INT(args[3]),
+                                (int)AS_INT(args[4]));
+            return INT_VAL(0);
+        case NATIVE_GFX_DRAW_TEXT:
+            ember_gfx_draw_text(AS_CSTRING(args[0]), (int)AS_INT(args[1]),
+                                (int)AS_INT(args[2]), (int)AS_INT(args[3]),
+                                (int)AS_INT(args[4]));
+            return INT_VAL(0);
+        case NATIVE_GFX_KEY_DOWN:
+            return INT_VAL(ember_gfx_key_down((int)AS_INT(args[0])));
+        case NATIVE_GFX_MOUSE_X:
+            return INT_VAL(ember_gfx_mouse_x());
+        case NATIVE_GFX_MOUSE_Y:
+            return INT_VAL(ember_gfx_mouse_y());
+        case NATIVE_GFX_MOUSE_DOWN:
+            return INT_VAL(ember_gfx_mouse_down());
+        case NATIVE_GFX_MOUSE_RDOWN:
+            return INT_VAL(ember_gfx_mouse_right_down());
+        case NATIVE_GFX_MEASURE_TEXT:
+            return INT_VAL(ember_gfx_measure_text(AS_CSTRING(args[0]),
+                                                  (int)AS_INT(args[1])));
+        case NATIVE_GFX_TEXT_LINE_H:
+            return INT_VAL(ember_gfx_text_line_height((int)AS_INT(args[0])));
+        case NATIVE_GFX_CHAR_PRESSED:
+            return INT_VAL(ember_gfx_char_pressed());
+        case NATIVE_GFX_KEY_PRESSED:
+            return INT_VAL(ember_gfx_key_pressed((int)AS_INT(args[0])));
+        case NATIVE_GFX_KEY_REPEAT:
+            return INT_VAL(ember_gfx_key_repeat((int)AS_INT(args[0])));
+        case NATIVE_GFX_LOAD_FONT:
+            return INT_VAL(ember_gfx_load_font(AS_CSTRING(args[0])));
+        case NATIVE_GFX_SET_FONT:
+            ember_gfx_set_font((int)AS_INT(args[0]));
+            return INT_VAL(0);
+        case NATIVE_GFX_SET_CURSOR:
+            ember_gfx_set_cursor((int)AS_INT(args[0]));
+            return INT_VAL(0);
+        case NATIVE_GFX_CLIPBOARD_SET:
+            ember_gfx_clipboard_set(AS_CSTRING(args[0]));
+            return INT_VAL(0);
+        case NATIVE_GFX_CLIPBOARD_GET: {
+            const char *cb = ember_gfx_clipboard_get();
+            size_t cblen = (cb != NULL) ? strlen(cb) : 0;
+            ObjString *cbs = make_string(ctx, cblen);
+            if (cblen > 0) {
+                memcpy(cbs->chars, cb, cblen);
+            }
+            return OBJ_VAL(cbs);
+        }
+        case NATIVE_GFX_DROPPED_FILES: {
+            const char *df = ember_gfx_dropped_files();
+            size_t dflen = (df != NULL) ? strlen(df) : 0;
+            ObjString *dfs = make_string(ctx, dflen);
+            if (dflen > 0) {
+                memcpy(dfs->chars, df, dflen);
+            }
+            return OBJ_VAL(dfs);
+        }
+        case NATIVE_GFX_SCREEN_W:
+            return INT_VAL(ember_gfx_screen_width());
+        case NATIVE_GFX_SCREEN_H:
+            return INT_VAL(ember_gfx_screen_height());
+        case NATIVE_GFX_SET_LAYER:
+            ember_gfx_set_layer((int)AS_INT(args[0]));
+            return INT_VAL(0);
+        case NATIVE_GFX_CLIP_PUSH:
+            ember_gfx_clip_push((int)AS_INT(args[0]), (int)AS_INT(args[1]),
+                                (int)AS_INT(args[2]), (int)AS_INT(args[3]));
+            return INT_VAL(0);
+        case NATIVE_GFX_CLIP_POP:
+            ember_gfx_clip_pop();
+            return INT_VAL(0);
+        case NATIVE_GFX_TAPE_OPEN:
+            return INT_VAL(ember_gfx_tape_open(AS_CSTRING(args[0])));
+        case NATIVE_GFX_TAPE_CLOSE:
+            ember_gfx_tape_close();
+            return INT_VAL(0);
+        case NATIVE_GFX_TAPE_MARK:
+            ember_gfx_tape_mark(AS_CSTRING(args[0]), AS_CSTRING(args[1]));
+            return INT_VAL(0);
+        case NATIVE_GFX_FRAME_CAPTURE:
+            return INT_VAL(ember_gfx_frame_capture(AS_CSTRING(args[0])));
+        case NATIVE_GFX_FILL_ROUND:
+            ember_gfx_fill_round((int)AS_INT(args[0]), (int)AS_INT(args[1]), (int)AS_INT(args[2]),
+                                 (int)AS_INT(args[3]), (int)AS_INT(args[4]), (int)AS_INT(args[5]),
+                                 (int)AS_INT(args[6]));
+            return INT_VAL(0);
+        case NATIVE_GFX_STROKE_ROUND:
+            ember_gfx_stroke_round((int)AS_INT(args[0]), (int)AS_INT(args[1]), (int)AS_INT(args[2]),
+                                   (int)AS_INT(args[3]), (int)AS_INT(args[4]), (int)AS_INT(args[5]),
+                                   (int)AS_INT(args[6]), (int)AS_INT(args[7]));
+            return INT_VAL(0);
+        case NATIVE_GFX_FILL_GRAD:
+            ember_gfx_fill_grad((int)AS_INT(args[0]), (int)AS_INT(args[1]), (int)AS_INT(args[2]),
+                                (int)AS_INT(args[3]), (int)AS_INT(args[4]), (int)AS_INT(args[5]),
+                                (int)AS_INT(args[6]), (int)AS_INT(args[7]));
+            return INT_VAL(0);
+        case NATIVE_GFX_SHADOW:
+            ember_gfx_shadow((int)AS_INT(args[0]), (int)AS_INT(args[1]), (int)AS_INT(args[2]),
+                             (int)AS_INT(args[3]), (int)AS_INT(args[4]), (int)AS_INT(args[5]));
+            return INT_VAL(0);
+        case NATIVE_GFX_FILL_CIRCLE:
+            ember_gfx_fill_circle((int)AS_INT(args[0]), (int)AS_INT(args[1]), (int)AS_INT(args[2]),
+                                  (int)AS_INT(args[3]), (int)AS_INT(args[4]));
+            return INT_VAL(0);
+        case NATIVE_GFX_MOUSE_WHEEL:
+            return INT_VAL(ember_gfx_mouse_wheel());
+    }
+    return INT_VAL(0);
+}
+#endif
+
+
 // em_native — the native-builtin dispatcher (the VM's call_native, minus the verification
 // /nondet/graphics paths which are VM-only). print/println keep their own emitter path; this
 // covers stdin/file I/O, libm math, char/parse helpers, concat, and args/env/exit.
 Value em_native(EmberRt *ctx, int nid, int argc, const Value *args) {
+#if EMBER_GRAPHICS
+    // Graphics builtins (ids 100-142) — a native GUI binary drives raylib through the SAME dispatcher
+    // the VM uses (ember_gfx_native). Handled before the switch so this stays a pure delegation.
+    (void)argc;
+    if (nid >= NATIVE_GFX_WINDOW_OPEN && nid <= NATIVE_GFX_DROPPED_FILES) {
+        return ember_gfx_native(ctx, nid, args);
+    }
+#endif
     switch (nid) {
 #ifndef EMBER_FREESTANDING
         // Hosted-only builtins — stdin/file I/O, libm, PRNG, env. A freestanding target has no OS

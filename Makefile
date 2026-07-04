@@ -39,6 +39,11 @@ RT_LIB  := build/libember_rt.a
 # pay no threading cost. The ABI (ObjChannel size, refcount ops) must match the generated C,
 # which emberc compiles with the same -DEMBER_PARALLEL for a concurrent program.
 RT_LIB_PAR := build/libember_rt_par.a
+# The GRAPHICS+NET runtime variant: runtime + cextern + the raylib backend, built with
+# -DEMBER_GRAPHICS -DEMBER_NET -DEMBER_PARALLEL so a native GUI binary (`emberc-net-gfx -o app`)
+# drives raylib, hits the Anthropic API over libcurl, and runs its async transport on threads.
+# Linked by compile_native when the compiler itself is graphics-flavored (#if EMBER_GRAPHICS).
+RT_LIB_NETGFX := build/libember_rt_net_gfx.a
 
 # Optimized build for speed/benchmark runs. The dev build is -O0 -g for fast
 # rebuilds and debuggability; this one is -O2 -DNDEBUG and so understates nothing
@@ -175,6 +180,17 @@ $(RT_LIB_PAR): src/runtime.c src/cextern.c include/ember_rt.h include/value.h in
 	$(CC) $(RT_FLAGS) -DEMBER_PARALLEL=1 -c src/runtime.c -o build/runtime_rt_par.o
 	$(CC) $(RT_FLAGS) -DEMBER_PARALLEL=1 -c src/cextern.c -o build/cextern_rt_par.o
 	ar rcs $@ build/runtime_rt_par.o build/cextern_rt_par.o
+
+# The graphics+net runtime (see RT_LIB_NETGFX): runtime + cextern + graphics.c with all three defines,
+# so `emberc-net-gfx -o app app.em` links a standalone native GUI binary. Third-party cflags come from
+# curl-config / pkg-config; graphics.c is the raylib backend the shared ember_gfx_native() calls into.
+NETGFX_RT_DEFS := -DEMBER_NET=1 -DEMBER_GRAPHICS=1 -DEMBER_PARALLEL=1
+NETGFX_RT_CFLAGS := `curl-config --cflags` `pkg-config --cflags raylib freetype2`
+$(RT_LIB_NETGFX): src/runtime.c src/cextern.c src/graphics.c include/ember_rt.h include/value.h include/program.h include/cextern.h include/graphics.h | build
+	$(CC) $(RT_FLAGS) $(NETGFX_RT_DEFS) $(NETGFX_RT_CFLAGS) -c src/runtime.c -o build/runtime_rt_netgfx.o
+	$(CC) $(RT_FLAGS) $(NETGFX_RT_DEFS) $(NETGFX_RT_CFLAGS) -c src/cextern.c -o build/cextern_rt_netgfx.o
+	$(CC) $(RT_FLAGS) $(NETGFX_RT_DEFS) $(NETGFX_RT_CFLAGS) -c src/graphics.c -o build/graphics_rt_netgfx.o
+	ar rcs $@ build/runtime_rt_netgfx.o build/cextern_rt_netgfx.o build/graphics_rt_netgfx.o
 
 build:
 	mkdir -p build
@@ -368,7 +384,7 @@ mn-net-graphics: | build
 
 # Graphics compiler (see GRAPHICS_FLAGS). Links raylib + FreeType (hinted text) via pkg-config;
 # single invocation like release. Run a demo with: build/emberc-gfx --emit=run <file.em>
-graphics: | build
+graphics: $(RT_LIB_NETGFX) | build
 	$(CC) $(GRAPHICS_FLAGS) `pkg-config --cflags raylib freetype2` $(SOURCES) `pkg-config --libs raylib freetype2` $(LDLIBS_MATH) -o $(GRAPHICS_BIN)
 
 # Networking compiler (see NET_FLAGS): links libcurl via curl-config, registers the http_post
@@ -378,7 +394,7 @@ net: | build
 
 # Combined networking + graphics compiler — the desktop app (public/) needs both: HTTPS for
 # the Anthropic API and raylib for the GUI. Run with: build/emberc-net-gfx --emit=run <file.em>
-net-graphics: | build
+net-graphics: $(RT_LIB_NETGFX) | build
 	$(CC) $(NETGFX_FLAGS) `curl-config --cflags` `pkg-config --cflags raylib freetype2` $(SOURCES) `curl-config --libs` `pkg-config --libs raylib freetype2` $(LDLIBS_MATH) -o $(NETGFX_BIN)
 
 # The vendored SQLite amalgamation, compiled once into its own object (third-party, not -Werror).

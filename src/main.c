@@ -709,6 +709,18 @@ static int compile_native(const TokenList *tokens, const char *name,
     //                      (folded into libc on macOS) — it must follow the objects on the link
     //                      line.  -pthread (portable spelling, both platforms) for the parallel rt.
     char cmd[16384];
+#if EMBER_GRAPHICS
+    // A graphics-flavored compiler (emberc-net-gfx / emberc-gfx) links the graphics+net runtime plus
+    // raylib + FreeType + libcurl, so `emberc -o app app.em` yields a STANDALONE native GUI binary that
+    // drives raylib and reaches the Anthropic API. The runtime is built -DEMBER_PARALLEL so the app's
+    // async transport (spawn/nursery/channels) runs on threads — `concurrent` is subsumed here.
+    (void)concurrent;
+    snprintf(cmd, sizeof cmd,
+             "cc -std=c17 -O2 -D_DEFAULT_SOURCE -DEMBER_PARALLEL=1 -DEMBER_GRAPHICS=1 -DEMBER_NET=1 "
+             "-I'%s' '%s' '%s/libember_rt_net_gfx.a' `pkg-config --libs raylib freetype2` "
+             "`curl-config --libs` -pthread -lm -o '%s'",
+             incdir, cpath, libdir, out_path);
+#else
     if (concurrent) {
         snprintf(cmd, sizeof cmd,
                  "cc -std=c17 -O2 -D_DEFAULT_SOURCE -DEMBER_PARALLEL=1 -I'%s' '%s' "
@@ -719,6 +731,7 @@ static int compile_native(const TokenList *tokens, const char *name,
                  "cc -std=c17 -O2 -D_DEFAULT_SOURCE -I'%s' '%s' '%s/libember_rt.a' -lm -o '%s'",
                  incdir, cpath, libdir, out_path);
     }
+#endif
     int rc = system(cmd);
     if (rc != 0) {
         fprintf(stderr, "emberc: C compilation failed (cc exit %d); kept %s\n", rc, cpath);

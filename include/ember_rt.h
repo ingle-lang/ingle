@@ -305,6 +305,11 @@ Value          em_assert(Value cond, const char *msg);
 extern int     em_argc;
 extern char  **em_argv;
 Value          em_native(EmberRt *ctx, int nid, int argc, const Value *args);
+#if EMBER_GRAPHICS
+// The graphics-builtin dispatcher (NATIVE_GFX_* ids 100-142), shared by the VM's call_native and
+// em_native so the interpreter and native binaries drive raylib identically.
+Value          ember_gfx_native(EmberRt *ctx, int nid, const Value *args);
+#endif
 
 // FFI (M5): invoke `extern "c"` function registry index `idx` through cextern_call. `args`
 // are the call's flattened scalar leaves (one Value per scalar/string/buffer/Ptr arg); the
