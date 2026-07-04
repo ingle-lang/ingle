@@ -6025,6 +6025,13 @@ struct Chunk {
                     case EGet(inner, iname) {
                         obj_boxed = true                 // a nested field read yields a boxed struct value
                     }
+                    case EIndex(arr, idx) {
+                        // `arr[i].field` where arr stores INLINE (all-scalar) structs: the INDEX materialises a
+                        // boxed owned element, so its field reads boxed (GET_FIELD_OWNED, via is_owning_temp_obj).
+                        if self.is_owning_temp_obj(object) {
+                            obj_boxed = true
+                        }
+                    }
                     case _ {
                     }
                 }
@@ -6041,6 +6048,87 @@ struct Chunk {
                     return true
                 }
                 return false
+            }
+        }
+    }
+
+
+    // push_store_value pushes the value being stored by a nested field assignment: a local slot (the write-back
+    // recursion) or the original value expression (string-incref'd / move-consumed via gen_consume).
+    fn push_store_value(mut self, val_slot: int, val_expr: ps.Expr, line: int) {
+        if val_slot >= 0 {
+            self.emit(OP_GET_LOCAL)
+            self.emit_idx(val_slot)
+        } else {
+            self.gen_consume(val_expr, line)
+        }
+    }
+
+
+    // gen_nested_store lowers `target = value` where target is `EGet(object, leaf)` and `object` reads as a
+    // transient COPY — a nested INLINE struct field (`self.x.y`) or an INLINE-struct array element
+    // (`arr[i].leaf`). A plain SET_FIELD would mutate the copy and lose it, so materialise `object` into a
+    // scratch slot, SET_FIELD the leaf on it, then write the modified copy BACK into object's place
+    // (recursively for a field; via SET_INDEX for an array element). Base case (`p.leaf = v` on a local/boxed
+    // place) is push-receiver + value + SET_FIELD. Mirrors src/codegen.c gen_nested_store (value-types 3b.5 /
+    // OFI-061). val_slot >= 0 supplies the value from a local; else it is gen_consume(val_expr).
+    fn gen_nested_store(mut self, target: ps.Expr, val_slot: int, val_expr: ps.Expr, line: int) {
+        match target {
+            case EGet(object, leaf) {
+                let osid = self.expr_type_kind(object.value)
+                let leaf_idx = self.struct_field_index(osid, leaf)
+                match object.value {
+                    case EGet(inner, ifield) {
+                        let isid = self.expr_type_kind(inner.value)
+                        let fsid = self.field_type_kind(isid, ifield)
+                        if fsid >= 0 && self.struct_all_scalar(fsid) {
+                            let saved = self.locals.len()
+                            self.gen_expr(object.value, line)      // materialise a COPY of object
+                            let scratch = self.locals.len()
+                            self.declare_binding("", 1, osid, false, false, true, false)
+                            self.emit(OP_GET_LOCAL)
+                            self.emit_idx(scratch)
+                            self.push_store_value(val_slot, val_expr, line)
+                            self.emit(OP_SET_FIELD)
+                            self.emit_idx(leaf_idx)
+                            self.gen_nested_store(object.value, scratch, val_expr, line)   // object = scratch
+                            self.emit(OP_POP)
+                            self.truncate_to(saved)
+                            return
+                        }
+                    }
+                    case EIndex(arr, idx) {
+                        let ec = self.index_elem_code(object.value)
+                        if ec >= 0 && self.struct_array_inline(ec) {
+                            let saved = self.locals.len()
+                            self.gen_expr(object.value, line)      // materialise a COPY of arr[i]
+                            let scratch = self.locals.len()
+                            self.declare_binding("", 1, osid, false, false, true, false)
+                            self.emit(OP_GET_LOCAL)
+                            self.emit_idx(scratch)
+                            self.push_store_value(val_slot, val_expr, line)
+                            self.emit(OP_SET_FIELD)
+                            self.emit_idx(leaf_idx)
+                            self.gen_expr(arr.value, line)         // write the copy back: arr ...
+                            self.gen_expr(idx.value, line)         // ... [i] ...
+                            self.emit(OP_GET_LOCAL)
+                            self.emit_idx(scratch)                 // ... = scratch
+                            self.emit(OP_SET_INDEX)
+                            self.emit(OP_POP)
+                            self.truncate_to(saved)
+                            return
+                        }
+                    }
+                    case _ {
+                    }
+                }
+                // base case: object is a local / boxed place — push receiver, value, SET_FIELD.
+                self.gen_expr(object.value, line)
+                self.push_store_value(val_slot, val_expr, line)
+                self.emit(OP_SET_FIELD)
+                self.emit_idx(leaf_idx)
+            }
+            case _ {
             }
         }
     }
@@ -7756,6 +7844,9 @@ struct Chunk {
                                 }
                             }
                             case _ {
+                                // `self.x.y = v` / `arr[i].leaf = v`: the object reads as a transient copy, so
+                                // route through the materialise-mutate-write-back path (value-types 3b.5).
+                                self.gen_nested_store(target.value, 0 - 1, value.value, target.line)
                             }
                         }
                     }
