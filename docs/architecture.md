@@ -1,17 +1,17 @@
 ---
 title: Compiler & Toolchain Architecture
 nav_order: 7
-description: Engineering decisions behind the Ember compiler and toolchain (emberc) — the canonical bytecode VM, the native C backend, and the build system.
+description: Engineering decisions behind the Ingle compiler and toolchain (inglec) — the canonical bytecode VM, the native C backend, and the build system.
 ---
 
-# Ember — Compiler & Toolchain Architecture
+# Ingle — Compiler & Toolchain Architecture
 
-*Engineering decisions for the **compiler and toolchain**. The counterpart to [MANIFESTO.md](https://github.com/kmcnally5/ember-lang/blob/main/MANIFESTO.md). Started June 2026.*
+*Engineering decisions for the **compiler and toolchain**. The counterpart to [MANIFESTO.md](https://github.com/ingle-lang/ingle-lang/blob/main/MANIFESTO.md). Started June 2026.*
 
 The manifesto records why the **language** is the way it is. This document records why the
 **compiler, toolchain, and repository** are the way they are — the engineering decisions that
-future work must respect but that say nothing about Ember-the-language. The project insists on
-keeping these two apart (see [CLAUDE.md](https://github.com/kmcnally5/ember-lang/blob/main/CLAUDE.md): *"don't conflate"* the language and the
+future work must respect but that say nothing about Ingle-the-language. The project insists on
+keeping these two apart (see [CLAUDE.md](https://github.com/ingle-lang/ingle-lang/blob/main/CLAUDE.md): *"don't conflate"* the language and the
 compiler); this is where the compiler half lives.
 
 It is a **living** document, not an append-only log: each entry states the rule that is true
@@ -25,7 +25,7 @@ a decision traces to a manifesto section or closes an OFI, it says so.
 
 ## Decision: the language and the compiler are two separate products
 
-**Rule.** "Ember" names two things that are designed and discussed independently: the *language*
+**Rule.** "Ingle" names two things that are designed and discussed independently: the *language*
 (the product — grammar, semantics, type system) and the *reference compiler* (a batch program
 written in C that implements it). A change to one is not automatically a change to the other.
 
@@ -38,14 +38,14 @@ the line visible.
 
 ---
 
-## Decision: `emberc` is user/editor-facing; `tools/` maintains checked-in artifacts
+## Decision: `inglec` is user/editor-facing; `tools/` maintains checked-in artifacts
 
-**Rule.** A capability ships **inside `emberc`** only if a user or an editor invokes it: compiling
+**Rule.** A capability ships **inside `inglec`** only if a user or an editor invokes it: compiling
 a program, an `--emit=` analysis *of a program* (`check`, `replay`, `prove`), or serving an editor
 (`--lsp`). A capability that only *we* run to maintain something checked into the repo lives as a
 standalone program under **`tools/`**, built by the Makefile but never shipped in the compiler.
 
-**Why.** Every `emberc` subcommand should answer a coherent question — "what about *this program*?"
+**Why.** Every `inglec` subcommand should answer a coherent question — "what about *this program*?"
 or "serve *this editor*." A generator that dumps static facts about the language itself (e.g. the
 editor grammar) answers neither; folding it in as an `--emit` mode would quietly redefine `--emit`
 from "transform this program" to "...or also describe the compiler," and would ship build-time-only
@@ -66,23 +66,23 @@ copies are **derived** — never hand-maintained in parallel. Where the consumer
 an eventual bug. A generator that nobody is *forced* to run drifts just as badly — so the value is
 in the **enforced diff**, not merely in having a generator. First instance: the lexical vocabulary
 (keywords, builtins, primitives) lived in four hand-copied places; it now lives in
-[`include/vocab.def`](https://github.com/kmcnally5/ember-lang/blob/main/include/vocab.def) (X-macros), `#include`d by the lexer and the LSP, with
+[`include/vocab.def`](https://github.com/ingle-lang/ingle-lang/blob/main/include/vocab.def) (X-macros), `#include`d by the lexer and the LSP, with
 the TextMate grammar generated from it and gated by `make check-editor-sync` (OFI-033).
 
 ---
 
 ## Decision: the language server is C, in-tree, sharing the compiler frontend
 
-**Rule.** The LSP is `emberc --lsp` — the same binary, the same lexer/parser/checker, in the same
+**Rule.** The LSP is `inglec --lsp` — the same binary, the same lexer/parser/checker, in the same
 codebase. It is **not** a separate process in another language re-implementing the frontend.
 
 **Why.** Researched directly (C vs Go) before committing. rust-analyzer is the cautionary tale:
 being a separate effort from rustc it had to reimplement the whole frontend, which the Rust team
 itself calls an unsustainable maintenance burden. Every LSP that stayed healthy shares its
 compiler's frontend (clangd↔Clang, gopls↔go/*, tsserver *is* the compiler). So **the LSP's
-language follows the compiler's language** — Ember's compiler is C, therefore the LSP is C. A
+language follows the compiler's language** — Ingle's compiler is C, therefore the LSP is C. A
 separate Go binary would also break the empty-dependency-tree and single-binary promises below.
-Ember's frontend already had the expensive prerequisites: an error-tolerant parser and structured
+Ingle's frontend already had the expensive prerequisites: an error-tolerant parser and structured
 JSON diagnostics built for the LLM loop.
 
 ---
@@ -118,9 +118,9 @@ field must be initialised at its creation site (see OFI-026). C is C17, `-Wall -
 
 ## Decision: a self-contained toolchain directory, with binary-relative stdlib resolution
 
-**Rule.** `make install` deploys a self-contained toolchain to `~/.ember/` (`bin/emberc` + `std/`).
-`emberc` resolves the standard library relative to its **own binary** (`<bin>/../std`), falling back
-to `$EMBER_STD`, so it finds the stdlib from any working directory with no environment setup. The
+**Rule.** `make install` deploys a self-contained toolchain to `~/.ingle/` (`bin/inglec` + `std/`).
+`inglec` resolves the standard library relative to its **own binary** (`<bin>/../std`), falling back
+to `$INGLE_STD`, so it finds the stdlib from any working directory with no environment setup. The
 VS Code extension's canonical source lives in `editors/vscode/` and deploys via `make
 install-vscode`.
 
@@ -133,9 +133,9 @@ highlighting-vs-LSP split are documented in `editors/vscode/README.md`.)
 
 ## Decision: one editor-agnostic server, thin per-editor glue under `editors/<editor>/`
 
-**Rule.** `emberc --lsp` is a pure, editor-agnostic JSON-RPC server — no client-specific code. Each
+**Rule.** `inglec --lsp` is a pure, editor-agnostic JSON-RPC server — no client-specific code. Each
 editor gets a *thin glue package* under `editors/<editor>/` whose only jobs are (1) launch
-`emberc --lsp` and (2) supply that editor's syntax-highlighting asset in its native format. VS Code
+`inglec --lsp` and (2) supply that editor's syntax-highlighting asset in its native format. VS Code
 (`editors/vscode/`) is a JS launcher + a **TextMate** grammar generated from `vocab.def`. Zed
 (`editors/zed/`) is a Rust→wasm extension implementing `zed::Extension::language_server_command` +
 a **tree-sitter** grammar (`tree-sitter-ember`) and `highlights.scm`. Adding editor #3/#4 means a new
@@ -146,13 +146,13 @@ the glue is per-editor, so the cost of a new editor is bounded and the server ca
 them. Zed forces two hard differences from VS Code — extensions are **Rust→wasm**, and highlighting
 is **tree-sitter**, not TextMate — so the TextMate grammar does not carry over. We keep the
 tree-sitter grammar **lexical-depth only** (comments, strings, numbers, keyword/type/builtin token
-lists, declaration heads): a full grammar would be a *second parser* of Ember syntax, exactly the
-two-frontends trap the LSP decision avoids. Semantic features come from `emberc --lsp`; the grammar
+lists, declaration heads): a full grammar would be a *second parser* of Ingle syntax, exactly the
+two-frontends trap the LSP decision avoids. Semantic features come from `inglec --lsp`; the grammar
 just colours. (Generating `highlights.scm`'s keyword lists from `vocab.def`, and a "porting to a new
 editor" guide, are the planned next step — the single-source-of-truth net that already guards the
 TextMate grammar, extended to tree-sitter.) Building the Zed extension needs Rust via **rustup**
 (not Homebrew — Zed drives `rustup target add wasm32-wasip1` itself); like `vsce`/`npm` for VS Code,
-it is an opt-in *extension-build* dependency only — `emberc` stays dependency-free.
+it is an opt-in *extension-build* dependency only — `inglec` stays dependency-free.
 
 ---
 
@@ -286,7 +286,7 @@ order-free, so the position is simple). (`src/lsp.c`: `handle_inlay_hint`'s verd
 
 **Why.** This is the post-parity differentiator named earlier in this doc — "the prover can discharge
 this line" / "add a `requires`" — that no other young language's LSP offers, and it ties the editor
-directly to Ember's north-star verification story (MANIFESTO §5j). It reuses the **one** prover (no
+directly to Ingle's north-star verification story (MANIFESTO §5j). It reuses the **one** prover (no
 second analysis — the same discipline as the shared frontend), and it makes a normally-invisible
 property loud: a model or a human editing a function *sees* immediately whether its spec is machine-
 proved. Verdicts ride the inlay-hint channel (subtle, non-cluttering — not a Problems-panel entry for
@@ -295,13 +295,13 @@ linear-integer fragment; the inlay is honest about everything else (`runtime-che
 
 ---
 
-## Decision: `emberc --doctor` — a one-command setup health-check (onboarding is make-or-break)
+## Decision: `inglec --doctor` — a one-command setup health-check (onboarding is make-or-break)
 
-**Rule.** `emberc --doctor` verifies the pieces a working language server needs and prints a
+**Rule.** `inglec --doctor` verifies the pieces a working language server needs and prints a
 `[ok]`/`[!!]` line per check with the *exact* fix for anything wrong: the binary in use, that the
 standard library resolves (`<g_std_dir>/string.em` opens), and that the shared frontend is healthy
 (it type-checks a trivial program in-process via `check_diagnostics`), and — the staleness check —
-whether the INSTALLED binary the editor's LSP actually runs (`~/.ember/bin/emberc`) matches this build
+whether the INSTALLED binary the editor's LSP actually runs (`~/.ingle/bin/inglec`) matches this build
 (it `popen`s the installed `--version` and compares to `EMBER_VERSION`; mismatched = "rebuilt but not
 re-installed", the cause of phantom stale-LSP behaviour). It ends with the editor next-steps.
 `make doctor` runs it and adds two repo-side checks: the Rust + `wasm32-wasip1` toolchain the Zed
@@ -316,22 +316,22 @@ failure and the tab closes for good. Every failure we hit bringing the LSP up (s
 rustup-vs-Homebrew trap, a stale installed binary, graphics squiggles) is a "give up" moment for
 someone with less context. A doctor turns "something's broken and I don't know what" into "here's the
 one thing to fix," which is the highest-leverage anti-friction investment for adoption. It is a
-user/editor-facing mode, so it belongs in `emberc` (not `tools/`) per the `emberc`-vs-`tools` rule.
+user/editor-facing mode, so it belongs in `inglec` (not `tools/`) per the `inglec`-vs-`tools` rule.
 
 ---
 
-## Decision: one version constant; `emberc --help` is the binary's CLI, `make help` is the build menu
+## Decision: one version constant; `inglec --help` is the binary's CLI, `make help` is the build menu
 
 **Rule.** `include/version.h` defines a single `EMBER_VERSION` — bump that one line per build and it
-flows to `emberc --version`, the `--help` header, the language server's `serverInfo.version` (what
-editors display), and `--doctor`'s staleness comparison. `emberc --help` documents only the *binary's*
+flows to `inglec --version`, the `--help` header, the language server's `serverInfo.version` (what
+editors display), and `--doctor`'s staleness comparison. `inglec --help` documents only the *binary's*
 CLI (the `--emit` modes, `-o`, `--lsp`, `--doctor`, flags); it does **not** list Makefile targets,
 because the shipped binary stands alone from the repo. The repo's build/test/install commands live in
-**`make help`** instead, and `emberc --help` ends by pointing there.
+**`make help`** instead, and `inglec --help` ends by pointing there.
 
 **Why.** A single constant means the version can never drift between the CLI, the editor's status bar,
-and the staleness check (the regression asserts `--version` and `--help` agree). Keeping `emberc
---help` to the binary's own surface respects that an installed `emberc` has no Makefile beside it —
+and the staleness check (the regression asserts `--version` and `--help` agree). Keeping `inglec
+--help` to the binary's own surface respects that an installed `inglec` has no Makefile beside it —
 conflating "use the language" with "build the compiler" would mislead a user who installed the
 toolchain. `make help` gives the maintainer the one canonical list of build commands so none get lost.
 
@@ -345,7 +345,7 @@ raw span and `lexer_scan` attaches it to the next token via two new `Token` fiel
 `doc_length`). The parser cleans it once (`tok_doc` strips indent + markers, rejoins lines) and
 stores it on the AST — `Decl.doc`, `FnDecl.doc`, `Field.doc`, `Variant.doc`. Exactly **one** corpus
 of doc text then feeds **two** consumers: the language server renders it under the signature on
-hover and in completion `documentation` (`src/lsp.c`), and `emberc --emit=docs` renders a Markdown
+hover and in completion `documentation` (`src/lsp.c`), and `inglec --emit=docs` renders a Markdown
 reference page (`src/docgen.c`). The doc generator stops after parsing — docs are surface API, not
 semantics — mirroring `--emit=ast`.
 
@@ -366,7 +366,7 @@ Type/signature rendering is, for now, duplicated in the generator (tracked as OF
 **Rule.** The checker can build a **semantic index** — a position-keyed table mapping each
 identifier's source span to its checker-inferred type and its definition site (`include/semindex.h`,
 `src/semindex.c`). It is opt-in: `check_program` takes a trailing `SemanticIndex *out_index`
-(`NULL` in batch compilation, so `emberc --emit=run/bytecode/...` pays nothing), and the checker
+(`NULL` in batch compilation, so `inglec --emit=run/bytecode/...` pays nothing), and the checker
 records an entry whenever it resolves an `EXPR_IDENT` to a local or parameter. The language server
 obtains one via `collect_semantic_index` (driver.h) — load + check, no codegen — and answers
 `textDocument/hover` and `textDocument/definition` from it: a local/parameter under the cursor is
@@ -416,7 +416,7 @@ no longer existed and using `?` on a non-`Result` — because nothing type-check
 smoke tier now runs `--emit=bytecode` (full type-check + codegen) on every example. The graphics
 examples (those importing `std/draw`/`std/ui`) need the raylib backend natives, which the default
 dependency-free build deliberately lacks, so they stay lex+parse in `tests/run.sh` and are
-full-compiled in `tests/run-graphics.sh` under `emberc-gfx`. Rule: an example is documentation that
+full-compiled in `tests/run-graphics.sh` under `inglec-gfx`. Rule: an example is documentation that
 must *also* compile — a showcase that doesn't type-check is a broken doc, and the suite now enforces
 it instead of trusting it.
 
@@ -431,7 +431,7 @@ cross-module `draw.window`/`draw.RED`) fell back to a same-module name match or 
 (>50% of on-screen tokens were dead). The decision: **record at every resolution site the checker
 already passes through**, and enrich each entry to the clangd `HoverInfo` model. A `SemEntry` now
 carries a `SemKind` (function/type/variant/constant/module/…), the owning module or type
-(`container`), the symbol's `///` doc, a constant's value, a struct field's byte offset+size (Ember
+(`container`), the symbol's `///` doc, a constant's value, a struct field's byte offset+size (Ingle
 has native layout), and a `def_file`/`def_line` definition site — so the hover card shows
 `(kind) scope.name signature`, the doc, and a "declared in file:line" provenance line, and
 go-to-definition jumps cross-file into `std/*.em`.
@@ -455,7 +455,7 @@ dot-notated *native* method had a blank card. The fix keeps the same principle (
 resolution site, render through the shared formatter): a `sem_record_intrinsic` helper logs an
 `SK_METHOD` entry at the method-name span for each intrinsic, building the one-line signature from the
 receiver/parameter/return `SemType`s via `render_type` and using the receiver type as the card's
-container. These methods have no Ember source, so no `def_line` is recorded and go-to-definition on
+container. These methods have no Ingle source, so no `def_line` is recorded and go-to-definition on
 them is intentionally a no-op.
 
 **Remaining LSP work (deferred by agreement; each is now just "read the richer index").** The index
@@ -475,12 +475,12 @@ live tail of the now-retired `LSP_ROADMAP.md`.
 
 ## Decision: `make install` removes the destination binary before copying (macOS code-sign cache)
 
-The `install` target `rm -f`s `$(PREFIX)/bin/emberc` before `cp`ing the new release binary, rather
+The `install` target `rm -f`s `$(PREFIX)/bin/inglec` before `cp`ing the new release binary, rather
 than copying over it in place. The reason is a macOS (arm64) trap: the linker ad-hoc-signs every
 Mach-O, and the kernel caches that signature's cdhash **keyed by inode**. Copying new content over an
 existing file keeps the inode, so the kernel compares the new bytes against the *cached* cdhash, finds
 a mismatch, and SIGKILLs the process the moment it execs — "Killed: 9", exit 137, no diagnostics. The
-editor (which launches the installed `emberc --lsp`) then shows nothing at all, which is
+editor (which launches the installed `inglec --lsp`) then shows nothing at all, which is
 indistinguishable from a broken feature and cost a debugging round (OFI-040). Removing first gives the
 copy a fresh inode with no stale cache entry. The same class of failure is why `install-vscode`
 packages a fresh `.vsix` rather than hand-copying files. Rule of thumb for this toolchain: never
@@ -561,7 +561,7 @@ interfaces without synthesizing per-type shim functions.
 
 The C FFI's third widening (after scalars and structs-by-value) is pointers, buffers, and opaque
 handles (§5h pointers). The boundary stays the **leaf sequence** — no new marshalling machinery — by
-treating each pointer-flavoured argument as **one leaf carried as the Ember heap `Value` itself**,
+treating each pointer-flavoured argument as **one leaf carried as the Ingle heap `Value` itself**,
 which the registry wrapper dereferences. A `string` arrives as its `ObjString` Value (`AS_CSTRING`
 → `const char*`, already NUL-terminated); a packed scalar array arrives as its `ObjArray` Value
 (`->data` + `->length` → a buffer); a `Ptr` carries an opaque C pointer in the int64 slot
@@ -570,7 +570,7 @@ the wrapper `vm->sp - in_leaves`, and the wrapper now reads a heap pointer off a
 scalar. Leaf kinds extended: `'p'` (const char\*), `'b'` (buffer), `'P'` (opaque Ptr), each one slot.
 
 The alternative — flattening a buffer into *two* leaves (pointer + length) pushed by codegen — was
-rejected: it would have meant codegen synthesizing the length and the VM expanding a single Ember
+rejected: it would have meant codegen synthesizing the length and the VM expanding a single Ingle
 value into two stack slots, duplicating state the `ObjArray` already holds. Letting the wrapper read
 `->length` keeps the one-value-one-slot invariant the rest of the call path assumes.
 
@@ -590,7 +590,7 @@ owns nothing C owns, so there is no free/copy ownership question to get wrong ye
 
 ## Decision: wrapping arithmetic is three function builtins, not operators (OFI-041)
 
-Hashes/PRNGs/checksums need modular (2^width) integer arithmetic, but Ember's `+ - *` trap on
+Hashes/PRNGs/checksums need modular (2^width) integer arithmetic, but Ingle's `+ - *` trap on
 overflow by design (OFI-005). The wrapping direction is exposed as three **builtins** —
 `wrapping_add`/`wrapping_sub`/`wrapping_mul(a, b)` — not as `&*`-style operators. Karl's call. The
 function form (a) adds no new sigils and no precedence rules, sidestepping the `>>`-token /
@@ -607,12 +607,12 @@ reinterpret — sign-extending for the signed kinds — so each wraps at its own
 44u8`, two's-complement for `i8`). Dedicated opcodes (rather than a "wrapping" flag on the existing
 arithmetic kind byte) keep the change isolated and avoid touching every `OP_ADD/SUB/MUL` emit site —
 the operand-count discipline the VM relies on (see the opcode-operand note). Showcase + regression:
-FNV-1a written in pure Ember (`tests/run/wrapping_arith.em`).
+FNV-1a written in pure Ingle (`tests/run/wrapping_arith.em`).
 
 
 ## Decision: UTF-8 strings at code-point granularity — byte-level len/bytes, code-point chars/char_count
 
-Ember strings already stored UTF-8 bytes; the Unicode work made the *operations* honest. Karl chose
+Ingle strings already stored UTF-8 bytes; the Unicode work made the *operations* honest. Karl chose
 **code points** as the "character" unit (over grapheme clusters) and **byte length** as `.len()`
 (over code-point count). Both choices are manifesto-driven:
 
@@ -637,7 +637,7 @@ so no string operation can fail and `read_file` never rejects odd bytes. New opc
 
 ## Decision: slices are borrowed, non-escaping Slice<T> views — sound without lifetime inference
 
-A slice is a zero-copy `(pointer, length)` view into an array. The hazard: Ember arrays are mutable
+A slice is a zero-copy `(pointer, length)` view into an array. The hazard: Ingle arrays are mutable
 move types whose buffer **reallocates on append**, so a naive view dangles if the source is appended-
 to, moved, or dropped. The fully general fix (returnable views) is the deferred lifetime-inference
 tail (OFI-009). Karl chose the version that delivers zero-copy views **without** reopening lifetimes:
@@ -671,10 +671,10 @@ overall: returnable/storable views, array→slice auto-coercion, and mutable wri
 
 ## Decision: a native backend that lowers the AST to C, with the VM as reference semantics
 
-**Rule.** Ember gains a **second lowering** alongside `src/codegen.c`'s AST→bytecode: `src/cgen_c.c`
+**Rule.** Ingle gains a **second lowering** alongside `src/codegen.c`'s AST→bytecode: `src/cgen_c.c`
 walks the *same* checked AST (reusing the checker's `resolved_fn`, `num_kind`, `MonoPlan` and
-`StructLayout`) and emits a self-contained **C** translation unit. `emberc --emit=c` writes the C;
-`emberc -o <bin> file.em` writes it and invokes the system C compiler to link it against the runtime
+`StructLayout`) and emits a self-contained **C** translation unit. `inglec --emit=c` writes the C;
+`inglec -o <bin> file.em` writes it and invokes the system C compiler to link it against the runtime
 in `include/ember_rt.h`, producing a standalone binary. The **bytecode VM stays the canonical
 reference semantics** — the analysis/verification emit modes (`run`, `check`, `replay`, `prove`,
 `trace`) remain VM-only, native is the *release/standalone* path. The two are held in lockstep by a
@@ -684,7 +684,7 @@ is the platform C compiler — no new third-party libraries (the empty-dependenc
 Native concurrency, when it lands, uses the **threaded** runtime (`-DEMBER_PARALLEL`); the serial
 cooperative scheduler's `VM_YIELD` unwinds the dispatch loop and has no straight-line-C analogue.
 
-**Why.** This is step 1 of making Ember a systems language that could eventually target bare metal:
+**Why.** This is step 1 of making Ingle a systems language that could eventually target bare metal:
 you cannot run an OS as a guest inside a VM that itself needs an OS, and interpreter dispatch caps
 performance. Lowering from the **AST** rather than the bytecode is the load-bearing choice. Bytecode
 is stack-based and erased; bytecode→C would either reconstruct the expression trees the typed AST
@@ -693,7 +693,7 @@ unreadable, a dead end for a future freestanding mode). AST→C emits natural C 
 keeps the road to bare metal open. The manifesto's "one backend" (§5c) is preserved at the layer that
 matters — there is still **one front-end and one reference semantics** (the VM); the cost of a second
 *lowering* is that each language feature is lowered twice, and that risk is contained by the
-differential test, which doubles as a demonstration of Ember's verification/determinism north star
+differential test, which doubles as a demonstration of Ingle's verification/determinism north star
 (two independent implementations that must agree). Milestone M1 (the scalar walking skeleton) is
 header-only — `ember_rt.h` re-expresses the VM's width-aware arithmetic as `static inline` helpers so
 results are bit-identical; structs/strings/arrays, generics, closures, FFI and concurrency arrive in
@@ -704,7 +704,7 @@ as **OFI-051**.
 
 ## Decision: value-type structs lower to real C structs in the native backend
 
-**Rule.** A value-type (all-scalar) Ember struct is emitted as a **real C struct**
+**Rule.** A value-type (all-scalar) Ingle struct is emitted as a **real C struct**
 (`typedef struct { Value f0; Value f1; … } em_s<sid>;`) and used by value: construction is
 a C compound literal `((em_s<sid>){ … })`, a field read is `obj.f<idx>`, a field write is
 `lvalue.f<idx> = v`, and a struct binding/param/return carries the C type `em_s<sid>`. A
@@ -717,7 +717,7 @@ simplification), heap-allocating and reference-counting each struct. That is cor
 borrows but **double-frees on moves** (`let q = p`, move-params): two boxed aliases each
 free the same object, and the checker's ownership flags don't help because they are computed
 for the VM's value-type (multi-slot stack) representation, where there is nothing to drop.
-All-scalar structs are *value types* in Ember (the VM keeps them as stack slots, never heap),
+All-scalar structs are *value types* in Ingle (the VM keeps them as stack slots, never heap),
 so the native backend must too. Real C structs are the **native-layout** representation this
 backend exists to produce — fastest, idiomatic, and correct-by-construction for value
 semantics. (Karl chose this over mirroring the VM's loose multi-slot or patching the boxed
@@ -769,7 +769,7 @@ string (20k-iter concat/interpolation + aliased binding) differential stress tes
 
 ## Decision: generics are erased to one C function; closures use a uniform em_invoke trampoline
 
-**Generics — erased, not monomorphized.** Ember's generics are erased in the VM (one body over a
+**Generics — erased, not monomorphized.** Ingle's generics are erased in the VM (one body over a
 uniform 16-byte `Value`; the `MonoPlan` only duplicates table *slots* for call-target identity, never
 specializes a body). The native backend keeps that model exactly: a generic function lowers to **one**
 C function over `Value`, and every instantiation's call routes to that single slot via the call's
@@ -863,7 +863,7 @@ the VM's `ObjChannel` (pthread mutex + dual condvars: `not_empty`/`not_full`); `
 The VM's per-nursery **deadlock detector is ported**: when every task in a group is blocked on a channel
 and none can proceed, it reports once and aborts (the binary `exit(70)`s rather than hanging).
 
-The build is **conditional**: `emberc` detects whether a program uses concurrency (a `spawn`/`nursery`
+The build is **conditional**: `inglec` detects whether a program uses concurrency (a `spawn`/`nursery`
 anywhere) and only then compiles the generated C with `-DEMBER_PARALLEL -lpthread` and links a parallel
 runtime variant (`libember_rt_par.a`). A serial program links the default runtime unchanged — no atomic
 refcounts, no pthread, no thread-local-access cost.
@@ -1053,11 +1053,11 @@ the older Apple clang's ASan runtime **hung at startup** on this machine (Darwin
 hello-world. That was a toolchain bug, not ours.
 
 **Change (2026-06-17).** Karl updated to **Apple clang 21.0.0**, which fixes the hang. ASan now runs
-normally (planted heap-overflow is reported with a trace; instrumented `emberc` runs a 100k-alloc program
+normally (planted heap-overflow is reported with a trace; instrumented `inglec` runs a 100k-alloc program
 in ~0.4 s). Added two Makefile targets mirroring the `release` variant pattern: **`asan`** →
-`build/emberc-asan` (`-O1 -g -fsanitize=address -fno-omit-frame-pointer`) and **`asan-par`** →
-`build/emberc-asan-par` (same + `-DEMBER_PARALLEL=1`, to exercise the channel/nursery cross-thread paths).
-Run with `ASAN_OPTIONS=detect_leaks=0 build/emberc-asan --emit=run <file.em>`.
+`build/inglec-asan` (`-O1 -g -fsanitize=address -fno-omit-frame-pointer`) and **`asan-par`** →
+`build/inglec-asan-par` (same + `-DEMBER_PARALLEL=1`, to exercise the channel/nursery cross-thread paths).
+Run with `ASAN_OPTIONS=detect_leaks=0 build/inglec-asan --emit=run <file.em>`.
 
 **Scope.** ASan covers the temporal/spatial bugs (use-after-free, double-free, heap-overflow) that RSS
 stress can't see. It does **not** cover leaks — **LeakSanitizer remains unsupported on macOS** — so leak
@@ -1066,7 +1066,7 @@ native-backend path (compiling emitted C with `-fsanitize=address` against an AS
 highest-value not-yet-wired check, since that drop discipline was RSS-only.
 
 **First result.** A sweep of the full runnable corpus (265 programs: tests/run + tests/native + examples +
-benchmarks) under `emberc-asan` reported **0 ASan errors** — the serial VM + runtime are clean under real
+benchmarks) under `inglec-asan` reported **0 ASan errors** — the serial VM + runtime are clean under real
 instrumentation, corroborating the by-behaviour record.
 
 (Also added the `key_repeat(keycode)` graphics native — `IsKeyPressedRepeat` — so text fields get
@@ -1225,7 +1225,7 @@ text blit (raylib's tint path is single-channel), tracked as the next campaign s
 
 ## Decision: Crucible — a generative memory-ownership fuzzer, separate from the `--check` logic fuzzer
 
-Ember has two fuzzers, by design, because memory correctness and logic correctness are different
+Ingle has two fuzzers, by design, because memory correctness and logic correctness are different
 problems. The `--check` fuzzer (§5j) generates *inputs* to a contract-bearing function to find a
 `requires`/`ensures` violation — it is a LOGIC oracle, and it deliberately restricts itself to free,
 non-generic functions with all-scalar params. **Crucible** (tools/crucible.{c,sh}, run by `make
@@ -1330,20 +1330,20 @@ guarded. Consequences, all gate-verified (`opcheck` + `ceilings` + `crucible` + 
 
 ## Decision: networking is opt-in libcurl behind `std/http`, with STREAMING via a pull `Ptr` handle
 
-*Decided 2026-06-19. Full design: [docs/http-design.md](http-design.md).* Ember binds **one** opt-in C
+*Decided 2026-06-19. Full design: [docs/http-design.md](http-design.md).* Ingle binds **one** opt-in C
 library for networking — libcurl, linked only by `make net`/`net-graphics` (off the default `make`/`make
-test` path), the same blessed-single-dependency rule as raylib (§3.5, §5g). It is never named in Ember
+test` path), the same blessed-single-dependency rule as raylib (§3.5, §5g). It is never named in Ingle
 code; user code sees only `import "std/http"`.
 
 The hard constraint this resolves: **the `extern` ABI is context-free** (`int (*)(const Value*, Value*)`,
 no `EmberRt`, no channel — by design, externs are pure C leaves), so an extern *cannot* push streamed
-chunks into an Ember channel. Two ways out: (a) a runtime-aware *native* whose libcurl write-callback
+chunks into an Ingle channel. Two ways out: (a) a runtime-aware *native* whose libcurl write-callback
 calls `em_channel_send`; (b) a **pull** model — `curl_multi` behind an opaque `Ptr` handle, `http_open ->
-Ptr`, `http_next(h) -> string` (next chunk, `""` at EOF), `http_close(move h)`, with the **Ember worker
+Ptr`, `http_next(h) -> string` (next chunk, `""` at EOF), `http_close(move h)`, with the **Ingle worker
 fiber** owning the channel and doing the `send`s. **We chose (b).** It needs zero runtime/checker changes
 (it's the `fopen`/`fread`/`fclose` `Ptr` leaf-FFI pattern, §5h; `Ptr` is linear per OFI-049, borrowed
 in the `http_next` loop, `move`-consumed at close — the must-close half now also guarantees the worker
-fiber can't forget `http_close`), it keeps concurrency 100% Ember (fibers + channels —
+fiber can't forget `http_close`), it keeps concurrency 100% Ingle (fibers + channels —
 more on-thesis), and the blocking lives in `http_next` on a worker fiber exactly as `http_post` blocks
 today. The push-native (a) is reserved for the future `curl_multi`-on-the-scheduler reactor (one thread,
 thousands of connections), where callbacks no longer run on the caller's thread. The four streaming
@@ -1379,10 +1379,10 @@ backend change, ~12 lines. VM==native verified; regression `tests/run/spawn_qual
 
 ## Decision: `Ptr` linearity (must-close) is a checker-only AND-merge dataflow, not a destructor
 
-*Decided 2026-06-19. Full design + adversarial review: [docs/design/ptr-linearity.md](https://github.com/kmcnally5/ember-lang/blob/main/docs/design/ptr-linearity.md). Closes OFI-049's leak half.*
+*Decided 2026-06-19. Full design + adversarial review: [docs/design/ptr-linearity.md](https://github.com/ingle-lang/ingle-lang/blob/main/docs/design/ptr-linearity.md). Closes OFI-049's leak half.*
 
 The double-close half of OFI-049 (2026-06-18) made `Ptr` **move-only** (affine — used at most once) and
-deliberately gave it **no scope-exit destructor** (Ember can't know whether an arbitrary C handle is
+deliberately gave it **no scope-exit destructor** (Ingle can't know whether an arbitrary C handle is
 freed by `fclose`/`free`/`sqlite3_close`). The leak half — a handle never closed — needed the dual
 guarantee: **used at least once**. Two ways out were on the table: (a) destructor-carrying *typed*
 handles (`Handle<Tag>` with an associated closer, Rust `Drop`-style, auto-close at scope end); (b)
@@ -1446,7 +1446,7 @@ fix is `ui.split_release(id)`, which the gated branch of `f.splitter` calls so a
 inert (rather than a global mouse-up clear in `begin()`, which would fight the goldens' injected-input pattern).
 
 **(3) `set_cursor` is a VM-only, tape-silent graphics builtin.** A real splitter shows a ↔/↕ resize pointer.
-`set_cursor(shape)` (Ember-abstract shapes 0–4 mapped to raylib `MOUSE_CURSOR_*` in `graphics.c`, so Ember never
+`set_cursor(shape)` (Ingle-abstract shapes 0–4 mapped to raylib `MOUSE_CURSOR_*` in `graphics.c`, so Ingle never
 leaks raylib's enum) mutates OS state directly with **no `gfx_push_cmd`** — exactly like `set_layer` — so it
 emits no draw command and cannot perturb a render golden. `frame_begin` resets the cursor to default each frame,
 so a widget only re-asserts its shape while hovered; nothing has to "unset" it. It is VM-only (the graphics
@@ -1491,9 +1491,9 @@ it falls out of "re-solve real flexbox every frame + keep last frame's rects" �
 workflow (one expert per failure mode → synthesized spec); built + verified TSan/ASan/stress. Gated behind a new
 `EMBER_MN` flag; the proven 1:1 thread-per-spawn runtime stays the default `make parallel` until a wider soak.*
 
-Ember's concurrency model (founding principle #4) is Go-goroutine ergonomics: spawn *thousands* of cheap tasks,
+Ingle's concurrency model (founding principle #4) is Go-goroutine ergonomics: spawn *thousands* of cheap tasks,
 no function colouring. The 1:1 build (`-DEMBER_PARALLEL`) ran one OS thread per `spawn` — correct and ~5–6× on
-compute, but it can't carry thousands of fibers (one pthread each). The endgame (an OS kernel in Ember) needs a
+compute, but it can't carry thousands of fibers (one pthread each). The endgame (an OS kernel in Ingle) needs a
 real scheduler regardless. So we built M:N.
 
 **The key realization — no stackful context switch.** The scary version of M:N is `ucontext`/hand-written arm64
@@ -1576,18 +1576,18 @@ reduced to these rules); each vector has a reject test, the accept path has run 
 golden tests, and Crucible gained an **rc seed mode** (a quarter of its seeds declare `rc struct`s and
 churn them through the aggregate/leak/diff/double-drop oracles) — 187 seeds clean.
 
-## Decision: the website (ember-lang.org) is GitHub Pages from `/docs`; the Zed grammar is its own published repo
+## Decision: the website (ingle-lang.org) is GitHub Pages from `/docs`; the Zed grammar is its own published repo
 
 Two repo/toolchain decisions made while preparing the first public push:
 
-- **Website** — `ember-lang.org` is served by **GitHub Pages from the `main` branch `/docs` folder**
+- **Website** — `ingle-lang.org` is served by **GitHub Pages from the `main` branch `/docs` folder**
   (default Jekyll). The docs are already Markdown, so Jekyll renders each to a routed page
   (`docs/language.md` → `/language`) with no build pipeline; `docs/index.md` is the landing page and
-  `docs/_config.yml` sets the theme. The custom domain lives in `docs/CNAME` (`ember-lang.org`).
+  `docs/_config.yml` sets the theme. The custom domain lives in `docs/CNAME` (`ingle-lang.org`).
   Chosen over a `gh-pages` branch (extra sync, no gain) and over an Actions/static-site-generator
   build (Actions builds ignore the `CNAME` file and add a pipeline to own — overkill for v1). Root
   files outside `/docs` (MANIFESTO, LICENSE) are linked from the landing page via GitHub blob URLs so
-  the published site stays scoped to `/docs`. `ember-lang.com` will 301-redirect to `.org` at the
+  the published site stays scoped to `/docs`. `ingle-lang.com` will 301-redirect to `.org` at the
   registrar (GitHub Pages allows one custom domain per repo).
 
 - **Zed grammar** — the tree-sitter grammar is published as its **own GitHub repo**
@@ -1606,7 +1606,7 @@ Two repo/toolchain decisions made while preparing the first public push:
 
 ## Decision: Linux is a first-class second platform — one Makefile, additive flags, validated against real Linux
 
-Ember now targets **macOS and Linux (x86_64 + arm64)**, not macOS alone. The reference compiler was
+Ingle now targets **macOS and Linux (x86_64 + arm64)**, not macOS alone. The reference compiler was
 already clean POSIX C17 — no `__APPLE__`, `mach/*`, frameworks, `mmap`/`MAP_ANON`, or arch
 assumptions, and `realpath(argv[0])` (not `_NSGetExecutablePath`) for stdlib resolution — so the port
 was entirely a *build* concern. The decisions made (the failure analysis is OFI-141):
@@ -1616,7 +1616,7 @@ was entirely a *build* concern. The decisions made (the failure analysis is OFI-
   unconditionally rather than guarded. `PORTABLE_DEFS := -D_DEFAULT_SOURCE` is appended to every
   compile flag group; `LDLIBS_MATH := -lm` is appended **after the objects** on every link line (link
   order matters under `--as-needed`); `-pthread` goes on the `EMBER_PARALLEL` groups. The native
-  `emberc -o` command (src/main.c) carries the same. Chosen over a platform-detecting Makefile (a
+  `inglec -o` command (src/main.c) carries the same. Chosen over a platform-detecting Makefile (a
   `uname` branch buys nothing when the flags are harmless everywhere) and over per-file feature-macro
   `#define`s (ordering-fragile across 27 translation units; one build-system line is the single point
   of truth). `-D_DEFAULT_SOURCE` was preferred over switching to `-std=gnu17` to keep the strict-ISO
@@ -1652,13 +1652,13 @@ where the distro lacks it (OFI-142). The language, its concurrency, the native b
 
 ## Decision: stage 0 is a frozen, reproducible-from-zero bootstrap reference (`stage0-v0.3.42`)
 
-The self-hosting bootstrap ([docs/design/self-hosting.md](https://github.com/kmcnally5/ember-lang/blob/main/docs/design/self-hosting.md)) ports the compiler
-into Ember one differential-green stage at a time. That only works if the C reference compiler —
+The self-hosting bootstrap ([docs/design/self-hosting.md](https://github.com/ingle-lang/ingle-lang/blob/main/docs/design/self-hosting.md)) ports the compiler
+into Ingle one differential-green stage at a time. That only works if the C reference compiler —
 **stage 0** — is pinned and reproducible, because it is the oracle every ported stage is measured
 against. The decisions:
 
 - **The freeze is a git tag, not a vendored binary.** `stage0-v0.3.42` (annotated) marks the reference
-  commit — the compiler as it stood before any of it was ported into Ember. A *binary* would rot
+  commit — the compiler as it stood before any of it was ported into Ingle. A *binary* would rot
   (codesign, libc, arch); a tagged *source* commit that builds from zero with no third-party deps is the
   durable artifact. The repo's first tag, so it sets the convention: `stage0-vX.Y.Z`, a namespace
   distinct from any future release tags. `EMBER_VERSION` (`include/version.h`) stays the single source of
@@ -1674,15 +1674,15 @@ against. The decisions:
   ```
   git clone <repo> && cd ember
   git checkout stage0-v0.3.42
-  make                      # dev compiler  -> build/emberc        (-O0 -g, the working binary)
-  make release              # release build -> build/emberc-release (-O2 -DNDEBUG)
-  ./build/emberc --version  # emberc 0.3.42
+  make                      # dev compiler  -> build/inglec        (-O0 -g, the working binary)
+  make release              # release build -> build/inglec-release (-O2 -DNDEBUG)
+  ./build/inglec --version  # inglec 0.3.42
   ```
 
   The build is portable C17 with an empty dependency tree (Apple clang or gcc); Linux needs only the
   additive `-D_DEFAULT_SOURCE`, `-lm`, and `-pthread` already baked into the one Makefile (see the Linux
   decision above; OFI-141). The four oracle modes are then available immediately:
-  `./build/emberc --emit=tokens|ast|bytecode|run <file.em>`.
+  `./build/inglec --emit=tokens|ast|bytecode|run <file.em>`.
 
 - **stage 0 is kept indefinitely.** A self-hosted language that can't be rebuilt without itself is a
   trap; keeping a from-C reference (and the tag that pins it) is what guarantees the project can always
@@ -1720,14 +1720,14 @@ addresses and need a compiler edit per helper):
   keeps the ABI well-defined (no UB).
 - The **VM** has no binding for such a symbol, so codegen rejects a direct-extern call with a clear
   "no bytecode-VM binding; build native" error. **A direct-extern program is native-only** — it can only be
-  built with `emberc --emit=c` / `-o`, never run on the VM or through the VM↔native differential. This is an
+  built with `inglec --emit=c` / `-o`, never run on the VM or through the VM↔native differential. This is an
   accepted consequence: kernel code is native by definition.
 
 So the registry stays the canonical, VM-runnable, fully-marshalled path for hosted libraries (libm, the
 `std/*` FFI bindings, libcurl, SQLite); direct-extern is the narrow, native-only, scalar/Ptr path for
 bare-metal and any freestanding C. MMIO **intrinsics** (volatile load/store, no C shim at all) remain the
 eventual endgame that retires even the direct-extern shim for hardware access. First used by kernel
-milestone 1 (`make test-kernel`); see [docs/design/kernel-freestanding.md](https://github.com/kmcnally5/ember-lang/blob/main/docs/design/kernel-freestanding.md).
+milestone 1 (`make test-kernel`); see [docs/design/kernel-freestanding.md](https://github.com/ingle-lang/ingle-lang/blob/main/docs/design/kernel-freestanding.md).
 
 
 ## Decision: `--freestanding` is an emit-mode flag on `--emit=c`, not a separate backend
@@ -1737,11 +1737,11 @@ The bare-metal target (the kernel campaign) reuses the whole AST→C machinery u
 `cgen_c_program`'s output, threaded as a parameter (like the emitted entry it controls), not a fork of the
 backend. The decisions, in the order they were contested:
 
-- **The entry returns Ember main's int result, and the boot stub forwards it as the machine exit code.**
+- **The entry returns Ingle main's int result, and the boot stub forwards it as the machine exit code.**
   `int main(void)` — no argc/argv (nothing provides them), no stdio result-echo (output is whatever the
   program wrote through its direct externs), no exit heap sweep (the heap-free subset never allocates).
   Returning the result costs nothing and buys a real differential hook: the QEMU smoke test asserts on an
-  exit code *computed by Ember arithmetic on bare metal* (`hello.em` returns its loop counter → qemu exits
+  exit code *computed by Ingle arithmetic on bare metal* (`hello.em` returns its loop counter → qemu exits
   3). Verification-over-print is the project's whole ethos; the exit code is the cheapest computed channel.
 - **Hosted-only constructs are rejected at EMIT time, not link time, when the emitter knows.**
   `spawn`/`nursery` (pthreads; a kernel is its own scheduler) and hosted-REGISTRY extern calls (`em_ffi` +
@@ -1793,19 +1793,19 @@ The mechanism — a compile define `EMBER_FREESTANDING` and a thin platform laye
   Device) before `main`. This is the counterpart to the FP/SIMD-enable decision (kernel M1): the runtime's
   representation choices (16-byte SIMD-copied `Value`, packed layouts) dictate specific CPU bring-up.
 
-See [docs/design/kernel-freestanding.md](https://github.com/kmcnally5/ember-lang/blob/main/docs/design/kernel-freestanding.md) for the milestone log.
+See [docs/design/kernel-freestanding.md](https://github.com/ingle-lang/ingle-lang/blob/main/docs/design/kernel-freestanding.md) for the milestone log.
 
 
-## Decision: self-hosting is carried to a standalone toolchain — the Ember compiler becomes the development surface, stage 0 becomes the frozen seed
+## Decision: self-hosting is carried to a standalone toolchain — the Ingle compiler becomes the development surface, stage 0 becomes the frozen seed
 
 The self-hosting bootstrap reached both fixed points (the VM/bytecode reproduction and the native C-emit
 reproduction — a self-built compiler regenerates a byte-identical copy of itself). That proved the compiler
-can compile *itself*; it did **not** make the Ember-written compiler a usable replacement for stage 0. The
+can compile *itself*; it did **not** make the Ingle-written compiler a usable replacement for stage 0. The
 decision is to close that gap: finish self-hosting into a **standalone toolchain** that does everything
 stage 0 does, so stage 0 can stop being the *active* compiler and become purely the frozen re-bootstrap
 seed (the Rust-drops-OCaml / Go-retires-its-C-compiler end state).
 
-- **Why the full campaign, not a partial one.** The goal is *one* compiler, maintained in Ember, so a new
+- **Why the full campaign, not a partial one.** The goal is *one* compiler, maintained in Ingle, so a new
   language feature or library binding is implemented **once**. Any partial self-hosting fails that: a
   bytecode-only self-hosted compiler still needs stage 0's C-emit path to link libraries; a C-emit-only one
   still needs stage 0 for `--emit=run` and loses the VM-vs-native differential (the correctness oracle).
@@ -1823,20 +1823,20 @@ seed (the Rust-drops-OCaml / Go-retires-its-C-compiler end state).
   serializable `CompiledProgram` container + a C VM loader (`--run-bytecode`), then `codegen.em` to
   full-corpus coverage, then unify with the checker. Native C-emit parity comes second and folds into the
   kernel campaign, where the AST→C path's unique value (bare-metal codegen, libC/3rd-party linking) lives.
-  See [docs/design/bytecode-container.md](https://github.com/kmcnally5/ember-lang/blob/main/docs/design/bytecode-container.md)
-  for the Phase 1 format design and [docs/design/self-hosting.md](https://github.com/kmcnally5/ember-lang/blob/main/docs/design/self-hosting.md)
+  See [docs/design/bytecode-container.md](https://github.com/ingle-lang/ingle-lang/blob/main/docs/design/bytecode-container.md)
+  for the Phase 1 format design and [docs/design/self-hosting.md](https://github.com/ingle-lang/ingle-lang/blob/main/docs/design/self-hosting.md)
   for the phased plan.
 
 - **This refines "stage 0 is a frozen, reproducible-from-zero bootstrap reference" (above), it does not
   contradict it.** Stage 0 is still kept indefinitely and still frozen at `stage0-v0.3.42`; what changes is
-  that once the self-hosted compiler reaches parity, *new* language work happens in the Ember compiler and
+  that once the self-hosted compiler reaches parity, *new* language work happens in the Ingle compiler and
   stage 0 is no longer edited to track it. Stage 0 remains the from-C re-bootstrap oracle; the last
-  self-built `emberc` binary becomes the bootstrap seed for ordinary rebuilds.
+  self-built `inglec` binary becomes the bootstrap seed for ordinary rebuilds.
 
 - **One sub-decision is deferred to the freeze step (Phase 5), stated now so it is not forgotten:** whether
-  the Ember compiler *restricts itself to the language subset stage 0 can build* (so stage 0 can always
-  rebuild the current `emberc` from C — full from-C reproducibility, the bootstrappable-builds ideal) or
-  *uses new language features freely* (so re-bootstrapping requires a prior `emberc` binary seed — the
+  the Ingle compiler *restricts itself to the language subset stage 0 can build* (so stage 0 can always
+  rebuild the current `inglec` from C — full from-C reproducibility, the bootstrappable-builds ideal) or
+  *uses new language features freely* (so re-bootstrapping requires a prior `inglec` binary seed — the
   Rust/Go reality). The first is more disciplined and preserves Trusting-Trust-style reproducibility from C
   alone; the second is less constraining for language growth. Resolved when parity is in sight, not before.
 

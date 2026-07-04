@@ -1,16 +1,16 @@
 ---
-title: Ember from the Inside
+title: Ingle from the Inside
 nav_order: 10
 permalink: /inside
-description: Ember from the Inside — how the language is designed, parsed, checked, and run. A guided tour of the compiler, with the source code as the star.
+description: Ingle from the Inside — how the language is designed, parsed, checked, and run. A guided tour of the compiler, with the source code as the star.
 ---
 
-# Ember from the Inside
+# Ingle from the Inside
 
 ### How the language is designed, parsed, checked, and run — for the curious of every stripe
 
 *Covering the compiler as it stands on 1 July 2026. A companion to
-[Ember by Firelight](THE_EMBER_BOOK.md), which teaches you to **write** Ember; this book shows you
+[Ingle by Firelight](THE_INGLE_BOOK.md), which teaches you to **write** Ingle; this book shows you
 what happens to what you wrote.*
 
 ---
@@ -26,12 +26,12 @@ what happens to what you wrote.*
 > - Every **compiler output** shown is one of the repository's own **golden files** — the recorded
 >   outputs under `tests/` that `make test` compares against on every run. If a golden in this book
 >   ever drifts from the compiler, the test suite fails before the book does.
-> - Every **Ember sample** is copied from a file in
->   [`tests/`](https://github.com/kmcnally5/ember-lang/blob/main/tests) or
->   [`examples/`](https://github.com/kmcnally5/ember-lang/blob/main/examples) that the suite
+> - Every **Ingle sample** is copied from a file in
+>   [`tests/`](https://github.com/ingle-lang/ingle-lang/blob/main/tests) or
+>   [`examples/`](https://github.com/ingle-lang/ingle-lang/blob/main/examples) that the suite
 >   compiles. This book invents no samples of its own.
 >
-> Ember moves quickly, so treat this as a photograph with a date on the back. The live ledger of
+> Ingle moves quickly, so treat this as a photograph with a date on the back. The live ledger of
 > what has changed since — every bug, flaw, and improvement, numbered and dated — is the
 > [OFI log](OFI.md), which Chapter 18 will argue is one of the more interesting files in the repo.
 
@@ -48,7 +48,7 @@ You will leave knowing how a programming language actually gets made, which is a
 pleasant thing to know.
 
 If you **write software but have never read a compiler**, this book is designed to be your first
-one. Ember's compiler is unusually readable as these things go — hand-written C, no generated
+one. Ingle's compiler is unusually readable as these things go — hand-written C, no generated
 parser tables, no framework — and every excerpt cites its exact file so you can open the real
 thing beside the page.
 
@@ -117,12 +117,12 @@ A few conventions:
 
 ## Chapter 1 — Why Build a Language in 2026?
 
-Every programming language is an argument. Before a single line of the compiler existed, Ember's
+Every programming language is an argument. Before a single line of the compiler existed, Ingle's
 argument was written down in a document called the
-[manifesto](https://github.com/kmcnally5/ember-lang/blob/main/MANIFESTO.md), and the project holds
+[manifesto](https://github.com/ingle-lang/ingle-lang/blob/main/MANIFESTO.md), and the project holds
 itself to an unusual rule: **every language-design decision must trace back to a principle in that
 document.** If a decision can't, either the decision is wrong or the manifesto gets amended — out
-loud, deliberately, in writing. So the honest way to explain why Ember exists is to walk the
+loud, deliberately, in writing. So the honest way to explain why Ingle exists is to walk the
 argument, not to advertise the product.
 
 The argument starts with credit where it is due. By 2026 the systems-programming conversation has
@@ -131,15 +131,15 @@ moved from hype to mandate on the strength of it; **Zig**, the radically simple,
 better-C; and **Go**, still the productivity champion for networked services, at the price of a
 runtime. The manifesto's opening section is blunt about the first of these: Rust *won the
 argument* about memory safety. Ownership-based lifetime management eliminates use-after-free,
-double-free, and data races as a class, and Ember does not relitigate any of it. Sum types,
+double-free, and data races as a class, and Ingle does not relitigate any of it. Sum types,
 exhaustive pattern matching, errors as values, no null, immutability by default, a real toolchain
 in the box — the manifesto lists these as settled questions, inherited with thanks.
 
 The disagreement is about the road, not the destination. Rust's own community documents the cost:
 new developers spend weeks to months fighting the borrow checker; async is famously "a second,
-harder language"; compile times strain iteration; the surface area keeps growing. Ember's thesis,
+harder language"; compile times strain iteration; the surface area keeps growing. Ingle's thesis,
 in one sentence from the manifesto: **Rust proved the destination is right, but the road there is
-harder than it needs to be.** Ember aims for Rust-grade compile-time safety with something much
+harder than it needs to be.** Ingle aims for Rust-grade compile-time safety with something much
 closer to Go- or Zig-grade approachability and iteration speed. Whether it gets there is not a
 claim this book will make for it — the point of the rest of these chapters is to show you the
 machinery and let you judge.
@@ -148,11 +148,11 @@ Three of the manifesto's answers shape everything you will see in this book, so 
 meeting up front.
 
 **Safety must be progressively disclosed.** A beginner should write correct, safe programs on day
-one without learning lifetime theory. Ember keeps ownership — values move, borrows are the
+one without learning lifetime theory. Ingle keeps ownership — values move, borrows are the
 default, mutation is opt-in — but there are no lifetime annotations to write, no `&`/`&mut`
 sigils, and the common tree-shaped patterns need zero ceremony. Where data is genuinely
 graph-shaped, the sanctioned tools are a generational
-[`std/slotmap`](https://github.com/kmcnally5/ember-lang/blob/main/std/slotmap.em) and a
+[`std/slotmap`](https://github.com/ingle-lang/ingle-lang/blob/main/std/slotmap.em) and a
 deeply-immutable `rc struct`, rather than an escalating fight with a borrow checker. The dangerous
 direction — a move — is the one you must type.
 
@@ -160,8 +160,8 @@ direction — a move — is the one you must type.
 `nursery`/`spawn` blocks; no async/sync function colouring; real stack traces. Chapter 10 shows
 what that costs and buys at the virtual-machine level.
 
-**The primary audience is a model that has never seen Ember.** This is the unusual one, and the
-manifesto is candid that it is a bet. Coding is moving to AI, so Ember's syntax is chosen by a
+**The primary audience is a model that has never seen Ingle.** This is the unusual one, and the
+manifesto is candid that it is a bet. Coding is moving to AI, so Ingle's syntax is chosen by a
 "least surprise, for the model" rule: a zero-shot LLM predicts semantics from priors learned on
 every other language, so each keyword is picked to mean what such a reader would guess it means.
 `match`, not `switch`, because `switch` drags in fallthrough expectations that would be wrong.
@@ -170,7 +170,7 @@ beyond syntax, the machinery of the whole toolchain — structured diagnostics, 
 faults, an execution tape, executable contracts — exists so that a model (or a human) gets told
 the truth about a program in a format it can act on. Chapters 8, 12, and 13 are that story.
 
-> **In plain terms.** Ember's designers wrote down what they think the last decade of programming
+> **In plain terms.** Ingle's designers wrote down what they think the last decade of programming
 > languages got right and wrong, and made themselves legally answerable to that document: no
 > feature gets in unless the reasoning traces back to it. The three big commitments: be as safe as
 > Rust without making you study for weeks first; make running things at the same time a normal
@@ -181,11 +181,11 @@ the truth about a program in a format it can act on. Chapters 8, 12, and 13 are 
 
 ## Chapter 2 — Two Products, One Repo
 
-The repository is home to two things the project is adamant about keeping separate: **the Ember
+The repository is home to two things the project is adamant about keeping separate: **the Ingle
 language** — grammar, semantics, the type system, the thing the manifesto governs — and **the
-Ember compiler**, `emberc`, a batch program written in C that implements it. A change to one is
+Ingle compiler**, `inglec`, a batch program written in C that implements it. A change to one is
 not automatically a change to the other, and each has its own constitution: the language answers
-to the [manifesto](https://github.com/kmcnally5/ember-lang/blob/main/MANIFESTO.md), the compiler
+to the [manifesto](https://github.com/ingle-lang/ingle-lang/blob/main/MANIFESTO.md), the compiler
 and toolchain answer to [architecture.md](architecture.md), a living document of engineering
 decisions, each recorded as a rule plus the reasoning. When you wonder "why is it like this?"
 about anything in this book, one of those two documents almost always has a written answer — and
@@ -196,7 +196,7 @@ Linux, x86-64 and arm64, any C17 compiler); zero install-time dependencies; and 
 memory layout and the runtime. The default build links the C standard library and **nothing
 else** — no parser generator, no JSON library, no LLVM. Capabilities another project would pull
 from a package are written in-tree: the JSON reader, the contract prover, the FFI registry, the
-property fuzzer, the language server. When you build `emberc`, the dependency tree is empty, which
+property fuzzer, the language server. When you build `inglec`, the dependency tree is empty, which
 is a sentence that sounds dull until you have spent a week of your life debugging someone else's
 transitive dependency. Three opt-in builds bend the rule deliberately — raylib for graphics,
 libcurl for networking, a vendored SQLite for databases — and all three are kept firmly off the
@@ -205,9 +205,9 @@ default path, so `make` and `make test` run on a bare, headless machine.
 Two habits of the project matter more than any single technical decision, because they explain the
 texture of everything in Parts II–IV.
 
-**The walking skeleton.** Ember's ancestor project (an earlier language called FROG) taught a
+**The walking skeleton.** Ingle's ancestor project (an earlier language called FROG) taught a
 painful lesson: build the whole language as an interpreter and bolt a VM on later, and you get a
-retrofit plus two backends drifting apart. So Ember grows the **entire pipeline end-to-end from a
+retrofit plus two backends drifting apart. So Ingle grows the **entire pipeline end-to-end from a
 trivial subset outward** — every feature is added through lexer, parser, checker, and code
 generator in one slice, and it is not "done" until it executes and has a test. The front-end can
 never get ahead of the backend, because there is no such place to be.
@@ -265,18 +265,18 @@ with the file that owns each arrow:
   output, faults, and (if asked) the tape
 ```
 
-The pleasant thing about `emberc` is that the pipeline is not sealed: nearly every stage has a
-window you can open. The driver ([src/main.c](https://github.com/kmcnally5/ember-lang/blob/main/src/main.c))
+The pleasant thing about `inglec` is that the pipeline is not sealed: nearly every stage has a
+window you can open. The driver ([src/main.c](https://github.com/ingle-lang/ingle-lang/blob/main/src/main.c))
 documents them in its own `--help` text, which is worth quoting as it appears in the source:
 
 ```c
                 "usage:\n"
-                "  emberc <file.em>                inspect/compile a source file (default --emit=tokens)\n"
-                "  emberc --emit=<mode> <file.em>  mode: run|ast|bytecode|c|docs|prove|check|replay|trace|tokens\n"
-                "  emberc -o <bin> <file.em>       compile to a native binary (C backend)\n"
-                "  emberc --tape <file.em>         record the execution tape (alias for --emit=trace)\n"
-                "  emberc --lsp                    run the language server (JSON-RPC over stdio)\n"
-                "  emberc --doctor                 check your setup and print the fix for anything wrong\n"
+                "  inglec <file.em>                inspect/compile a source file (default --emit=tokens)\n"
+                "  inglec --emit=<mode> <file.em>  mode: run|ast|bytecode|c|docs|prove|check|replay|trace|tokens\n"
+                "  inglec -o <bin> <file.em>       compile to a native binary (C backend)\n"
+                "  inglec --tape <file.em>         record the execution tape (alias for --emit=trace)\n"
+                "  inglec --lsp                    run the language server (JSON-RPC over stdio)\n"
+                "  inglec --doctor                 check your setup and print the fix for anything wrong\n"
 ```
 
 `--emit=tokens`, `--emit=ast`, and `--emit=bytecode` stop the pipeline early and print what that
@@ -292,7 +292,7 @@ compiler wrong, **65** the source had an error (lexing, parsing, type-checking, 
 fault), **66** the file couldn't be read, **0** all was well.
 
 Every journey needs a traveller. Here is ours — seven lines from the test suite,
-[`tests/codegen/functions.em`](https://github.com/kmcnally5/ember-lang/blob/main/tests/codegen/functions.em),
+[`tests/codegen/functions.em`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/codegen/functions.em),
 chosen because the suite locks its output at two different stages, so you will see it again in
 Chapter 9 compiled to bytecode, instruction by instruction:
 
@@ -312,7 +312,7 @@ fn main() -> int {
 > machine executes (or into C, for a standalone binary). The `--emit` flag is a set of inspection
 > hatches, one per station.
 
-> **Machine-room trivia.** Run `emberc hello.em` with no flags at all and you get… the token
+> **Machine-room trivia.** Run `inglec hello.em` with no flags at all and you get… the token
 > stream. The default `--emit` mode is `tokens` — a small archaeological trace of the walking
 > skeleton: the lexer was the first station built, so printing tokens was once all the compiler
 > could do, and the default has simply never needed to change.
@@ -322,15 +322,15 @@ fn main() -> int {
 ## Chapter 4 — Words: The Lexer
 
 Before a compiler can think about your program it has to read it, and it reads the way you were
-taught to: letters into words. The lexer (or *scanner* — Ember's source uses both) turns a stream
+taught to: letters into words. The lexer (or *scanner* — Ingle's source uses both) turns a stream
 of bytes into a stream of **tokens**: `let` is a token, `x` is a token, `=` and `42` are tokens.
 No meaning yet, no grammar — just spelling. The whole thing is
-[`src/lexer.c`](https://github.com/kmcnally5/ember-lang/blob/main/src/lexer.c), 504 lines of
+[`src/lexer.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/lexer.c), 504 lines of
 hand-written C: no regular expressions, no generated tables, a `switch` on the current character
 and some look-ahead.
 
 Here is what a token actually is, from
-[`include/token.h`](https://github.com/kmcnally5/ember-lang/blob/main/include/token.h):
+[`include/token.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/token.h):
 
 ```c
 // A Token is a zero-copy view into the source buffer: `start` points into the
@@ -356,23 +356,23 @@ typedef struct {
 Two design choices are visible right in the struct. First, tokens are **zero-copy**: a token
 doesn't own the text `42`, it points at those bytes where they already sit in the source buffer.
 The lexer allocates nothing per token; text is copied exactly once, later, when the parser decides
-a particular identifier is worth keeping (Chapter 6). Second, that odd `doc` field: Ember's `///`
+a particular identifier is worth keeping (Chapter 6). Second, that odd `doc` field: Ingle's `///`
 doc comments are not thrown away as whitespace. The lexer gathers a run of consecutive `///` lines
 and hangs the raw span on the next real token, and from there a single cleaned copy of your prose
 travels the whole toolchain — the same bytes surface in your editor when you hover a function and
-in the output of `emberc --emit=docs`. One corpus, two consumers, no drift. (Exactly three
+in the output of `inglec --emit=docs`. One corpus, two consumers, no drift. (Exactly three
 slashes, mind: `//` is an ordinary comment and `////` is decoration, and the lexer counts.)
 
 ### The vocabulary lives in one file
 
 How does the lexer know `let` is a keyword and `lettuce` is not? In most compilers the keyword
 list lives wherever the lexer is, and a *second* copy lives in the editor's syntax highlighter,
-and a *third* in the completion engine, and they rot apart quietly. Ember's answer is a single
-file, [`include/vocab.def`](https://github.com/kmcnally5/ember-lang/blob/main/include/vocab.def),
+and a *third* in the completion engine, and they rot apart quietly. Ingle's answer is a single
+file, [`include/vocab.def`](https://github.com/ingle-lang/ingle-lang/blob/main/include/vocab.def),
 which opens by stating its own job:
 
 ```c
-// vocab.def — the single source of truth for Ember's lexical vocabulary.
+// vocab.def — the single source of truth for Ingle's lexical vocabulary.
 //
 // Keywords, builtins, and primitive types each appear here EXACTLY ONCE. Every consumer
 // (the lexer's keyword recogniser, the LSP's hover/completion, and the TextMate grammar
@@ -392,7 +392,7 @@ EMBER_KEYWORD(TOK_FN,         "fn",         "declaration", "`fn` — declare a f
 Note the fourth column: every keyword carries its own one-line documentation, *in the vocabulary
 file*, and that gloss is what your editor shows when you hover the keyword. The lexer consumes the
 same table by defining `EMBER_KEYWORD` to build a lookup array — this is
-[`src/lexer.c`](https://github.com/kmcnally5/ember-lang/blob/main/src/lexer.c), in full:
+[`src/lexer.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/lexer.c), in full:
 
 ```c
 // keyword_type returns the reserved-word token for a lexeme, or TOK_IDENT if the
@@ -419,7 +419,7 @@ static TokenType keyword_type(const char *text, size_t length) {
 }
 ```
 
-Yes, that is a linear scan, and the comment owns it: Ember has 31 reserved words (plus 25 built-in
+Yes, that is a linear scan, and the comment owns it: Ingle has 31 reserved words (plus 25 built-in
 functions and 14 primitive type names in the same file), and scanning a 31-entry table is not
 where a compiler's time goes. When the count is this small, *obvious* beats *clever*. The editor
 grammar is generated from the same table by a build-time tool, and `make test` regenerates it and
@@ -428,7 +428,7 @@ aspirational.
 
 ### Newlines are grammar here
 
-Ember has no semicolons, so the lexer carries one more responsibility: deciding which line breaks
+Ingle has no semicolons, so the lexer carries one more responsibility: deciding which line breaks
 *mean* something. The rule (decided in the manifesto while the parser was being built) is that a
 newline becomes a `TOK_NEWLINE` — an implicit statement terminator — only when the last token on
 the line *can end a statement*: an identifier, a literal, a closing bracket, `?`, or
@@ -439,7 +439,7 @@ without ceremony. You write ordinary line-broken code; the lexer does the punctu
 ### What the suite sees
 
 The lexer's regression test,
-[`tests/lexer/literals.em`](https://github.com/kmcnally5/ember-lang/blob/main/tests/lexer/literals.em),
+[`tests/lexer/literals.em`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/lexer/literals.em),
 starts with two unremarkable lines:
 
 ```ember
@@ -473,9 +473,9 @@ error-tolerant frontend the language server requires (Chapter 15), designed in f
 
 > **In plain terms.** The lexer reads your program the way you'd read a sentence — splitting it
 > into words and punctuation, noting where each one sits, without yet asking what any of it means.
-> Ember keeps its entire vocabulary (every keyword, built-in, and type name, each with its own
+> Ingle keeps its entire vocabulary (every keyword, built-in, and type name, each with its own
 > one-line dictionary definition) in one file that the compiler, the editor plugin, and the
-> documentation all read, so no copy can quietly go stale. And because Ember has no semicolons,
+> documentation all read, so no copy can quietly go stale. And because Ingle has no semicolons,
 > the lexer is also the thing that decides which line breaks end a statement.
 
 > **Machine-room trivia.** The trickiest customer in the lexer isn't a keyword — it's the dot.
@@ -494,7 +494,7 @@ in the book: **recursive descent**. One C function per grammatical construct; `p
 `parse_expression` which may call `parse_unary` which may find a parenthesis and call all the way
 back down. The grammar lives in the *shape of the call graph*, and the tree under construction
 mirrors the call stack discovering it. No parser generator, no grammar tables: 1,999 lines of
-plain C in [`src/parser.c`](https://github.com/kmcnally5/ember-lang/blob/main/src/parser.c) you
+plain C in [`src/parser.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/parser.c) you
 can single-step through.
 
 The parser's entire mutable state fits in one struct:
@@ -529,7 +529,7 @@ never stops producing a tree, which the language server (running this same parse
 half-typed code, on every keystroke) depends on absolutely.
 
 **`no_struct` — one bit of context.** `if x { ... }` is ambiguous in a brace language with struct
-literals: is `x { ... }` a struct being built, or is `x` the condition and `{` the block? Ember
+literals: is `x { ... }` a struct being built, or is `x` the condition and `{` the block? Ingle
 resolves it the way Rust does — inside an `if`/`for`/`match` head the brace means *block* — and
 the entire mechanism is this one flag, set while parsing those positions.
 
@@ -540,7 +540,7 @@ expression operand passes through one choke point that counts:
 ```c
 // Cap on recursive-descent nesting for expressions and types. Hand-written recursive
 // descent has no stack-overflow protection, so deeply nested input (`((((…))))`, a long
-// `---…` chain, `[[[…]]]`) would otherwise crash emberc with a SIGSEGV instead of a clean
+// `---…` chain, `[[[…]]]`) would otherwise crash inglec with a SIGSEGV instead of a clean
 // diagnostic. 1000 is far beyond any human-written nesting yet leaves ample C stack.
 #define MAX_PARSE_DEPTH 1000
 ```
@@ -585,9 +585,9 @@ Read it with `1 + 2 * 3` in hand. The call parses `1`, sees `+`, and recurses fo
 side — but at `prec + 1`, meaning *"only take operators that bind tighter than my `+`"*. That
 inner call parses `2`, sees `*`, which does bind tighter, so `2 * 3` is built inside the
 recursion and returned as a finished sub-tree, which becomes `+`'s right child. Twenty-two lines,
-every precedence level Ember has, and associativity falls out of the `+ 1`. The parser's
+every precedence level Ingle has, and associativity falls out of the `+ 1`. The parser's
 regression suite locks the result — from
-[`tests/parser/expressions.em`](https://github.com/kmcnally5/ember-lang/blob/main/tests/parser/expressions.em):
+[`tests/parser/expressions.em`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/parser/expressions.em):
 
 ```ember
 let a = 1 + 2 * 3 - 4 / 2 % 2
@@ -644,7 +644,7 @@ nothing in the tree owns memory individually.
 
 **The `>>` problem, solved the industry's way.** Shift operators mean `>>` must lex as one token;
 nested generics mean `Box<Box<int>>` needs it to be two `>`s. This is the classic C++98 collision,
-and Ember adopts the C++11/Rust/Java resolution: lex `>>` greedily, and at the three places the
+and Ingle adopts the C++11/Rust/Java resolution: lex `>>` greedily, and at the three places the
 *type* parser expects a closing `>`, split the token back in two — rewriting it in place and not
 advancing, so the enclosing list consumes the remainder. The alternative (never merging, and
 detecting `>>` by adjacency in the expression parser) was rejected for a recorded reason: it would
@@ -665,7 +665,7 @@ and language models alike.
 The AST is the compiler's central data structure — the thing the parser builds, the checker
 annotates, and both backends consume — so it is worth pausing on what a node actually looks like
 and where it lives. Both answers are in
-[`include/ast.h`](https://github.com/kmcnally5/ember-lang/blob/main/include/ast.h), and both are
+[`include/ast.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/ast.h), and both are
 deliberately boring in the best C tradition.
 
 A node is a **tagged union**: a `kind` field saying which construct this is, position fields, and
@@ -707,7 +707,7 @@ is a big part of why a second backend (Chapter 11) was affordable at all — and
 disagree about what a call means, only about how to say it.
 
 One deliberate absence: the tree printer
-([`src/ast_print.c`](https://github.com/kmcnally5/ember-lang/blob/main/src/ast_print.c), the
+([`src/ast_print.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/ast_print.c), the
 `--emit=ast` output you saw in Chapter 5) prints **no source positions**. That output is locked by
 golden files, and a dump that included line numbers would make every golden churn each time a
 comment shifted a test file's code down a line. Stability is a feature you design for, even in
@@ -716,7 +716,7 @@ debug output.
 ### Wholesale memory
 
 Now, where do ten thousand nodes live? The answer is 94 lines long —
-[`src/arena.c`](https://github.com/kmcnally5/ember-lang/blob/main/src/arena.c), the smallest file
+[`src/arena.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/arena.c), the smallest file
 in the compiler and the foundation under everything. An arena is memory rented **wholesale**: big
 blocks are allocated, a cursor walks forward through the current block handing out slices, and
 nothing is ever freed individually — when the compilation is done, the whole arena is released in
@@ -774,9 +774,9 @@ rediscovers it the hard way.
 
 ## Chapter 7 — Meaning: The Checker
 
-[`src/check.c`](https://github.com/kmcnally5/ember-lang/blob/main/src/check.c) is 8,981 lines —
+[`src/check.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/check.c) is 8,981 lines —
 between a quarter and a third of the entire compiler, and more than twice the size of anything
-else in it. That ratio *is* Ember's design philosophy, stated in code volume: the language's
+else in it. That ratio *is* Ingle's design philosophy, stated in code volume: the language's
 promises — ownership without lifetime annotations, generics checked at the definition, contracts,
 linear FFI handles, refinement types — are compile-time promises, and this is where every one of
 them is kept. The lexer spells, the parser shapes, the backends translate; the checker is where
@@ -823,7 +823,7 @@ how the textbooks do it. It has needed exactly one adversarial fix (a band-overl
 the newtype work, caught in review), and it has carried nine language features without a
 rewrite.
 
-### The part that makes Ember Ember
+### The part that makes Ingle Ingle
 
 Then comes ownership. The checker enforces the manifesto's memory model — every value has one
 owner; a plain use is an immutable borrow; `mut` borrows visibly; `move` transfers, and the
@@ -849,7 +849,7 @@ definition**, against declared interface bounds — not re-checked per use, whic
 answer to C++'s template-error experience. Generic dispatch happens through **witness records**
 (dictionary passing): a small table of the concrete type's method indices, built where the
 concrete type is known, threaded to where it isn't — from
-[`include/ast.h`](https://github.com/kmcnally5/ember-lang/blob/main/include/ast.h):
+[`include/ast.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/ast.h):
 
 ```c
 // A witness: a concrete type's method fn-indices for one bound interface, in the
@@ -874,7 +874,7 @@ message names the binding and where it moved. The machinery those messages flow 
 next chapter.
 
 > **In plain terms.** The checker is the compiler's court: every name must identify something,
-> every type must line up, and — Ember's distinctive rule — every value must have a clear owner at
+> every type must line up, and — Ingle's distinctive rule — every value must have a clear owner at
 > every moment, so that freeing memory twice or using something after giving it away becomes a
 > *rejected program* instead of a 2 a.m. crash. It writes its verdicts onto the program's tree for
 > the later stages to obey, and it is the biggest piece of the compiler by far, because it is
@@ -889,12 +889,12 @@ next chapter.
 ## Chapter 8 — When Things Go Wrong
 
 Most compilers treat errors as prose: text sprayed at stderr, formatted for a human squinting at a
-terminal. Ember treats a failure as **an artifact** — a structured record with named parts — and
+terminal. Ingle treats a failure as **an artifact** — a structured record with named parts — and
 then *renders* that record for whoever is reading. This is one design applied twice, at the two
 places a program can fail.
 
 **Compile-time.** Every diagnostic in the frontend funnels through one function, `diag_error` in
-[`src/diag.c`](https://github.com/kmcnally5/ember-lang/blob/main/src/diag.c) — 209 lines, one of
+[`src/diag.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/diag.c) — 209 lines, one of
 those files whose smallness is the point. A diagnostic carries file, line, column, message, the
 nearby source text, an optional `help` (a concrete suggested fix), and an optional secondary
 location ("the value moved here"). In human mode it prints immediately, in the familiar
@@ -903,8 +903,8 @@ location ("the value moved here"). In human mode it prints immediately, in the f
 machine-parseable, made for a tool or a model that intends to *fix* the program rather than read
 about it.
 
-**Run-time.** The richer sibling is the **Fault** — Ember's single structured failure artifact,
-defined in [`include/fault.h`](https://github.com/kmcnally5/ember-lang/blob/main/include/fault.h)
+**Run-time.** The richer sibling is the **Fault** — Ingle's single structured failure artifact,
+defined in [`include/fault.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/fault.h)
 and documented in [faults.md](faults.md). The taxonomy first:
 
 ```c
@@ -918,7 +918,7 @@ typedef enum {
 } FaultCategory;
 ```
 
-Every way an Ember program can fail is meant to converge on this one record. And the record
+Every way an Ingle program can fail is meant to converge on this one record. And the record
 itself is a small anatomy lesson in what a good error *contains*:
 
 ```c
@@ -956,7 +956,7 @@ routing the *compile-time* categories onto the same record, and a couple of prec
 tracked openly in the OFI log as the remaining phases — the file's comments say so themselves,
 which is this project's way.
 
-> **In plain terms.** When an Ember program fails, the compiler builds a little incident report —
+> **In plain terms.** When an Ingle program fails, the compiler builds a little incident report —
 > what rule was violated, with which actual values, reached through which calls, and (when
 > honest) how to fix it — and only *then* decides how to print it: as friendly text for a person,
 > or as machine-readable lines for a tool or an AI that will attempt the repair itself. Same
@@ -974,10 +974,10 @@ which is this project's way.
 ## Chapter 9 — Lowering: Bytecode
 
 The checked, annotated tree now becomes something executable.
-[`src/codegen.c`](https://github.com/kmcnally5/ember-lang/blob/main/src/codegen.c) walks the AST
+[`src/codegen.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/codegen.c) walks the AST
 and emits **stack bytecode**: flat arrays of instructions for a machine with no registers, just a
 stack of values. There is deliberately no optimizing intermediate representation between tree and
-bytecode — the recorded reasoning is that an IR is "more surface to keep in sync," and Ember's
+bytecode — the recorded reasoning is that an IR is "more surface to keep in sync," and Ingle's
 speed story for release builds is the native backend, not a cleverer interpreter.
 
 Time to keep Chapter 3's promise. Our traveller, `tests/codegen/functions.em` once more:
@@ -993,7 +993,7 @@ fn main() -> int {
 ```
 
 and what the suite locks for `--emit=bytecode`, the golden file
-[`tests/codegen/functions.bytecode`](https://github.com/kmcnally5/ember-lang/blob/main/tests/codegen/functions.bytecode),
+[`tests/codegen/functions.bytecode`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/codegen/functions.bytecode),
 in full:
 
 ```
@@ -1027,12 +1027,12 @@ two bytes is a cheap price for never wondering.
 ### One table to rule the instruction set
 
 The instruction set itself lives in
-[`include/opcode.h`](https://github.com/kmcnally5/ember-lang/blob/main/include/opcode.h) as
+[`include/opcode.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/opcode.h) as
 another X-macro table, and its header comment explains exactly why with the candour this codebase
 makes a habit of:
 
 ```c
-// The single source of truth for Ember's bytecode instruction set.
+// The single source of truth for Ingle's bytecode instruction set.
 //
 // Each row is  X(enum-name, "mnemonic", OPERANDS)  where OPERANDS is OPS0()..OPS5(...) listing each
 // inline operand's KIND in stream order (OperandKind below). One declaration drives four things that
@@ -1094,17 +1094,17 @@ a clean "too many" error. A limit is acceptable. A silent wrap never is.
 
 ## Chapter 10 — The Machine: The VM
 
-[`src/vm.c`](https://github.com/kmcnally5/ember-lang/blob/main/src/vm.c) is the second-largest
-file in the compiler (5,003 lines) and the place where Ember's promises stop being analysis and
+[`src/vm.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/vm.c) is the second-largest
+file in the compiler (5,003 lines) and the place where Ingle's promises stop being analysis and
 start being behaviour. It is a classic stack interpreter: a value stack, a stack of call frames
 (function + instruction pointer + where its locals begin), and a dispatch loop that reads an
 opcode and does the thing. The VM is also, by written decision, the **reference semantics** of the
-language — whatever subtle question you have about what Ember means, the VM's answer is the
+language — whatever subtle question you have about what Ingle means, the VM's answer is the
 canonical one, and everything else (the native backend, the self-hosted port) is measured against
 it.
 
 A running value is sixteen bytes — from
-[`include/value.h`](https://github.com/kmcnally5/ember-lang/blob/main/include/value.h):
+[`include/value.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/value.h):
 
 ```c
 typedef struct {
@@ -1160,7 +1160,7 @@ static int push_string_const(VM *vm, StringConst *sc) {
 
 How should an interpreter *dispatch* — pick the code for each opcode? The folk wisdom says
 computed-goto "threaded" dispatch beats a `switch`, because each handler gets its own indirect
-jump for the branch predictor to learn. Ember's dispatch loop supports both, and the comment above
+jump for the branch predictor to learn. Ingle's dispatch loop supports both, and the comment above
 it is this codebase in one paragraph — a decision recorded *with its evidence*:
 
 ```c
@@ -1213,11 +1213,11 @@ spends casually.
 
 ## Chapter 11 — The Second Road: Native Code
 
-For most of its life an Ember program runs on the VM. When it graduates — `emberc -o app app.em` —
-it takes the second road: [`src/cgen_c.c`](https://github.com/kmcnally5/ember-lang/blob/main/src/cgen_c.c)
+For most of its life an Ingle program runs on the VM. When it graduates — `inglec -o app app.em` —
+it takes the second road: [`src/cgen_c.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/cgen_c.c)
 walks the *same checked, annotated AST* and emits a self-contained **C translation unit**, which
 the system C compiler builds and links against a small runtime
-([`src/runtime.c`](https://github.com/kmcnally5/ember-lang/blob/main/src/runtime.c)) into a
+([`src/runtime.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/runtime.c)) into a
 standalone binary. No interpreter inside, no VM — and no LLVM either: the only build dependency is
 the C compiler the machine already has, which keeps the empty-dependency-tree promise intact.
 
@@ -1231,7 +1231,7 @@ The manifesto had said "one backend," and the amendment that welcomed this secon
 nice piece of intellectual honesty — the rule that mattered was never "one backend," it was **one
 frontend and one reference semantics**. The lexer, parser, and checker are shared; the VM remains
 canonical; and the native backend is held to it by a **differential test suite**
-([`tests/native/`](https://github.com/kmcnally5/ember-lang/blob/main/tests/native)): every program
+([`tests/native/`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/native)): every program
 runs on both, and their outputs must match bit for bit. Two independent implementations that must
 agree — the project likes to point out this is its verification thesis, applied to itself.
 
@@ -1264,7 +1264,7 @@ And one flag on this road matters beyond speed: `--freestanding` emits C with no
 no hosted anything — the mode the kernel experiment rides (Chapter 17).
 
 > **In plain terms.** The same fully-checked program tree can be translated into C and compiled
-> into an ordinary executable, with no Ember machinery left inside. The interpreter remains the
+> into an ordinary executable, with no Ingle machinery left inside. The interpreter remains the
 > official definition of what programs mean, and a permanent test runs everything both ways and
 > demands identical output — so the fast version can never quietly disagree with the true one.
 
@@ -1281,11 +1281,11 @@ no hosted anything — the mode the kernel experiment rides (Chapter 17).
 
 ## Chapter 12 — The Tape
 
-Most languages let you attach a debugger. Ember's ambition — stated in the manifesto back when
+Most languages let you attach a debugger. Ingle's ambition — stated in the manifesto back when
 the VM was young — is different: **execution itself should be observable as data**, designed in
-as a seam rather than bolted on later. (The bolt-on version was tried in Ember's ancestor and
+as a seam rather than bolted on later. (The bolt-on version was tried in Ingle's ancestor and
 found wanting: added late, it could only see the few checkpoints that already existed.) The seam
-is [`include/trace.h`](https://github.com/kmcnally5/ember-lang/blob/main/include/trace.h), and it
+is [`include/trace.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/trace.h), and it
 is small enough to show almost whole:
 
 ```c
@@ -1309,7 +1309,7 @@ typedef struct {
 The VM fires one of these immediately before every instruction, to at most one subscribed sink;
 with no sink the cost is a single nil check per instruction. Sinks are **observer-only** — they
 may log, write, or ask a model for an opinion, but they cannot alter execution. Run
-`emberc --tape program.em` and the built-in sink writes the **tape**: one JSON object per
+`inglec --tape program.em` and the built-in sink writes the **tape**: one JSON object per
 event, one per line — function, instruction, source line, stack depth — the complete story of a
 run, in a format chosen because a tool or a model can consume it line by line. Because the events
 are fired from the dispatch loop itself, the tape grows automatically with every opcode ever
@@ -1336,7 +1336,7 @@ The repo's working agreement makes the cultural point better than any summary: *
 bug — reach for the tape tool and a dogfood app to prove/find it first! Always!"* Debugging here
 means reading the program's own account of itself.
 
-> **In plain terms.** Ember can fly with a flight recorder switched on: every step the program
+> **In plain terms.** Ingle can fly with a flight recorder switched on: every step the program
 > takes is written down as it happens, in a form both humans and AI tools can read back. When
 > something goes wrong, you don't reconstruct the crash from memory and guesswork — you scrub the
 > tape. Important moments (a broken promise, a task starting or dying) are marked out loud, and a
@@ -1353,10 +1353,10 @@ means reading the program's own account of itself.
 
 ## Chapter 13 — Contracts and the Little Prover
 
-Ember functions can carry their specification in the signature: a `requires` line stating what
+Ingle functions can carry their specification in the signature: a `requires` line stating what
 must be true on entry, `ensures` lines stating what the function promises on exit, with `result`
 naming the return value. These are ordinary boolean expressions — the spec language is just
-Ember — checked at runtime in debug builds and elided entirely by `--release` (type-checked in
+Ingle — checked at runtime in debug builds and elided entirely by `--release` (type-checked in
 every profile; only the runtime check is free to leave). The manifesto is unusually direct about
 why this feature is the flagship: a language whose primary audience includes AI authors needs the
 spec to be executable and the failure to be structured, because *"a model is far better at
@@ -1365,7 +1365,7 @@ vague comment?'"*
 
 What makes contracts more than assertions is the tooling stacked on them, and the test suite
 demonstrates the first layer with a deliberately buggy function. From
-[`tests/check/contract_fuzz.em`](https://github.com/kmcnally5/ember-lang/blob/main/tests/check/contract_fuzz.em):
+[`tests/check/contract_fuzz.em`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/check/contract_fuzz.em):
 
 ```ember
 fn abs_val(x: int) -> int
@@ -1383,7 +1383,7 @@ fn safe_div(a: int, b: int) -> int
 }
 ```
 
-`emberc --emit=check` is **property-based testing driven by the contracts**: it generates inputs
+`inglec --emit=check` is **property-based testing driven by the contracts**: it generates inputs
 that satisfy each function's `requires`, runs the function, and hunts for an input that falsifies
 an `ensures`. The golden file locks what that finds — both the human report and the machine
 event, from `tests/check/contract_fuzz.check`, in full:
@@ -1405,7 +1405,7 @@ inputs are not bugs; that is what a precondition means.
 ### The prover
 
 Above the fuzzer sits something rarer for a language this young: a static prover.
-[`src/prove.c`](https://github.com/kmcnally5/ember-lang/blob/main/src/prove.c) — 465 lines,
+[`src/prove.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/prove.c) — 465 lines,
 dependency-free like everything else — attempts to *discharge* contracts outright, and its
 self-description sets the tone:
 
@@ -1452,7 +1452,7 @@ fuzzer to falsify, a prover to discharge, a tape to report, replay to reproduce:
 this loop the language's bet for the agent era. This book will only note that all five pieces
 exist, are in-tree, and are tested — and let the bet be a bet.
 
-> **In plain terms.** An Ember function can state its promise — "given a non-zero divisor, I
+> **In plain terms.** An Ingle function can state its promise — "given a non-zero divisor, I
 > return a non-negative result" — in code that actually runs. The toolchain then attacks the
 > promise from three sides: checks it live while you develop (free in production), fires hundreds
 > of generated inputs at it hunting for a counterexample, and for simple-enough arithmetic
@@ -1507,7 +1507,7 @@ The roll call, and the wound each one dresses:
   deterministic by construction, under a watchdog, alongside TSan/ASan builds of the whole
   suite.
 - **`make selfhost`** — the differential gate for Chapter 17: compiler-shaped programs must
-  produce byte-identical output from the C compiler and the Ember-written one.
+  produce byte-identical output from the C compiler and the Ingle-written one.
 
 `make verify` runs the core of them in one command, and CI runs the gate on every push — on
 Linux *and* macOS, a decision whose recorded reasoning is asymmetry: a macOS-ism that breaks
@@ -1544,15 +1544,15 @@ Here is a question that quietly decides whether a young language's editor suppor
 *when your editor shows a type on hover, whose analysis is it showing?* The cautionary tale is
 rust-analyzer — a heroic, separate reimplementation of Rust's frontend that the Rust team itself
 describes as an unsustainable maintenance burden. Every language server that stayed healthy
-(clangd, gopls, tsserver) shares its compiler's actual frontend. Ember's
+(clangd, gopls, tsserver) shares its compiler's actual frontend. Ingle's
 [architecture decision](architecture.md) draws the conclusion without drama: the language server
-**is the compiler** — `emberc --lsp`, same binary, same lexer, parser, and checker, speaking
+**is the compiler** — `inglec --lsp`, same binary, same lexer, parser, and checker, speaking
 JSON-RPC over stdio. The error-tolerant parser (Chapter 5) and structured diagnostics (Chapter 8)
 weren't retrofits for the editor; they were already requirements of the LLM loop, which is why
 the LSP could exist at all.
 
 The bridge between "the checker knows everything" and "the editor can ask" is the **semantic
-index** ([`include/semindex.h`](https://github.com/kmcnally5/ember-lang/blob/main/include/semindex.h)):
+index** ([`include/semindex.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/semindex.h)):
 a position-keyed table the checker fills *as it resolves*, recording for each identifier
 occurrence what it resolved to, its rendered type, its documentation, and where it was defined.
 The entry an editor's question lands on:
@@ -1582,7 +1582,7 @@ feature reduces to "look up the position, read the entry": hover, go-to-definiti
 find-references, rename, semantic highlighting, inlay hints. The principle the docs repeat is
 *record at the resolution site*: the checker already did the work; the index just stops the
 answers being thrown away. (Note `byte_offset` and `byte_size` on fields — hover a struct field
-in Ember and your editor tells you its memory layout, because the checker genuinely knows.)
+in Ingle and your editor tells you its memory layout, because the checker genuinely knows.)
 
 Some of the surrounding decisions show how much craft hides in "editor support":
 
@@ -1597,7 +1597,7 @@ Some of the surrounding decisions show how much craft hides in "editor support":
 - **The prover reaches the editor.** Each `ensures` clause carries an inlay verdict — `✓ proved`
   or `○ runtime-checked` — from the same prover `--emit=prove` runs (Chapter 13), and code
   actions scaffold new contract clauses. The verification loop, surfaced where code is written.
-- **`emberc --doctor`** exists because setup friction kills young languages: it checks the
+- **`inglec --doctor`** exists because setup friction kills young languages: it checks the
   binary, the stdlib path, the frontend's health, and — the sly one — whether the *installed*
   binary your editor launches matches the one you just built, printing `[ok]`/`[!!]` lines with
   the exact fix for anything wrong.
@@ -1631,22 +1631,22 @@ why the tooling tells one coherent story.
 ## Chapter 16 — Talking to C
 
 Every self-respecting systems language eventually has to shake hands with C, and the handshake is
-where guarantees traditionally go to die. Ember's design puts the entire negotiation behind one
-visible door: an `extern "c"` block declaring the C-side signature in ordinary Ember syntax. There
+where guarantees traditionally go to die. Ingle's design puts the entire negotiation behind one
+visible door: an `extern "c"` block declaring the C-side signature in ordinary Ingle syntax. There
 is no `unsafe` keyword anywhere in the language — **the extern declaration is the trust
 boundary**. The signature you write is the contract the checker enforces; whether it matches the
-real C function is the one place Ember's guarantees stop, and the language makes sure that place
+real C function is the one place Ingle's guarantees stop, and the language makes sure that place
 is greppable.
 
 Behind the door, dispatch goes through an in-tree **registry** of typed wrappers
-([`src/cextern.c`](https://github.com/kmcnally5/ember-lang/blob/main/src/cextern.c)) — no
+([`src/cextern.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/cextern.c)) — no
 `libffi`, no `dlopen`, the empty-dependency-tree principle holding even here. The interesting
 problem is marshalling, and the header's own comment states the solution better than a paraphrase
-could — from [`include/cextern.h`](https://github.com/kmcnally5/ember-lang/blob/main/include/cextern.h):
+could — from [`include/cextern.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/cextern.h):
 
 ```c
 // The boundary is defined by the **leaf scalar sequence**: a struct argument is flattened to its
-// scalar leaves on the Ember side (it is held as a flat run of slots already — value-types), and
+// scalar leaves on the Ingle side (it is held as a flat run of slots already — value-types), and
 // the wrapper reassembles a *concrete C struct* from those leaves and passes it BY VALUE, so the
 // system C compiler generates the platform's exact aggregate calling convention (the C ABI). A
 // struct result is flattened back to leaves the same way.
@@ -1654,24 +1654,24 @@ could — from [`include/cextern.h`](https://github.com/kmcnally5/ember-lang/blo
 
 That is the dependency-free way to get the C ABI *exactly right*: don't write an ABI layout
 engine for every platform — hand a real C struct to the real C compiler and let it do the one
-thing it provably knows. Ember's side of the boundary is just a flat sequence of scalar leaves,
+thing it provably knows. Ingle's side of the boundary is just a flat sequence of scalar leaves,
 each coded by a character: `'i'` and `'f'` for integers and floats, `'p'` for a string crossing
 as `const char*`, `'b'` for a packed scalar array crossing as a buffer, `'P'` for an opaque
-pointer Ember will carry but never look inside.
+pointer Ingle will carry but never look inside.
 
 The ownership rule at the boundary is one sentence: **C borrows, for the duration of the call.**
-Ember keeps ownership of everything it passes and frees nothing C owns; a `mut` buffer documents
+Ingle keeps ownership of everything it passes and frees nothing C owns; a `mut` buffer documents
 that C writes in place; a C function that returns memory it allocated gets the `ret_is_string`
-treatment — Ember copies the bytes into a proper Ember string and frees the C allocation, so
+treatment — Ingle copies the bytes into a proper Ingle string and frees the C allocation, so
 foreign memory never leaks into the ownership model.
 
-Opaque handles get the strictest deal of all, because Ember cannot see inside them. A `Ptr`
+Opaque handles get the strictest deal of all, because Ingle cannot see inside them. A `Ptr`
 (think `FILE*`, a database connection) is **linear**: the checker proves it is consumed *at most
 once* — the closing call takes it by `move`, so use-after-close is a compile error — and *at
 least once* — a handle that can reach any scope exit unclosed, on any path, is also a compile
 error, via the AND-merge dataflow from Chapter 7. Double-close and leak, the two oldest FFI
 footguns, are unrepresentable at zero runtime cost. The compile-time-only choice is itself
-recorded (a destructor would mean Ember guessing how to free a foreign handle; it refuses to
+recorded (a destructor would mean Ingle guessing how to free a foreign handle; it refuses to
 guess), and the Ledger gate (Chapter 14) fuzzes the analysis from both sides. The
 [`std/http`](http-design.md) streaming design shows the pattern at its best: a `curl` handle
 lives behind `open → next → next → close(move h)` on a worker fiber, and the compiler holds the
@@ -1685,15 +1685,15 @@ symbol, rejects such programs with a clear "build native" message — a smaller 
 labelled, rather than a broken promise.
 
 > **In plain terms.** Calling C is allowed, visible, and fenced: you declare the foreign function
-> once, in one recognisable block, and that declaration is the exact edge of Ember's guarantees.
+> once, in one recognisable block, and that declaration is the exact edge of Ingle's guarantees.
 > Data crossing the border is lent, never given away; anything C hands back gets copied into
-> Ember's world; and a foreign resource like an open file must provably be closed exactly once on
+> Ingle's world; and a foreign resource like an open file must provably be closed exactly once on
 > every path through your code, or the program does not compile.
 
 > **Machine-room trivia.** The FFI wrapper ABI is deliberately context-free — a C function
-> pointer taking values in, values out, with no access to the Ember runtime. That austerity is
+> pointer taking values in, values out, with no access to the Ingle runtime. That austerity is
 > load-bearing: it is *why* an extern can never touch a channel, which forced the streaming HTTP
-> design into the pull-handle-plus-fiber shape — concurrency stays entirely on Ember's side of
+> design into the pull-handle-plus-fiber shape — concurrency stays entirely on Ingle's side of
 > the border, where the scheduler and the ownership rules can see it.
 
 ---
@@ -1701,12 +1701,12 @@ labelled, rather than a broken promise.
 ## Chapter 17 — The Compiler That Eats Itself
 
 Two campaigns are running as this book is written, and they share a purpose: prove the language
-is real by making it carry serious weight. One rewrites the compiler in Ember. The other boots
-Ember on bare metal.
+is real by making it carry serious weight. One rewrites the compiler in Ingle. The other boots
+Ingle on bare metal.
 
 **Self-hosting** lives in
-[`selfhost/`](https://github.com/kmcnally5/ember-lang/blob/main/selfhost) and proceeds stage by
-stage — lexer, parser, checker, codegen, and now the native C emitter, each a fresh Ember program
+[`selfhost/`](https://github.com/ingle-lang/ingle-lang/blob/main/selfhost) and proceeds stage by
+stage — lexer, parser, checker, codegen, and now the native C emitter, each a fresh Ingle program
 (`lexer.em`, `parser.em`, `checker.em`, `codegen.em`, `cgen_c.em`) ported from its C counterpart.
 The discipline is the same differential religion as everywhere else: the C compiler — frozen and
 reproducible-from-zero as the git tag `stage0-v0.3.42` — is the oracle, and `make selfhost`
@@ -1726,10 +1726,10 @@ offset (OFI-165), and the gcc-vs-clang operand-evaluation-order divergence (OFI-
 Chapter 11's trivia box. Dogfooding at this intensity is a search strategy.
 
 **Bare metal** lives in
-[`kernel/`](https://github.com/kmcnally5/ember-lang/blob/main/kernel), and milestone 1 shipped
-the day this book is dated: a heap-free Ember `main`, compiled with `--emit=c --freestanding`,
+[`kernel/`](https://github.com/ingle-lang/ingle-lang/blob/main/kernel), and milestone 1 shipped
+the day this book is dated: a heap-free Ingle `main`, compiled with `--emit=c --freestanding`,
 linked against a boot stub (`boot.S`), a linker script, and a tiny runtime shim — booting on
-QEMU's aarch64 `virt` machine and writing `Hello from Ember!` to the UART. `make test-kernel`
+QEMU's aarch64 `virt` machine and writing `Hello from Ingle!` to the UART. `make test-kernel`
 boots it and checks the output, because of course the kernel has a regression test. The recorded
 rationale for the whole native road (Chapter 11) ends here: *you cannot run an OS as a guest
 inside a VM that itself needs an OS.* The enabling piece was Chapter 16's direct extern —
@@ -1741,10 +1741,10 @@ Neither campaign is finished, and the book won't pretend otherwise. What they al
 is the method: pick a goal that cannot be faked, wire a differential or a boot test that defines
 success mechanically, and let the attempt file OFIs against the language until it works.
 
-> **In plain terms.** The team is rewriting Ember's compiler *in Ember*, piece by piece, with a
+> **In plain terms.** The team is rewriting Ingle's compiler *in Ingle*, piece by piece, with a
 > rule that each piece must produce output identical to the original down to the last byte — the
 > most honest test a language can take, and one that has already caught real bugs. Meanwhile a
-> tiny Ember program now boots directly on (virtual) hardware with no operating system
+> tiny Ingle program now boots directly on (virtual) hardware with no operating system
 > underneath and says hello over the serial port. Both are early; both are the kind of early you
 > can verify.
 
@@ -1793,7 +1793,7 @@ along — OFI-033 became the vocabulary file, OFI-040 became an install rule, OF
 type-system feature and a fuzzer, OFI-056 became an encoding. The ledger is the project's memory,
 and its unusual honesty is not a virtue bolted onto the engineering; it *is* the engineering.
 
-> **In plain terms.** Every flaw found in Ember gets a permanent numbered file: what was wrong,
+> **In plain terms.** Every flaw found in Ingle gets a permanent numbered file: what was wrong,
 > what was decided, what proved the fix, all kept even after it's resolved — especially after.
 > Claims of "fixed" arrive with their test counts attached, big designs get formally attacked by
 > panels of reviewers before they ship, and problems the team has decided *not* to fix are
@@ -1832,7 +1832,7 @@ as measured on 1 July 2026 — they will drift, but the *proportions* are the le
 
 (Plus the small change: `token.c`, `opcode.c`, `trace.c`, `typefmt.c`, `builtin.c`, `program.c`,
 `jsonw.c` — all under a hundred lines each, all exactly what their names say.) Headers live in
-[`include/`](https://github.com/kmcnally5/ember-lang/blob/main/include), and several are
+[`include/`](https://github.com/ingle-lang/ingle-lang/blob/main/include), and several are
 first-class reading: `ast.h` (610 lines — the language's whole shape), `opcode.h` (208 — the
 instruction set and its X-macro), `vocab.def` (135 — the vocabulary), `value.h`, `fault.h`,
 `trace.h`, `semindex.h`.
@@ -1847,11 +1847,11 @@ one campaign's code with the log entry beside it, which is how the file was writ
 place.
 
 **The proof of every claim** is under
-[`tests/`](https://github.com/kmcnally5/ember-lang/blob/main/tests): `run/` (execution goldens),
+[`tests/`](https://github.com/ingle-lang/ingle-lang/blob/main/tests): `run/` (execution goldens),
 `lexer/`, `parser/`, `codegen/` (stage goldens — this book's exhibits), `native/` (the VM↔native
 differential), `check/`, `fault/`, `trace/`, `replay/`, `parallel/`, `selfhost/`, and the
 runners beside them. The examples in
-[`examples/`](https://github.com/kmcnally5/ember-lang/blob/main/examples) are documentation that
+[`examples/`](https://github.com/ingle-lang/ingle-lang/blob/main/examples) are documentation that
 must also compile — the suite enforces that (a lesson recorded as OFI-030, after two showcase
 files silently rotted).
 
@@ -1864,7 +1864,7 @@ comment-per-function ones (OFI-144; yes, really; Chapter 2 warned you the whites
 trail).
 
 For the user-facing view of the same machine — every `make` target, every flag, the whole
-toolbox — Firelight's [Chapter 21](THE_EMBER_BOOK.md#chapter-21--the-whole-toolbox) has you, and
+toolbox — Firelight's [Chapter 21](THE_INGLE_BOOK.md#chapter-21--the-whole-toolbox) has you, and
 [start.md](start.md) gets a first program running in minutes.
 
 > **In plain terms.** The compiler is about thirty-five thousand lines of C, and its anatomy
@@ -1876,13 +1876,13 @@ toolbox — Firelight's [Chapter 21](THE_EMBER_BOOK.md#chapter-21--the-whole-too
 
 # Colophon
 
-*Ember from the Inside* was written on 1 July 2026, against the Ember tree as it stood that day
+*Ingle from the Inside* was written on 1 July 2026, against the Ingle tree as it stood that day
 (the day kernel milestone 1 landed, for those keeping score at home).
 
 **How this book was verified, exactly.** Every C excerpt was copied byte-for-byte from the cited
 file and re-checked against the tree after the final edit. Every compiler output shown is a
 golden file from `tests/` — an artifact the project's own `make test` regenerates and enforces —
-quoted verbatim and named where it appears. Every Ember sample is an excerpt of a file in
+quoted verbatim and named where it appears. Every Ingle sample is an excerpt of a file in
 `tests/` or `examples/` that the suite compiles as part of its normal run. The author of this
 book did not run the compiler while writing it (the tree was busy being worked on, and a book
 should not jostle the workbench); the samples' compile-and-run guarantee is therefore exactly as

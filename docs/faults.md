@@ -1,10 +1,10 @@
 ---
 title: Faults — the error model
 nav_order: 5
-description: Ember's unified failure report — one Fault artifact for builtin traps, contract violations, and errors, rendered for both humans and AI agents.
+description: Ingle's unified failure report — one Fault artifact for builtin traps, contract violations, and errors, rendered for both humans and AI agents.
 ---
 
-# Faults — Ember's unified failure report
+# Faults — Ingle's unified failure report
 
 > Status: **Phase 0 + Phase 1 (runtime core) shipped.** Compile-side convergence, the
 > `?`-propagation route trace, persisted repro, and native parity are tracked follow-ups
@@ -12,14 +12,14 @@ description: Ember's unified failure report — one Fault artifact for builtin t
 
 ## Why
 
-Ember is LLM-first: a failure must be optimally consumable by a model that will try to
+Ingle is LLM-first: a failure must be optimally consumable by a model that will try to
 *repair the code*, and excellent for a human. The program-repair literature is blunt about
 what moves fix-rate: a **precise location**, the **violating runtime values** (never
 hallucinated), and the **violated intent** (not just the syntactic rule). Human visual
 chrome (carets, colour, ANSI) actively *confuses* a token-based model and is a
 prompt-injection vector.
 
-So every failure in Ember produces **one structured artifact — a `Fault`** — rendered two
+So every failure in Ingle produces **one structured artifact — a `Fault`** — rendered two
 ways from a single source of truth:
 
 - **human** render: the familiar `error[...]: ...` stream, teacher-voice, the default.
@@ -32,15 +32,15 @@ speak one schema.
 
 ## The headline idea: every runtime trap is a violated *implicit contract*
 
-Contracts (`requires`/`ensures`) are Ember's flagship bet. A builtin trap — an
+Contracts (`requires`/`ensures`) are Ingle's flagship bet. A builtin trap — an
 out-of-bounds index, a divide by zero, an overflow — is *the same thing*: a precondition was
-violated. So Ember reports each builtin trap as an implicit contract, in the same
+violated. So Ingle reports each builtin trap as an implicit contract, in the same
 intent-framed, value-carrying shape a user `requires` produces.
 
 Before:
 
 ```
-emberc: runtime error: array index out of bounds
+inglec: runtime error: array index out of bounds
 ```
 
 After (human render, the default):
@@ -67,7 +67,7 @@ costs **nothing** on the hot path: only the body of the already-taken failure br
 
 ## The schema
 
-Defined in [`include/fault.h`](https://github.com/kmcnally5/ember-lang/blob/main/include/fault.h). A `Fault` carries:
+Defined in [`include/fault.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/fault.h). A `Fault` carries:
 
 | field        | meaning |
 |--------------|---------|
@@ -82,8 +82,8 @@ Defined in [`include/fault.h`](https://github.com/kmcnally5/ember-lang/blob/main
 | `hint`       | a concrete fix in user terms |
 
 Two renderers (`fault_render_human`, `fault_render_agent`) in
-[`src/fault.c`](https://github.com/kmcnally5/ember-lang/blob/main/src/fault.c) consume one `Fault`. Both escape every string through the
-single shared `json_write_string` ([`src/jsonw.c`](https://github.com/kmcnally5/ember-lang/blob/main/src/jsonw.c)), so no control/ANSI byte
+[`src/fault.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/fault.c) consume one `Fault`. Both escape every string through the
+single shared `json_write_string` ([`src/jsonw.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/jsonw.c)), so no control/ANSI byte
 can leak into the agent channel. Empty fields are **omitted** from the agent JSON, not
 emitted as `null` — noise hurts a model.
 
@@ -103,14 +103,14 @@ Each builtin trap reports as a Fault with these `code` / `why` pairs and the liv
 | `value_out_of_range`      | the value must fit the target integer type     | value, min, max |
 
 Frameless / non-operand aborts (stack overflow, call-depth, deadlock, send-on-closed,
-slice-view-write, corrupt bytecode) keep the plain `emberc: runtime error: …` line for now;
+slice-view-write, corrupt bytecode) keep the plain `inglec: runtime error: …` line for now;
 they have no meaningful operands to project.
 
 ## CLI
 
 ```
-emberc --emit=run app.em                 # human render (default)
-emberc --faults=agent --emit=run app.em  # agent render (JSON Lines on stderr)
+inglec --emit=run app.em                 # human render (default)
+inglec --faults=agent --emit=run app.em  # agent render (JSON Lines on stderr)
 ```
 
 `--faults=human|agent` selects the runtime render. It is independent of
@@ -163,7 +163,7 @@ never corrupted.
   source-excerpt CARET is deferred (the runtime retains no source text). **Still open — OFI-111(d)**
   (deterministic persisted repro, gated on OFI-044).
 - **Native Faults are intentionally bare — scoped to the VM (OFI-109, decided 2026-06-25).** The
-  bytecode VM is the canonical, rich-diagnostics path (`emberc --emit=run`): it renders the full
+  bytecode VM is the canonical, rich-diagnostics path (`inglec --emit=run`): it renders the full
   structured Fault (file/line/route/values, exit 65). The AST→C **native** backend is the
   differential/release build; a trap there aborts via `em_panic` (a bare message + exit 70), with no
   frame table or contracts. This is by architecture, not a missing feature — the differential harness

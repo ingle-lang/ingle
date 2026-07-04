@@ -2,7 +2,7 @@
 #
 # build-guide.sh — generate the multi-page "Guide" site from the single-source book.
 #
-# THE_EMBER_BOOK.md is the one canonical, hand-written source of truth. This tool splits it
+# THE_INGLE_BOOK.md is the one canonical, hand-written source of truth. This tool splits it
 # into one page per chapter under docs/guide/, wired for the Just the Docs theme (a left
 # sidebar + search), and emits docs/llms-full.txt (the whole book as one clean Markdown file
 # for language models to ingest in a single fetch).
@@ -26,7 +26,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DOCS="$ROOT/docs"
-SRC="$DOCS/THE_EMBER_BOOK.md"
+SRC="$DOCS/THE_INGLE_BOOK.md"
 OUT="$DOCS/guide"
 LLMS_FULL="$DOCS/llms-full.txt"
 
@@ -209,7 +209,7 @@ BEGIN {
     page_kind = "index"
     page_file = "index.md"
     page_title = "Guide"
-    page_h1 = "Ember by Firelight"
+    page_h1 = "Ingle by Firelight"
     page_parent = ""
     page_grand = ""
     page_nav = 2
@@ -240,7 +240,7 @@ BEGIN {
     if ($0 ~ /^## Colophon/)  { startcolophon();  next }
 
     # The book title line becomes the landing page H1 (do not duplicate it in the body).
-    if (page_kind == "index" && $0 ~ /^# Ember by Firelight/) { page_h1 = substr($0, 3); next }
+    if (page_kind == "index" && $0 ~ /^# Ingle by Firelight/) { page_h1 = substr($0, 3); next }
 
     if (!skip) buf[++nbuf] = rewrite_anchors($0)
 }

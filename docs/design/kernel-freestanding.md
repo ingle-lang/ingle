@@ -1,7 +1,7 @@
 # Kernel / freestanding runtime — kickoff brief + milestone log
 
-> **Status: MILESTONE 1 ACHIEVED (2026-07-01).** A heap-free Ember `main` boots on QEMU `aarch64 virt`
-> and prints to the PL011 UART with **no libc and no heap** — "Hello from Ember!" over the wire, plus a
+> **Status: MILESTONE 1 ACHIEVED (2026-07-01).** A heap-free Ingle `main` boots on QEMU `aarch64 virt`
+> and prints to the PL011 UART with **no libc and no heap** — "Hello from Ingle!" over the wire, plus a
 > counted loop proving the integer runtime path runs on bare metal. Gated by `make test-kernel`. The
 > forks below were confirmed with Karl (aarch64 virt · Apple clang cross · UART-hello, hand-shim first);
 > the outcome + the three real discoveries are recorded in **"Milestone 1 — outcome"** at the end. The
@@ -9,9 +9,9 @@
 
 ## Why now
 
-Writing an **OS kernel in Ember** is the north star (see [[ember-kernel-endgame]] in memory / MANIFESTO). The
+Writing an **OS kernel in Ingle** is the north star (see [[ember-kernel-endgame]] in memory / MANIFESTO). The
 self-hosting campaign was the maturity play and it's done: the native **C-emit backend** (`selfhost/cgen_c.em`,
-`emberc --emit=c` / `-o`) now reproduces the whole compiler byte-identical **and rebuilds itself into a
+`inglec --emit=c` / `-o`) now reproduces the whole compiler byte-identical **and rebuilds itself into a
 native binary**. That C-emit backend is the **on-ramp to bare-metal codegen** — the same AST→C path, but
 producing code that runs with **no OS and no libc**.
 
@@ -22,14 +22,14 @@ producing code that runs with **no OS and no libc**.
    runtime at all** (a scalar-only subset) or a **tiny freestanding runtime** (a bump allocator over a fixed
    region, no stdio, MMIO for output).
 2. **A low/no-alloc language subset.** A kernel can't lean on a general heap for everything. We want to know
-   *exactly* which Ember constructs need the allocator (strings, arrays, boxed structs, enums with payloads,
+   *exactly* which Ingle constructs need the allocator (strings, arrays, boxed structs, enums with payloads,
    closures) vs which are heap-free (scalars, value structs, `extern "c"` calls). The first spike stays
    entirely in the heap-free subset.
 3. **Bare-metal codegen.** A `--freestanding` / `--target=bare` emit mode: no libc includes, a custom entry
    (`_start` / `kmain`), and MMIO instead of stdio. Most of the AST→C machinery is reused unchanged; the
    difference is the *preamble* (includes, runtime shims) and the *entry*.
 4. **MMIO + a boot stub.** Reading/writing hardware registers (via `extern "c"` C helpers to start, an
-   intrinsic later) and a tiny assembly `_start` that sets up a stack and branches to Ember `main`.
+   intrinsic later) and a tiny assembly `_start` that sets up a stack and branches to Ingle `main`.
 
 ## Toolchain reality (checked 2026-07-01 on Karl's arm64 Mac)
 
@@ -37,7 +37,7 @@ producing code that runs with **no OS and no libc**.
   `clang -target aarch64-none-elf -ffreestanding -nostdlib …` works. **No cross-gcc needed.**
 - **`qemu-system-aarch64` is NOT installed** → `brew install qemu` (per "install the tool, don't work
   around"). This is the only missing piece.
-- **`extern "c"` FFI reaches the native C-emit backend** (`examples/16_ffi.em`) — so an Ember program can
+- **`extern "c"` FFI reaches the native C-emit backend** (`examples/16_ffi.em`) — so an Ingle program can
   `extern "c" fn uart_putc(c: i32)` and we supply the C body in the freestanding shim. That is the MMIO
   output mechanism for the first spike.
 
@@ -53,22 +53,22 @@ producing code that runs with **no OS and no libc**.
    seam (freestanding codegen → boot stub → linker script → QEMU → MMIO). Defer the allocator, exceptions,
    and interrupts until "hello" boots.
 
-## The first milestone — "Hello from Ember on bare metal"
+## The first milestone — "Hello from Ingle on bare metal"
 
-A minimal Ember program compiled through a freestanding path that **boots on QEMU `aarch64 virt` and prints a
+A minimal Ingle program compiled through a freestanding path that **boots on QEMU `aarch64 virt` and prints a
 string to the PL011 UART**, with **no libc and no heap**. This proves the entire toolchain seam; everything
 after (allocator, interrupts, the no-alloc subset, a richer runtime) is incremental.
 
 ### Concrete steps to first light
 
 1. `brew install qemu` (the only missing tool).
-2. **Heap-free Ember source** (`kernel/hello.em` or similar): a `main` that calls `extern "c" fn uart_putc`
+2. **Heap-free Ingle source** (`kernel/hello.em` or similar): a `main` that calls `extern "c" fn uart_putc`
    in a loop over the bytes of a message. First cut can even hardcode the bytes (no string type) to stay
    100% heap-free; a fixed-size byte array is the next step.
 3. **Freestanding emit.** Start the SIMPLEST way possible before touching the compiler: hand-write a tiny
    `kernel/rt.c` shim (`uart_putc` writing to `*(volatile uint32_t*)0x09000000 = c;`, plus any `em_*`
    stubs the emitted C references for the heap-free subset — ideally none) and compile the stock
-   `emberc --emit=c hello.em` output against it with `-ffreestanding -nostdlib`. If the emitted C pulls in
+   `inglec --emit=c hello.em` output against it with `-ffreestanding -nostdlib`. If the emitted C pulls in
    libc/runtime the heap-free subset shouldn't need, that tells us exactly what a `--freestanding` preamble
    must strip — the first real compiler task.
 4. **Boot stub + linker script.** `kernel/boot.S` (aarch64 `_start`: set `sp`, `bl main`, then spin) and
@@ -86,7 +86,7 @@ after (allocator, interrupts, the no-alloc subset, a richer runtime) is incremen
   metal.
 - **MMIO/asm intrinsics** (volatile load/store, barriers) so hardware access isn't via `extern "c"` forever.
 - Interrupts / the exception vector table; a timer; then the actual kernel surface (memory map, a trivial
-  scheduler) — all in Ember.
+  scheduler) — all in Ingle.
 
 ## Guardrails (from MANIFESTO / CLAUDE.md)
 
@@ -97,18 +97,18 @@ after (allocator, interrupts, the no-alloc subset, a richer runtime) is incremen
 - Freestanding codegen is a **new emit target**, not a rewrite — reuse the AST→C machinery; the delta is the
   preamble + entry + which runtime symbols exist.
 
-## Milestone 1 — outcome (2026-07-01): "Hello from Ember on bare metal" ✅
+## Milestone 1 — outcome (2026-07-01): "Hello from Ingle on bare metal" ✅
 
 `make test-kernel` boots `kernel/kernel.elf` on QEMU `aarch64 virt` and the PL011 UART prints:
 
 ```
-Hello from Ember!
+Hello from Ingle!
 ...
 ```
 
 emitted by the heap-free `kernel/hello.em` — a message written byte-by-byte through `uart_putc`, then a
 counted loop (the three dots) that exercises the integer runtime (`em_add`/`em_eq_op`/`em_truthy`) with no
-OS underneath. The pipeline: default `emberc --emit=c` → freestanding shim (`kernel/rt.c` + shadow
+OS underneath. The pipeline: default `inglec --emit=c` → freestanding shim (`kernel/rt.c` + shadow
 `kernel/ember_rt.h`) → boot stub (`kernel/boot.S`) → linker script (`kernel/kernel.ld`) → QEMU. Opt-in
 (`make kernel` / `make test-kernel`); the default build stays dependency-free.
 
@@ -127,12 +127,12 @@ OS underneath. The pipeline: default `emberc --emit=c` → freestanding shim (`k
    `brew install lld` (LLVM's own linker, same toolchain family) supplies `ld.lld`; the link uses
    `--ld-path=$(command -v ld.lld)`. So the toolchain is **Apple clang cross + lld + qemu**, not purely
    zero-install.
-3. **FP/SIMD must be enabled at EL1 before any non-trivial Ember runs.** The runtime's 16-byte `Value`
+3. **FP/SIMD must be enabled at EL1 before any non-trivial Ingle runs.** The runtime's 16-byte `Value`
    (its union holds a `double`) is copied by clang with **128-bit SIMD loads/stores**, but FP/SIMD access
    *traps at reset*. The constant message bytes materialised into GP registers and printed; the loop's
    runtime `Value` copies hit a `q`-register and took an "SIMD trapped" exception (ESR EC=0x7) into an empty
    vector → hang. `boot.S` now sets `CPACR_EL1.FPEN = 0b11` before calling `main`. **Mandatory for any
-   bare-metal Ember target** — worth remembering as the runtime grows.
+   bare-metal Ingle target** — worth remembering as the runtime grows.
 
 ### Files
 
@@ -143,11 +143,11 @@ FP/SIMD, set sp, call `main`, semihosting `SYS_EXIT`) · `kernel/kernel.ld` (loa
 
 ### Milestone 1b — `--freestanding` emit mode ✅ (2026-07-01, same day)
 
-`emberc --emit=c --freestanding` is now a first-class emit mode (`src/main.c` + `src/cgen_c.c`):
+`inglec --emit=c --freestanding` is now a first-class emit mode (`src/main.c` + `src/cgen_c.c`):
 
 - **A bare `int main(void)` entry** — no argc/argv, no `printf` result-echo, no exit heap sweep — that
-  **returns Ember main's int result as the exit code**. `boot.S` forwards it through the semihosting exit
-  block, so the QEMU exit code is a value **computed by Ember on bare metal**: `hello.em` returns its loop
+  **returns Ingle main's int result as the exit code**. `boot.S` forwards it through the semihosting exit
+  block, so the QEMU exit code is a value **computed by Ingle on bare metal**: `hello.em` returns its loop
   counter and `make test-kernel` asserts `qemu exit == 3`. The verification loop closes over a computed
   value, not just printed text.
 - **Emit-time rejection of hosted-only constructs** with clear messages instead of late link errors:
@@ -172,11 +172,11 @@ FP/SIMD, set sp, call `main`, semihosting `SYS_EXIT`) · `kernel/kernel.ld` (loa
 `println`** on bare metal:
 
 ```
-Hello from Ember — running on bare metal with a heap!
+Hello from Ingle — running on bare metal with a heap!
 sum of [10, 20, 12] = 42
 ```
 
-exit code **42** (the array sum, computed by Ember). This required moving from the M1 hand-shim to the
+exit code **42** (the array sum, computed by Ingle). This required moving from the M1 hand-shim to the
 **canonical `src/runtime.c`, compiled `-DEMBER_FREESTANDING`** — so bare metal runs the *same* runtime
 the hosted VM/native backends do, not a fork (no drift; the reason the M1 shim is now deleted).
 
@@ -247,7 +247,7 @@ exit code **5** (the tick count, which only advances from the IRQ handler). The 
 - **The IRQ path**: `kernel/vectors.S` entry 5 (Current EL SPx IRQ) now branches to `irq_entry`, which —
   unlike the fault path — saves all GP registers (an IRQ interrupts arbitrary code), calls `em_irq`, restores,
   and returns with `eret`. `em_irq` acknowledges via `GICC_IAR`, bumps the tick count + re-arms the timer,
-  and signals `GICC_EOIR`. Ember polls the count through the `tick_count` direct extern; that it climbs
+  and signals `GICC_EOIR`. Ingle polls the count through the `tick_count` direct extern; that it climbs
   proves a real hardware interrupt is being taken and handled.
 
 `make kernel` now builds three images from a shared object set (`boot`/`vectors`/`timer`/`runtime`/
@@ -256,9 +256,9 @@ change; no `src/` or `include/` touched, so the hosted gates are unaffected.
 
 ### Next increments
 
-- **A scheduler** — now that a periodic tick exists, save/restore two Ember fibers' contexts on the tick
+- **A scheduler** — now that a periodic tick exists, save/restore two Ingle fibers' contexts on the tick
   and round-robin between them. This is the kernel proper, and the direct next step.
 - **Widen the freestanding math/util surface** (soft-float `sqrt`/`floor`; a PRNG seeded off the timer) —
   currently they panic as "unsupported".
 - **MMIO/asm intrinsics** (volatile load/store — retires the `extern "c"` shim for hardware access), then
-  the first real driver surface, all in Ember.
+  the first real driver surface, all in Ingle.

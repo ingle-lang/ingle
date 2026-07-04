@@ -1,30 +1,30 @@
 ---
 title: For LLMs — the priors cheat-sheet
 nav_order: 6
-description: A priors cheat-sheet for language models writing Ember — where Ember diverges from C, Rust, Go, and Python habits. Paste it before asking a model to generate Ember.
+description: A priors cheat-sheet for language models writing Ingle — where Ingle diverges from C, Rust, Go, and Python habits. Paste it before asking a model to generate Ingle.
 ---
 
-# Ember for LLMs — the priors cheat-sheet
+# Ingle for LLMs — the priors cheat-sheet
 
-**Paste this whole page into a model's context before asking it to write Ember.** It is the short
-list of places where Ember diverges from the habits a model carries over from C, Rust, Go, Python,
-Swift, and TypeScript — i.e. the exact spots where zero-/few-shot Ember goes wrong. It is also a fast
+**Paste this whole page into a model's context before asking it to write Ingle.** It is the short
+list of places where Ingle diverges from the habits a model carries over from C, Rust, Go, Python,
+Swift, and TypeScript — i.e. the exact spots where zero-/few-shot Ingle goes wrong. It is also a fast
 human reference.
 
-Ember is *designed* for least surprise to a language model, but a few things still trip up code
+Ingle is *designed* for least surprise to a language model, but a few things still trip up code
 trained on other languages. Each row below pairs the habit a model tends to reach for (✗) with the
-Ember form (✓). Every snippet on this page was compiled with `emberc` before it was written down; the
+Ingle form (✓). Every snippet on this page was compiled with `inglec` before it was written down; the
 [complete program](#a-complete-program-compiles-and-runs) at the end compiles and runs as shown, and
 the fragments above it are extracted from programs that do.
 
 > Do not feed a model `grammar.ebnf`. A formal grammar makes a model emit *derivations*
 > (`IFStatement: IF Expression …`) instead of *programs*. Use this page and the
-> [examples](https://github.com/kmcnally5/ember-lang/tree/main/examples) instead — concrete code is
+> [examples](https://github.com/ingle-lang/ingle-lang/tree/main/examples) instead — concrete code is
 > what models generalise from.
 
 ## The cheat table
 
-| ✗ Habit from another language | ✓ Ember | Why |
+| ✗ Habit from another language | ✓ Ingle | Why |
 |---|---|---|
 | `func f()`, `def f()`, `function f()` | `fn f() { … }` | functions are `fn`; return type is `-> T` |
 | `let mut x = 0` | `var x = 0` | `let` is immutable, `var` is mutable — **there is no `let mut`** |
@@ -131,7 +131,7 @@ loop {
 ## A complete program (compiles and runs)
 
 This exercises interfaces, dynamic dispatch, structured concurrency, and pattern matching together —
-it compiles and runs with `emberc --emit=run`.
+it compiles and runs with `inglec --emit=run`.
 
 ```ember
 interface Drawable {
@@ -189,6 +189,6 @@ fn main() {
 
 ---
 
-For the full language, read the [language reference](/language) and [The Ember Book](/guide/);
+For the full language, read the [language reference](/language) and [The Ingle Book](/guide/);
 for the design philosophy, the
-[manifesto](https://github.com/kmcnally5/ember-lang/blob/main/MANIFESTO.md).
+[manifesto](https://github.com/ingle-lang/ingle-lang/blob/main/MANIFESTO.md).

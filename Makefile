@@ -367,7 +367,7 @@ help:
 	@echo "    make db               database build (vendored SQLite)   make test-db   std/sqlite suite"
 	@echo "    make kernel           bare-metal aarch64 image   make test-kernel  QEMU UART smoke test"
 	@echo "  Docs & site"
-	@echo "    make docs             regenerate the /guide site + llms-full.txt from THE_EMBER_BOOK.md"
+	@echo "    make docs             regenerate the /guide site + llms-full.txt from THE_INGLE_BOOK.md"
 	@echo ""
 	@echo "Using the language? Run 'inglec --help'."
 
@@ -536,7 +536,7 @@ verify:
 	@tools/verify.sh
 
 # Docs — regenerate the multi-page Guide site from the single-source book (tools/build-guide.sh).
-# THE_EMBER_BOOK.md is the canonical source; this splits it into docs/guide/*.md (one page per
+# THE_INGLE_BOOK.md is the canonical source; this splits it into docs/guide/*.md (one page per
 # chapter, wired for the Just the Docs sidebar + search) and emits docs/llms-full.txt. The
 # docs/guide/ tree is GENERATED output — never hand-edit it; edit the book and re-run `make docs`.
 docs:

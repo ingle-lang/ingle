@@ -1,12 +1,12 @@
 ---
 title: Flare — declarative UI
 nav_order: 4
-description: Flare is Ember's React-style declarative UI layer over immediate-mode widgets — components as functions, props, and local state, with no virtual DOM.
+description: Flare is Ingle's React-style declarative UI layer over immediate-mode widgets — components as functions, props, and local state, with no virtual DOM.
 ---
 
-# Flare — declarative, component-style UI for Ember
+# Flare — declarative, component-style UI for Ingle
 
-`std/flare` is Ember's React-style UI layer, built on `std/ui`'s immediate-mode widgets
+`std/flare` is Ingle's React-style UI layer, built on `std/ui`'s immediate-mode widgets
 (MANIFESTO §5g). It gives you React's *ergonomics* — components as functions, props, local
 state, declarative composition — without React's machinery.
 
@@ -14,9 +14,9 @@ state, declarative composition — without React's machinery.
 
 React's Virtual DOM and reconciler exist for one reason: the real DOM is **retained**, and
 mutating it is expensive, so React diffs a cheap description against the previous one and patches
-the minimum. Ember's backend **redraws the whole frame every tick, cheaply** — so that machinery
-solves a problem Ember doesn't have. What's left of React once you remove the vtree is exactly its
-good part, and it maps straight onto Ember's `loop { …describe the frame… }`. No retained tree, no
+the minimum. Ingle's backend **redraws the whole frame every tick, cheaply** — so that machinery
+solves a problem Ingle doesn't have. What's left of React once you remove the vtree is exactly its
+good part, and it maps straight onto Ingle's `loop { …describe the frame… }`. No retained tree, no
 graph-shaped mutable state, so the ownership model stays clean — and the result is *more* legible
 for an LLM than React.
 
@@ -32,7 +32,7 @@ Three rules, and the rest follows:
    batching.
 3. **State lives outside the function, in plain `var`s the loop owns.** You read them at the top of the frame
    and write them back as things change. This is why you almost never need a `useState` equivalent: a
-   re-running function in React has nowhere stable to keep state, so React invented hooks; in Ember the loop
+   re-running function in React has nowhere stable to keep state, so React invented hooks; in Ingle the loop
    *is* that stable place. `state_*` is only for state you want **encapsulated inside a reusable component**,
    so a caller needn't thread it.
 
@@ -54,7 +54,7 @@ body top to bottom, you understand the whole program.
 | context | the threaded `Flare` value |
 
 The quiet win: React forces `useState` everywhere because a re-running function has nowhere stable
-to keep state. In Ember **the loop owns your state as ordinary `var`s**, so `state_*` is only for
+to keep state. In Ingle **the loop owns your state as ordinary `var`s**, so `state_*` is only for
 state you want *encapsulated* inside a reusable component.
 
 ## Identity (`key`) — the one concept that makes lists work
@@ -102,7 +102,7 @@ fn main() -> int {
 ```
 
 A full app built on Flare — a switchable conversation list, a scrollable transcript, a composer, and a
-settings **modal** of **segmented** controls — is [`public/claude-desktop/flare_chat.em`](https://github.com/kmcnally5/ember-lang/blob/main/public/claude-desktop/flare_chat.em).
+settings **modal** of **segmented** controls — is [`public/claude-desktop/flare_chat.em`](https://github.com/ingle-lang/ingle-lang/blob/main/public/claude-desktop/flare_chat.em).
 
 ## A bigger example — a settings dialog
 
@@ -110,7 +110,7 @@ The honest answer to "how does an immediate-mode UI hold a *tree* of mutable sta
 hooks or reducers — the tree is just plain `var`s the loop owns, mutated directly. Here a `modal` (a centred
 panel over a dimmed scrim) of `segmented` controls drives appearance, model, and token settings; a `dirty`
 flag is the app's own "unsaved" signal. Full runnable file:
-[`examples/graphics/20_settings.em`](https://github.com/kmcnally5/ember-lang/blob/main/examples/graphics/20_settings.em); the core:
+[`examples/graphics/20_settings.em`](https://github.com/ingle-lang/ingle-lang/blob/main/examples/graphics/20_settings.em); the core:
 
 ```rust
 var dark = false        // the whole "state tree" is just plain vars the loop owns
@@ -250,7 +250,7 @@ Tabs: `tabs(key, labels, active) -> TabResult` draws a horizontal strip of **clo
 accent underline); click its trailing `×` to **close** it; **drag** a chip left/right to **reorder**. It
 returns a `TabResult` for the frame — `active` (the maybe-changed selection), `closed` (the ×'d index, else
 `-1`), and `moved_from`/`moved_to` (a completed drag-reorder, else `-1`). The **caller owns the list**: on a
-`closed`/`moved_*` it edits its own array (Ember arrays have `append`/`remove_at` but no `insert`, so a reorder
+`closed`/`moved_*` it edits its own array (Ingle arrays have `append`/`remove_at` but no `insert`, so a reorder
 is `remove_at(from)` then rebuild); the chips **FLIP-animate** to their new slots. Hit-testing (click / close /
 drag) is keyed by tab **index**, so duplicate labels still target the right chip; the FLIP *animation* is keyed
 by label (it follows a tab across a reorder), so **unique labels give the cleanest reorder motion** — if your
@@ -388,7 +388,7 @@ golden-testable, never coupled to the wall clock.
   a subtree that dims, disables, or sits behind a scrim as one. A no-op at full opacity, so un-faded
   goldens stay byte-identical.
 
-Runnable showcase: [`examples/graphics/18_flare_anim.em`](https://github.com/kmcnally5/ember-lang/blob/main/examples/graphics/18_flare_anim.em) (a spring-driven
+Runnable showcase: [`examples/graphics/18_flare_anim.em`](https://github.com/ingle-lang/ingle-lang/blob/main/examples/graphics/18_flare_anim.em) (a spring-driven
 width + a FLIP add/remove list). Goldens: `tests/graphics/flare_spring.em`, `tests/graphics/flare_flip.em`.
 
 ## Notes & limits
@@ -408,7 +408,7 @@ width + a FLIP add/remove list). Goldens: `tests/graphics/flare_spring.em`, `tes
 - `text_field` is a full single-line editor: caret, **horizontal scroll** (the text shifts so the
   caret stays inside a narrow field — OFI-055), **selection** (shift+arrows, shift+click, drag, and
   ⌘/Ctrl+A), and **clipboard** (⌘/Ctrl+C / X / V via the `clipboard_get`/`clipboard_set` natives).
-  Typing, Backspace, or Delete over a selection replaces it. All of this is plain `std/ui` Ember over
+  Typing, Backspace, or Delete over a selection replaces it. All of this is plain `std/ui` Ingle over
   the existing code-point string ops (`str.cp_*`) and `key_down`/`char_pressed` — no new runtime hooks.
   Editing is code-point–correct: multi-byte UTF-8 (e.g. `é`) is one caret step, not one byte.
 - **Toasts**: `toast(text)` enqueues a transient pill; `toast_layer()` (once per frame, after `finish()`)

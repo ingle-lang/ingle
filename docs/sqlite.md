@@ -1,13 +1,13 @@
 ---
 title: std/sqlite — Databases
 nav_order: 9
-description: Ember's embedded SQL — std/sqlite, backed by a vendored SQLite amalgamation, with connections and statements as compile-time-checked linear handles.
+description: Ingle's embedded SQL — std/sqlite, backed by a vendored SQLite amalgamation, with connections and statements as compile-time-checked linear handles.
 ---
 
-# Ember `std/sqlite` — Databases
+# Ingle `std/sqlite` — Databases
 
-Ember talks to a real database through **`std/sqlite`**: embedded SQL backed by a **vendored SQLite
-amalgamation**. It is the database that fits Ember's empty-dependency-tree rule — a single
+Ingle talks to a real database through **`std/sqlite`**: embedded SQL backed by a **vendored SQLite
+amalgamation**. It is the database that fits Ingle's empty-dependency-tree rule — a single
 public-domain C file, no server, no system package — and it is the most-deployed engine on earth, so
 it is also the path of least surprise for a model writing data code.
 
@@ -19,15 +19,15 @@ import "std/sqlite" as sql
 ```
 
 ```
-build/emberc-db --emit=run myprogram.em      # the database build (make db)
+build/inglec-db --emit=run myprogram.em      # the database build (make db)
 ```
 
 ## Why vendored, not linked
 
 SQLite is the one engine designed to be embedded as source. The whole library is two checked-in files
-in [`third_party/sqlite/`](https://github.com/kmcnally5/ember-lang/tree/main/third_party/sqlite)
+in [`third_party/sqlite/`](https://github.com/ingle-lang/ingle-lang/tree/main/third_party/sqlite)
 (`sqlite3.c` + `sqlite3.h`), compiled once into the compiler. So `make db` works on any machine — macOS
-or Linux — with **no install step at all**, which upholds Ember's "zero install-time dependencies /
+or Linux — with **no install step at all**, which upholds Ingle's "zero install-time dependencies /
 deterministic build" value *better* than curl or raylib can (those must be system libraries; SQLite
 need not be). The vendored copy is compiled `THREADSAFE=0` (the VM running it is single-threaded) with
 the extension loader omitted, so the link pulls in nothing beyond libc/libm. Provenance, version, and
@@ -63,13 +63,13 @@ fn main() -> int {
 }
 ```
 
-This is the payoff of [`resource` types](https://github.com/kmcnally5/ember-lang/blob/main/docs/design/ptr-owning.md): the handle manages itself. There is no
+This is the payoff of [`resource` types](https://github.com/ingle-lang/ingle-lang/blob/main/docs/design/ptr-owning.md): the handle manages itself. There is no
 `close()`, `finalize()`, or `ok()` to call, and no owner-borrows-worker dance — `?` "just works",
 because an owned `Db`/`Stmt` drops on the early-return path the same as on the normal one.
 
 ## Error model
 
-Failures route through Ember's two error surfaces. `open` and `prepare` return `Result<Db>` /
+Failures route through Ingle's two error surfaces. `open` and `prepare` return `Result<Db>` /
 `Result<Stmt>` (so `?` checks them); `exec` returns `Result<int, string>` (rows changed) and `step`
 returns `Result<bool, string>` (`Ok(true)` = a row is ready, `Ok(false)` = finished, `Err` = a real
 error). An unhandled error that reaches `main` renders as a [Fault](faults.md).
@@ -98,16 +98,16 @@ them (closing the connection / finalizing the statement) for you, on every path.
 ## What this is, and what is planned
 
 This is the **resource-based binding** — the complete, sound foundation. The owning-handle ergonomics
-([`resource` types](https://github.com/kmcnally5/ember-lang/blob/main/docs/design/ptr-owning.md), OFI-122) are here: `Db`/`Stmt` close themselves, so the API
+([`resource` types](https://github.com/ingle-lang/ingle-lang/blob/main/docs/design/ptr-owning.md), OFI-122) are here: `Db`/`Stmt` close themselves, so the API
 is `?`-clean with no `close`/`finalize`. Two layers are still planned on top:
 
 - **Ergonomic row helpers** — `query(db, sql, params) -> Result<[Row], string>` and a parametrised
   `exec`, so a simple SELECT needs no prepare/step/column loop. The open design question is the `Row`
   representation (`Map<string, _>` vs a `DbValue` enum).
-- **Compile-time-checked SQL** — because Ember owns the compiler and SQL literals are usually
+- **Compile-time-checked SQL** — because Ingle owns the compiler and SQL literals are usually
   constants, the query could be parsed at compile time and its columns/parameters checked against
-  Ember usage, so `column_int` on a `TEXT` column, or a typo'd column name, becomes a *compile error*.
-  This is Ember's verification-and-determinism moat applied to data access.
+  Ingle usage, so `column_int` on a `TEXT` column, or a typo'd column name, becomes a *compile error*.
+  This is Ingle's verification-and-determinism moat applied to data access.
 
-The binding runs on the **bytecode VM** (`make db`); native-backend (`emberc -o`) support — wiring the
+The binding runs on the **bytecode VM** (`make db`); native-backend (`inglec -o`) support — wiring the
 SQLite externs into the runtime library — is a tracked follow-up ([OFI-143](OFI.md)).

@@ -20,7 +20,7 @@ because a raw `Ptr` is opaque, the compiler can't know whether to call `fclose` 
 field, array element, enum payload, channel element, generic argument — the OFI-049 "R1"
 type-formation ban).
 
-The consequence, named in that doc and filed as OFI-122: **no Ember value can own a C resource.** No
+The consequence, named in that doc and filed as OFI-122: **no Ingle value can own a C resource.** No
 `struct Db { conn: Ptr }`, no `Result<Db, string>` checked-open, no connection pool, no statement
 cache. `std/sqlite` (2026-06-24) is the sharpest case — a connection and a statement are bare `Ptr`s,
 which forces the **owner-borrows-worker-closes ceremony** (an owner opens a handle and closes it
@@ -137,7 +137,7 @@ fn run() -> Result<int, string> {
 ## Soundness vectors the adversarial panel must close
 
 The OFI-049 review found 5 holes in its first draft; this design's attack surface, to verify by
-*constructing breaking Ember programs*:
+*constructing breaking Ingle programs*:
 
 1. **Double-drop across a move** — move a `Db` into a field / return / another binding; the source must
    not also drop (the `moved`/`consumed` tracking).
@@ -253,7 +253,7 @@ to AND-merge it and report a leak for any unconsumed Ptr field of `self`. Permit
 as a direct consuming argument, ONLY for `self` of the drop's own type, NEVER to mint a fresh owned Ptr.
 
 ### R7 — doc-only: correct the "drop runs on EVERY exit / no leak possible" overclaim (low; closes #8 — sound)
-Verified sound, but the worked example overclaims. Ember's drop is 100% static codegen; a builtin trap /
+Verified sound, but the worked example overclaims. Ingle's drop is 100% static codegen; a builtin trap /
 Fault / contract violation does `return VM_RUNTIME_ERROR` (or native `exit(70)`) with **no unwind** — so
 on a trap with a live resource, `drop` does **not** run; the OS reclaims the fd. **Leak-on-abort, no
 re-entry ⇒ no double-close** — exactly `panic=abort` RAII, sound. **Fix:** correct the example to "runs on

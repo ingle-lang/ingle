@@ -1,33 +1,33 @@
 #!/bin/sh
-# Ember installer - builds emberc + the standard library from source and installs
-# them under ~/.ember, then puts emberc on your PATH.
+# Ingle installer - builds inglec + the standard library from source and installs
+# them under ~/.ingle, then puts inglec on your PATH.
 #
-#   curl -fsSL https://ember-lang.org/install.sh | sh
+#   curl -fsSL https://ingle-lang.org/install.sh | sh
 #
-# Ember is pre-1.0 and has no prebuilt releases yet, so this builds from source.
+# Ingle is pre-1.0 and has no prebuilt releases yet, so this builds from source.
 # The default build is the FULL "flagship" compiler (networking + graphics), so the
-# Claude desktop app and ordinary programs both run from the same emberc. If the
+# Claude desktop app and ordinary programs both run from the same inglec. If the
 # graphics/networking dependencies can't be set up, it falls back to the plain,
 # dependency-free compiler automatically (which still runs all non-GUI programs).
 #
 # Tunables (all optional, set as environment variables before running):
-#   EMBER_PREFIX           install location              (default: $HOME/.ember)
-#   EMBER_REF              git branch/tag/SHA to build   (default: main)
-#   EMBER_PROFILE          full | plain                  (default: full)
-#   EMBER_REPO             source repository             (default: the official repo)
-#   EMBER_NO_MODIFY_PATH   set to 1 to skip editing your shell rc file
-#   EMBER_RAYLIB_VERSION   raylib tag to build from source where unpackaged  (default: 5.5)
+#   INGLE_PREFIX           install location              (default: $HOME/.ingle)
+#   INGLE_REF              git branch/tag/SHA to build   (default: main)
+#   INGLE_PROFILE          full | plain                  (default: full)
+#   INGLE_REPO             source repository             (default: the official repo)
+#   INGLE_NO_MODIFY_PATH   set to 1 to skip editing your shell rc file
+#   INGLE_RAYLIB_VERSION   raylib tag to build from source where unpackaged  (default: 5.5)
 #
 # Re-running is safe: it rebuilds and replaces the existing install in place.
 
 set -eu
 
-EMBER_REPO="${EMBER_REPO:-https://github.com/kmcnally5/ember-lang}"
-EMBER_REF="${EMBER_REF:-main}"
-EMBER_PREFIX="${EMBER_PREFIX:-$HOME/.ember}"
-EMBER_PROFILE="${EMBER_PROFILE:-full}"
-EMBER_RAYLIB_VERSION="${EMBER_RAYLIB_VERSION:-5.5}"
-BUILD_LOG="${TMPDIR:-/tmp}/ember-install-build.log"
+INGLE_REPO="${INGLE_REPO:-https://github.com/ingle-lang/ingle-lang}"
+INGLE_REF="${INGLE_REF:-main}"
+INGLE_PREFIX="${INGLE_PREFIX:-$HOME/.ingle}"
+INGLE_PROFILE="${INGLE_PROFILE:-full}"
+INGLE_RAYLIB_VERSION="${INGLE_RAYLIB_VERSION:-5.5}"
+BUILD_LOG="${TMPDIR:-/tmp}/ingle-install-build.log"
 WORKDIR=""
 
 if [ -t 1 ]; then
@@ -119,8 +119,8 @@ detect_platform() {
         Darwin) PLATFORM="macos"; info "macOS detected ($arch)." ;;
         Linux)  PLATFORM="linux"; info "Linux detected ($arch)." ;;
         *)
-            err "Ember installs on macOS and Linux (detected: $os)."
-            die "Build from source instead: git clone $EMBER_REPO && cd ember-lang && make install"
+            err "Ingle installs on macOS and Linux (detected: $os)."
+            die "Build from source instead: git clone $INGLE_REPO && cd ingle-lang && make install"
             ;;
     esac
 }
@@ -129,20 +129,20 @@ detect_platform() {
 
 
 
-# emberc is C17 and needs a C compiler + GNU make. On macOS that is the Apple toolchain (clang +
+# inglec is C17 and needs a C compiler + GNU make. On macOS that is the Apple toolchain (clang +
 # make from the Xcode Command Line Tools); on Linux it is gcc/clang + make from the distro. There
 # is no way to compile without them, so stop with the one-line fix rather than failing inside make.
 ensure_toolchain() {
     if [ "$PLATFORM" = "macos" ]; then
         if ! xcode-select -p >/dev/null 2>&1 || ! have cc || ! have make; then
-            err "The Xcode Command Line Tools (clang + make) are required to build Ember."
+            err "The Xcode Command Line Tools (clang + make) are required to build Ingle."
             err "Install them, then re-run this script:"
             err "    xcode-select --install"
             exit 1
         fi
     else
         if ! have cc || ! have make; then
-            err "A C compiler (gcc or clang) and GNU make are required to build Ember."
+            err "A C compiler (gcc or clang) and GNU make are required to build Ingle."
             case "$(linux_pkg_mgr)" in
                 apt-get) err "Install them:  sudo apt-get install -y build-essential" ;;
                 dnf|yum) err "Install them:  sudo dnf groupinstall -y 'Development Tools'" ;;
@@ -266,7 +266,7 @@ ensure_full_deps_linux() {
 # dev headers. Returns non-zero on any failure so the caller falls back to the plain compiler.
 ensure_raylib_from_source() {
     mgr="$1"
-    step "raylib isn't packaged on this distro - building raylib $EMBER_RAYLIB_VERSION from source (one-time)..."
+    step "raylib isn't packaged on this distro - building raylib $INGLE_RAYLIB_VERSION from source (one-time)..."
     case "$mgr" in
         apt-get)  $SUDO apt-get install -y cmake git libgl1-mesa-dev libx11-dev libxrandr-dev \
                       libxinerama-dev libxcursor-dev libxi-dev >/dev/null 2>&1 || true ;;
@@ -285,7 +285,7 @@ ensure_raylib_from_source() {
     fi
 
     rl_dir=$(mktemp -d)
-    if ! git clone --depth 1 --branch "$EMBER_RAYLIB_VERSION" https://github.com/raysan5/raylib \
+    if ! git clone --depth 1 --branch "$INGLE_RAYLIB_VERSION" https://github.com/raysan5/raylib \
             "$rl_dir/raylib" >/dev/null 2>&1; then
         git clone --depth 1 https://github.com/raysan5/raylib "$rl_dir/raylib" >/dev/null 2>&1 || {
             warn "Could not clone raylib."; rm -rf "$rl_dir"; return 1; }
@@ -313,36 +313,36 @@ ensure_raylib_from_source() {
 
 
 # Download and unpack the requested ref. GitHub's /archive/<ref>.tar.gz works for a
-# branch, tag, or commit SHA, so EMBER_REF can be any of them.
+# branch, tag, or commit SHA, so INGLE_REF can be any of them.
 fetch_source() {
     WORKDIR=$(mktemp -d)
     trap cleanup EXIT INT TERM
-    url="$EMBER_REPO/archive/$EMBER_REF.tar.gz"
-    info "Downloading source ($EMBER_REF)..."
+    url="$INGLE_REPO/archive/$INGLE_REF.tar.gz"
+    info "Downloading source ($INGLE_REF)..."
     curl -fsSL "$url" -o "$WORKDIR/src.tar.gz" \
         || die "Download failed: $url"
     tar -xzf "$WORKDIR/src.tar.gz" -C "$WORKDIR" \
         || die "Could not unpack the source archive."
-    SRCDIR=$(find "$WORKDIR" -maxdepth 1 -type d -name 'ember-lang-*' | head -n1)
+    SRCDIR=$(find "$WORKDIR" -maxdepth 1 -type d -name 'ingle-lang-*' | head -n1)
     [ -n "$SRCDIR" ] && [ -d "$SRCDIR" ] \
-        || die "Unexpected archive layout (no ember-lang-* directory)."
+        || die "Unexpected archive layout (no ingle-lang-* directory)."
 }
 
 
 
 
 
-# Compile the chosen profile. `make net-graphics` -> build/emberc-net-gfx (a superset
-# that also runs plain programs); `make release` -> build/emberc-release. Build output
+# Compile the chosen profile. `make net-graphics` -> build/inglec-net-gfx (a superset
+# that also runs plain programs); `make release` -> build/inglec-release. Build output
 # goes to a log that survives cleanup so a failure is debuggable.
 build_compiler() {
-    if [ "$EMBER_PROFILE" = "full" ]; then
-        target="net-graphics"; built="build/emberc-net-gfx"
+    if [ "$INGLE_PROFILE" = "full" ]; then
+        target="net-graphics"; built="build/inglec-net-gfx"
     else
-        target="release"; built="build/emberc-release"
+        target="release"; built="build/inglec-release"
     fi
 
-    info "Compiling emberc ($EMBER_PROFILE build - this can take a minute)..."
+    info "Compiling inglec ($INGLE_PROFILE build - this can take a minute)..."
     if ! ( cd "$SRCDIR" && make "$target" ) >"$BUILD_LOG" 2>&1; then
         err "Build failed. Last lines of $BUILD_LOG:"
         tail -n 30 "$BUILD_LOG" >&2
@@ -358,22 +358,23 @@ build_compiler() {
 
 
 
-# Install layout: $PREFIX/bin/emberc + $PREFIX/std/*.em. emberc resolves the stdlib as
+# Install layout: $PREFIX/bin/inglec + $PREFIX/std/*.em. inglec resolves the stdlib as
 # <dir-of-binary>/../std, so this layout needs no environment variables to work.
 install_files() {
-    info "Installing to $EMBER_PREFIX..."
-    mkdir -p "$EMBER_PREFIX/bin" "$EMBER_PREFIX/std"
+    info "Installing to $INGLE_PREFIX..."
+    mkdir -p "$INGLE_PREFIX/bin" "$INGLE_PREFIX/std"
 
     # rm-then-cp, never cp-in-place: macOS caches an ad-hoc code signature per inode,
     # and overwriting the bytes under a reused inode makes the kernel SIGKILL the next
     # exec ("Killed: 9"). Removing first gives the new binary a fresh inode.
-    rm -f "$EMBER_PREFIX/bin/emberc"
-    cp "$BUILT_BIN" "$EMBER_PREFIX/bin/emberc"
-    chmod +x "$EMBER_PREFIX/bin/emberc"
+    rm -f "$INGLE_PREFIX/bin/inglec" "$INGLE_PREFIX/bin/emberc"
+    cp "$BUILT_BIN" "$INGLE_PREFIX/bin/inglec"
+    chmod +x "$INGLE_PREFIX/bin/inglec"
+    ln -sf inglec "$INGLE_PREFIX/bin/emberc"   # F3: emberc stays a compat alias for inglec
 
-    rm -f "$EMBER_PREFIX"/std/*.em 2>/dev/null || true
-    cp "$SRCDIR"/std/*.em "$EMBER_PREFIX/std/"
-    step "Installed emberc + $(ls -1 "$EMBER_PREFIX"/std/*.em | wc -l | tr -d ' ') stdlib modules."
+    rm -f "$INGLE_PREFIX"/std/*.em 2>/dev/null || true
+    cp "$SRCDIR"/std/*.em "$INGLE_PREFIX/std/"
+    step "Installed inglec + $(ls -1 "$INGLE_PREFIX"/std/*.em | wc -l | tr -d ' ') stdlib modules."
 }
 
 
@@ -382,13 +383,13 @@ install_files() {
 
 # Add $PREFIX/bin to PATH via the user's shell rc, guarded so re-runs don't duplicate.
 setup_path() {
-    bindir="$EMBER_PREFIX/bin"
+    bindir="$INGLE_PREFIX/bin"
     case ":$PATH:" in
         *":$bindir:"*) step "$bindir already on PATH."; return 0 ;;
     esac
 
-    if [ "${EMBER_NO_MODIFY_PATH:-0}" = "1" ]; then
-        warn "PATH not modified (EMBER_NO_MODIFY_PATH=1). Add this yourself:"
+    if [ "${INGLE_NO_MODIFY_PATH:-0}" = "1" ]; then
+        warn "PATH not modified (INGLE_NO_MODIFY_PATH=1). Add this yourself:"
         warn "    export PATH=\"$bindir:\$PATH\""
         return 0
     fi
@@ -418,10 +419,10 @@ setup_path() {
 
 # Prove the freshly installed binary actually runs (also confirms stdlib resolution).
 verify_install() {
-    if ! ver=$("$EMBER_PREFIX/bin/emberc" --version 2>/dev/null); then
-        die "Installed emberc did not run. See $BUILD_LOG if the build looked off."
+    if ! ver=$("$INGLE_PREFIX/bin/inglec" --version 2>/dev/null); then
+        die "Installed inglec did not run. See $BUILD_LOG if the build looked off."
     fi
-    info "Installed ${BOLD}emberc${RST} - $ver"
+    info "Installed ${BOLD}inglec${RST} - $ver"
 }
 
 
@@ -429,19 +430,19 @@ verify_install() {
 
 
 print_next_steps() {
-    printf '\n%sEmber is installed.%s\n\n' "$BOLD" "$RST"
+    printf '\n%sIngle is installed.%s\n\n' "$BOLD" "$RST"
     if [ -n "${PATH_RC:-}" ]; then
-        printf 'Open a new terminal (or run %ssource %s%s) so emberc is on PATH, then:\n\n' \
+        printf 'Open a new terminal (or run %ssource %s%s) so inglec is on PATH, then:\n\n' \
             "$BOLD" "$PATH_RC" "$RST"
     else
         printf 'Try it:\n\n'
     fi
-    printf '    emberc --emit=run hello.em        %s# compile and run on the VM%s\n' "$DIM" "$RST"
-    printf '    emberc -o hello hello.em && ./hello %s# native binary%s\n' "$DIM" "$RST"
-    if [ "$EMBER_PROFILE" = "full" ]; then
-        printf '    ANTHROPIC_API_KEY=sk-ant-... emberc --emit=run app.em   %s# the desktop app%s\n' "$DIM" "$RST"
+    printf '    inglec --emit=run hello.em        %s# compile and run on the VM%s\n' "$DIM" "$RST"
+    printf '    inglec -o hello hello.em && ./hello %s# native binary%s\n' "$DIM" "$RST"
+    if [ "$INGLE_PROFILE" = "full" ]; then
+        printf '    ANTHROPIC_API_KEY=sk-ant-... inglec --emit=run app.em   %s# the desktop app%s\n' "$DIM" "$RST"
     fi
-    printf '\nRun %semberc --doctor%s to health-check the toolchain, %semberc --help%s for usage.\n' \
+    printf '\nRun %singlec --doctor%s to health-check the toolchain, %singlec --help%s for usage.\n' \
         "$BOLD" "$RST" "$BOLD" "$RST"
 }
 
@@ -450,15 +451,15 @@ print_next_steps() {
 
 
 main() {
-    printf '%sInstalling Ember%s\n' "$BOLD" "$RST"
+    printf '%sInstalling Ingle%s\n' "$BOLD" "$RST"
     detect_platform
     ensure_toolchain
 
-    if [ "$EMBER_PROFILE" = "full" ]; then
+    if [ "$INGLE_PROFILE" = "full" ]; then
         if ! ensure_full_deps; then
             warn "Falling back to the plain (dependency-free) compiler."
             warn "It runs all non-GUI programs; re-run with deps installed for the desktop app."
-            EMBER_PROFILE="plain"
+            INGLE_PROFILE="plain"
         fi
     fi
 

@@ -1,6 +1,6 @@
 # Design: Newtypes & ranged refinement types (OFI-149 / OFI-150)
 
-*Author: Claude, 2026-06-26. **Status: BOTH SHIPPED 2026-06-26.** OFI-149 (newtypes) + OFI-150 (refinements); 421/0, 7 gates, ASan; adversarial reviews fixed 3+4 bugs. Implementation notes vs this draft: unwrap is the conversion-call form `int(u)` (not an `as` cast — avoids a new ExprKind); refinements are checked at construction by codegen `self`-substitution (stack-balanced, sound at any nesting — NOT the slot-based inline approach, which had soundness gaps); refinement bases are numeric/bool only and the ctor arg must be pure (string refinements deferred); predicates use `&&` (Ember has no `and`). Validated by an
+*Author: Claude, 2026-06-26. **Status: BOTH SHIPPED 2026-06-26.** OFI-149 (newtypes) + OFI-150 (refinements); 421/0, 7 gates, ASan; adversarial reviews fixed 3+4 bugs. Implementation notes vs this draft: unwrap is the conversion-call form `int(u)` (not an `as` cast — avoids a new ExprKind); refinements are checked at construction by codegen `self`-substitution (stack-balanced, sound at any nesting — NOT the slot-based inline approach, which had soundness gaps); refinement bases are numeric/bool only and the ctor arg must be pure (string refinements deferred); predicates use `&&` (Ingle has no `and`). Validated by an
 adversarial workflow (the "chocolate-teacup check" — 6 interrogation seats incl. two fresh online
 counter-evidence passes + a hard code re-read + a devil's-advocate verdict) before drafting; verdict
 **(B) build, scoped**. Sequenced **after** the Fault precision Phase 2/3 work (OFI-110d / OFI-111a/b).
@@ -23,7 +23,7 @@ Two sibling features, both *constraints attached to data*:
 - The bug they kill — **unit confusion / swapped arguments** — is a real top-tier bug class *and* a
   top-3 LLM code-generation error class. Newtypes turn it into a compile error at **zero runtime cost**
   (the single-field-scalar value-struct already lowers to a bare 16-byte `Value`).
-- Refinements **extend Ember's verification moat from functions onto data** — *"the type is the proof
+- Refinements **extend Ingle's verification moat from functions onto data** — *"the type is the proof
   of validity"* (Alexis King's "parse, don't validate"). This is on-thesis for §5j.
 - External validation is real: easier-to-verify languages produce better AI code (the *vericoding*
   benchmark: ~82% verified-codegen success in Dafny vs ~27% in Lean; natural-language prose does **not**
@@ -34,7 +34,7 @@ Two sibling features, both *constraints attached to data*:
   the prover can.
 
 **What the validation pass corrected (scope it, and don't over-claim):**
-- **The prover will NOT fire at most refinement sites.** Ember's `--emit=prove` is Fourier–Motzkin over
+- **The prover will NOT fire at most refinement sites.** Ingle's `--emit=prove` is Fourier–Motzkin over
   linear integer arithmetic, and it only models functions whose body is a *single `return` expression*,
   ≤8 int params, no branches (`src/prove.c:354,373`). A smart constructor has branches; a field/return
   assignment is not a standalone function. So **most refinement checks degrade to the runtime
@@ -48,7 +48,7 @@ Two sibling features, both *constraints attached to data*:
 - **OFI-026 is NOT a blocker** (the validation's one false claim, traced to a stale comment now fixed as
   OFI-148). Unit-return `ensures` on a `mut self` mutator is **closed and sound** — `std/ui.em` uses it
   in production. So refined *mutable struct fields* are deferred not because of silent corruption, but
-  only because Ember has no *automatic* struct-invariant mechanism yet (manual `ensures` on each mutator
+  only because Ingle has no *automatic* struct-invariant mechanism yet (manual `ensures` on each mutator
   works but isn't ergonomic). That makes field refinements a clean **v2**, not a landmine.
 
 ---
@@ -68,7 +68,7 @@ Two sibling features, both *constraints attached to data*:
 | LSP inlay `✓ proved` / `○ runtime-checked` via `prove_fn_verdicts` | shipped | `src/lsp.c:2094` |
 | Unit-return `ensures` on `mut self` | shipped (OFI-026 closed) | `src/check.c:6987`; `std/ui.em:375` |
 | `type X = Y` declaration / refinement / newtype / branded syntax | **ABSENT** | grammar `Type = [T] \| ident<...>` |
-| Subtyping / non-nominal coercion | **ABSENT** (Ember is nominal) | — |
+| Subtyping / non-nominal coercion | **ABSENT** (Ingle is nominal) | — |
 
 The grammar has **no `type` declaration of any kind today** — introducing one is the new surface both
 parts share.
@@ -116,7 +116,7 @@ type Email   = string
    wrapper (`src/codegen.c`, `src/cgen_c.c`).
 4. **LSP:** hover shows `type Name = Base`; the mismatch diagnostic reads "OrderId is not UserId"
    (`src/lsp.c`).
-5. **Docs + tests:** a `THE_EMBER_BOOK` section; `tests/run/newtype_mismatch.em` (the cross-type pass is
+5. **Docs + tests:** a `THE_INGLE_BOOK` section; `tests/run/newtype_mismatch.em` (the cross-type pass is
    a compile error), `tests/run/newtype_roundtrip.em` (construct → unwrap), and a native-differential
    case confirming byte-identical / zero-cost output.
 
@@ -146,7 +146,7 @@ type Email   = string where is_valid_email(self)
 
 - Extends the part-(a) `type` form with an optional `where P` clause; `int<lo..hi>` is sugar for the
   common ranged case.
-- `P` is an ordinary `bool` expression over `self` — **the spec language is Ember** (§5e), so there is
+- `P` is an ordinary `bool` expression over `self` — **the spec language is Ingle** (§5e), so there is
   nothing new for a model to learn, and it may call ordinary predicate functions (`is_valid_email`).
 
 ### 4.2 Semantics — desugar onto the contract machinery

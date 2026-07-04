@@ -1,13 +1,13 @@
 ---
 title: std/http — Design of Record
 nav_order: 8
-description: The binding design of record for Ember's std/http — the blocking and streaming HTTPS API and its libcurl-backed transport model.
+description: The binding design of record for Ingle's std/http — the blocking and streaming HTTPS API and its libcurl-backed transport model.
 ---
 
-# Ember `std/http` — Design of Record
+# Ingle `std/http` — Design of Record
 
 *Decided 2026-06-19. This is a binding design: the API and the transport model below are the plan; the
-modules are built against it. Decisions trace to [MANIFESTO.md](https://github.com/kmcnally5/ember-lang/blob/main/MANIFESTO.md). Supersedes the
+modules are built against it. Decisions trace to [MANIFESTO.md](https://github.com/ingle-lang/ingle-lang/blob/main/MANIFESTO.md). Supersedes the
 ad-hoc `extern http_post` the desktop apps use today.*
 
 ## Thesis
@@ -25,7 +25,7 @@ The research draft proposed a runtime-aware native whose libcurl write-callback 
 **Rejected for the MVP** in favour of a simpler, more on-thesis model:
 
 > Streaming is `curl_multi` behind a `Ptr` handle, driven by **pull**. The transport is three plain
-> `extern "c"` leaves; **the Ember worker fiber owns the channel and does the `send`s itself.**
+> `extern "c"` leaves; **the Ingle worker fiber owns the channel and does the `send`s itself.**
 
 ```
 extern "c" {
@@ -39,12 +39,12 @@ extern "c" {
 `http_next` pumps `curl_multi_perform`/`curl_multi_poll` until a chunk arrives or the transfer ends, then
 returns it. Chunks arrive incrementally as the network delivers them — true streaming. **Why this beats
 the push native:** it needs ZERO runtime/checker changes (it's the existing `fopen`/`fread`/`fclose`
-`Ptr` leaf-FFI pattern, §5h, OFI-049 made `Ptr` move-only/safe); it keeps concurrency 100% Ember
+`Ptr` leaf-FFI pattern, §5h, OFI-049 made `Ptr` move-only/safe); it keeps concurrency 100% Ingle
 (fibers + channels), which is *more* on-thesis; and the blocking lives in `http_next` on a worker fiber,
 exactly like `http_post` blocks today. The push-native is only worth it for the later curl_multi-reactor
 phase (one thread, thousands of connections) — see Phase 1.
 
-## The Ember API surface (`std/http`)
+## The Ingle API surface (`std/http`)
 
 ```rust
 enum Method { Get, Post, Put, Delete, Patch, Head, Options }
@@ -148,7 +148,7 @@ N parallel requests = N `spawn`s in a nursery; the nursery joins (and cancels la
   be specced and added manifesto-wide (it touches `main`, the runtime root-grant, and all effectful
   stdlib). http ships without it now and gains `Net` then — breaking is fine, we are pre-1.0.
 - **D5 — libcurl through Phase 1.** TLS/h2/redirects/gzip for free; it is the one blessed opt-in dep
-  (raylib precedent, §3.5). Pure-Ember sockets+TLS is a separate future project; the API makes the swap
+  (raylib precedent, §3.5). Pure-Ingle sockets+TLS is a separate future project; the API makes the swap
   non-breaking.
 - **D6 — fibers: the "M:N green threads" gap is resolved.** The M:N scheduler is built (OFI-071,
   gated behind `EMBER_MN`); the default build keeps the 1:1 OS-thread-per-`spawn` model that this
@@ -176,7 +176,7 @@ N parallel requests = N `spawn`s in a nursery; the nursery joins (and cancels la
 | `Result<Response, HttpError>` + `?`; status is a field; `Option` headers | errors-as-values, no null |
 | Streaming chunks are owned `string`s, never escaping borrowed slices | §5f, OFI-009 |
 | Pull channel reads, never registered callbacks | §5g (no hidden control flow) |
-| libcurl opt-in, off the default `make`/`make test` path; never named in Ember | §3.5, §5g (raylib precedent) |
+| libcurl opt-in, off the default `make`/`make test` path; never named in Ingle | §3.5, §5g (raylib precedent) |
 | Transport is `Ptr`-handle leaf FFI, copy-out, no C-owned pointer escapes | §5h, OFI-043/049 |
 | One canonical client shape, least-surprise names | §5b |
 | (later) `Net` capability makes network authority legible | §5b (LLM-first) |

@@ -4,9 +4,9 @@ nav_order: 2
 has_children: true
 ---
 
-# Ember by Firelight
+# Ingle by Firelight
 
-### A friendly, honest field guide to writing Ember — as it actually stands today
+### A friendly, honest field guide to writing Ingle — as it actually stands today
 
 *Covering the language as built and tested in June 2026. Everything in this book was compiled and run before it was written down. Nothing here is aspirational.*
 
@@ -14,7 +14,7 @@ has_children: true
 
 > **The one promise this book makes**
 >
-> Ember is a young language in active design, and it is growing quickly. A book about a
+> Ingle is a young language in active design, and it is growing quickly. A book about a
 > moving target can lie to you in two directions: by describing features that don't exist
 > yet, or by going stale the moment something lands. This book solves the first problem
 > ruthlessly — **every single code sample was run through the compiler and produced the
@@ -24,7 +24,7 @@ has_children: true
 > nowhere else.
 >
 > If you can read one programming language already — any of them — you can learn to write
-> working Ember from this book. That includes you, dear reader, even if your last program
+> working Ingle from this book. That includes you, dear reader, even if your last program
 > ended in a stack trace you emailed to a friend.
 
 ---
@@ -43,7 +43,7 @@ A few conventions:
 
   ```ember
   fn main() -> int {
-      println("Hello from Ember")
+      println("Hello from Ingle")
       return 0
   }
   ```
@@ -54,7 +54,7 @@ A few conventions:
   => 0
   ```
 
-> **Fireside trivia.** Ember's reference compiler is written in C — about a dozen thousand
+> **Fireside trivia.** Ingle's reference compiler is written in C — about a dozen thousand
 > lines of it — and has *no third-party dependencies at all* for its default build. It links
 > the C standard library and nothing else. The entire toolchain (compiler, language server,
 > property fuzzer, contract prover, JSON reader) is written in-tree. The one exception is
@@ -63,12 +63,12 @@ A few conventions:
 
 ---
 
-## Running Ember at all
+## Running Ingle at all
 
-Ember programs end in `.em`. You compile and run one with the `emberc` compiler:
+Ingle programs end in `.em`. You compile and run one with the `inglec` compiler:
 
 ```
-emberc --emit=run hello.em
+inglec --emit=run hello.em
 ```
 
 That compiles the program *and* executes it, printing any output, then a final line showing
@@ -92,17 +92,17 @@ couldn't be read.
 
 ---
 
-## Building Ember from source
+## Building Ingle from source
 
-The samples above assume you already have an `emberc`. Producing one is deliberately dull:
-Ember's compiler is written in C with **no third-party dependencies**, so on any machine with a
+The samples above assume you already have an `inglec`. Producing one is deliberately dull:
+Ingle's compiler is written in C with **no third-party dependencies**, so on any machine with a
 C compiler and `make` — **macOS or Linux, on x86-64 or arm64** — a single command does it.
 
 ```
 make
 ```
 
-That builds the everyday compiler at `build/emberc` — a debuggable `-O0 -g` build — together with
+That builds the everyday compiler at `build/inglec` — a debuggable `-O0 -g` build — together with
 the small runtime libraries that native binaries link against. To confirm everything actually
 works, run the regression suite, which rebuilds whatever is stale and then runs every example in
 this book:
@@ -118,22 +118,22 @@ below, grouped by why you'd reach for it.
 
 | Target | Produces | Notes |
 |--------|----------|-------|
-| `make` (`make all`) | `build/emberc` + `libember_rt.a`, `libember_rt_par.a` | The dev build: `-O0 -g`, quick to rebuild and debuggable. The two `.a` files are the runtime `emberc -o` links into native programs. |
-| `make release` | `build/emberc-release` | The optimized `-O2` compiler — the one `make install` ships. |
-| `make parallel` | `build/emberc-par` | Same language, multicore runtime: `spawn`/`nursery`/channels run on real OS threads ([Chapter 14](/guide/ch-14)). |
-| `make mn` | `build/emberc-mn` | The **M:N** green-thread scheduler — many fibers multiplexed onto a few OS threads, with structured cancellation-on-failure. Opt-in while it clears a wider soak ([Chapter 14](/guide/ch-14)). |
-| `make graphics` | `build/emberc-gfx` | Links raylib + FreeType. *Needs an external library* (see below). |
-| `make net` | `build/emberc-net` | Links libcurl for HTTPS. *Needs an external library.* |
-| `make net-graphics` | `build/emberc-net-gfx` | Networking + graphics + threads at once — the build the desktop demo uses. *Needs both libraries.* |
-| `make db` | `build/emberc-db` | Links the vendored SQLite amalgamation so a program can `import "std/sqlite"` ([Chapter 15](/guide/ch-15)). The one C file lives in-tree, so this still needs no system package. |
+| `make` (`make all`) | `build/inglec` + `libember_rt.a`, `libember_rt_par.a` | The dev build: `-O0 -g`, quick to rebuild and debuggable. The two `.a` files are the runtime `inglec -o` links into native programs. |
+| `make release` | `build/inglec-release` | The optimized `-O2` compiler — the one `make install` ships. |
+| `make parallel` | `build/inglec-par` | Same language, multicore runtime: `spawn`/`nursery`/channels run on real OS threads ([Chapter 14](/guide/ch-14)). |
+| `make mn` | `build/inglec-mn` | The **M:N** green-thread scheduler — many fibers multiplexed onto a few OS threads, with structured cancellation-on-failure. Opt-in while it clears a wider soak ([Chapter 14](/guide/ch-14)). |
+| `make graphics` | `build/inglec-gfx` | Links raylib + FreeType. *Needs an external library* (see below). |
+| `make net` | `build/inglec-net` | Links libcurl for HTTPS. *Needs an external library.* |
+| `make net-graphics` | `build/inglec-net-gfx` | Networking + graphics + threads at once — the build the desktop demo uses. *Needs both libraries.* |
+| `make db` | `build/inglec-db` | Links the vendored SQLite amalgamation so a program can `import "std/sqlite"` ([Chapter 15](/guide/ch-15)). The one C file lives in-tree, so this still needs no system package. |
 
 **Finding bugs**
 
 | Target | Produces | Notes |
 |--------|----------|-------|
-| `make asan` | `build/emberc-asan` | AddressSanitizer build — running a `.em` program flags use-after-free / overflow with a stack trace. |
-| `make asan-par` | `build/emberc-asan-par` | The same, exercising the cross-thread (parallel) paths. |
-| `make asan-trace` | `build/emberc-trace` | ASan plus the double-drop detector — the "memory tape" of [Chapter 19](/guide/ch-19). |
+| `make asan` | `build/inglec-asan` | AddressSanitizer build — running a `.em` program flags use-after-free / overflow with a stack trace. |
+| `make asan-par` | `build/inglec-asan-par` | The same, exercising the cross-thread (parallel) paths. |
+| `make asan-trace` | `build/inglec-trace` | ASan plus the double-drop detector — the "memory tape" of [Chapter 19](/guide/ch-19). |
 
 **Testing, and the four gates**
 
@@ -161,7 +161,7 @@ below, grouped by why you'd reach for it.
 | Target | What it does |
 |--------|--------------|
 | `make gen-editor-assets` | Regenerate the VS Code syntax grammar from the single source of truth, `include/vocab.def`. |
-| `make install` | Build release, then install `emberc` + the standard library to `~/.ember` (override with `PREFIX=`) so editors and tools find it from any folder. |
+| `make install` | Build release, then install `inglec` + the standard library to `~/.ingle` (override with `PREFIX=`) so editors and tools find it from any folder. |
 | `make install-vscode` | Package and install the VS Code extension globally. Needs Node/npm and VS Code. |
 | `make clean` | Delete `build/`. |
 

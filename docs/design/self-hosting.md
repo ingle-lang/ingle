@@ -1,4 +1,4 @@
-# Self-hosting Ember — a staged bootstrap plan
+# Self-hosting Ingle — a staged bootstrap plan
 
 > Status: **🎉 THE VM FIXED POINT IS REACHED — M0–M4 self-compile (2026-06-28).** Stage 0 is frozen
 > (`stage0-v0.3.42`), the Stage A spikes are green, and **all four self-hosted modules — `lexer.em`,
@@ -11,9 +11,9 @@
 > pipeline is gated by `make selfhost` (**1139 checks, 0 failures**) and folded into `make verify`. The
 > remaining work is **checker completeness** (the 7 not-yet-rejected invalid files; it never false-rejects,
 > so it already compiles every valid program including itself) and finishing the **standalone bootstrap**.
-> **The first bootstrap milestone has LANDED:** `selfhost/emberc.em` is the UNIFIED self-hosted compiler —
+> **The first bootstrap milestone has LANDED:** `selfhost/inglec.em` is the UNIFIED self-hosted compiler —
 > the whole pipeline (lex → parse → **check** → codegen) as ONE program, compiled to a native self-built
-> compiler **binary** (`emberc -o emberc-self selfhost/emberc.em`). It rejects an ill-typed program with
+> compiler **binary** (`inglec -o inglec-self selfhost/inglec.em`). It rejects an ill-typed program with
 > exit 65, emits valid programs' bytecode byte-identically to stage-0, and **reproduces all four of its own
 > modules byte-identically** — gated as Stage 5 of `make selfhost` (**1147/0**). The remaining bootstrap
 > step is making the emitted bytecode *runnable* (a serialization format + a stage-0 loader, or an M5
@@ -49,7 +49,7 @@ Two things, kept separate throughout (per [CLAUDE.md](../../CLAUDE.md)):
 - **stage 0** — the current reference compiler, written in C (`src/`). It is the bootstrap and,
   more importantly, the **differential oracle** every ported stage is measured against. It is
   kept and frozen, not thrown away.
-- **the self-hosted compiler** — `emberc` written in Ember (`.em`), built incrementally on top of
+- **the self-hosted compiler** — `inglec` written in Ingle (`.em`), built incrementally on top of
   stage 0.
 
 ---
@@ -58,7 +58,7 @@ Two things, kept separate throughout (per [CLAUDE.md](../../CLAUDE.md)):
 
 A compiler is the most demanding ordinary program there is: heavy string work, large recursive
 data structures, symbol tables, a thousand edge cases, and it must be both fast and correct.
-Pointing Ember at that problem is the sharpest dogfood available — every missing feature, awkward
+Pointing Ingle at that problem is the sharpest dogfood available — every missing feature, awkward
 corner, or place the type system fights back shows up immediately, because we become our own most
 demanding user. That is the whole reason, and it is the same instinct as the existing tape /
 Crucible / dogfood-app discipline, scaled up to the largest program we could write.
@@ -68,7 +68,7 @@ Three concrete payoffs, stated plainly:
 - **The manifesto claims get tested on a real, large program.** No `null`, `Result`/`Option` with
   `?`, ownership without GC, leak-until-exit accepted for a batch process — a compiler exercises
   every one of these under load. If they hold here, that is evidence; if they don't, we find out.
-- **One language for the front end.** Once the front end is Ember, a contributor no longer needs C
+- **One language for the front end.** Once the front end is Ingle, a contributor no longer needs C
   to work on it, and the build stops straddling two worlds for that half.
 - **Maturity, factually.** "Compiles itself" is a property, demonstrated by a reproducibility fixed
   point (§5), not a slogan. We let the fixed point do the talking.
@@ -82,11 +82,11 @@ viable indefinitely so the project is never stranded on a half-ported compiler.
 
 The conceptual core a compiler needs is, for the most part, already shipped and tested — and one
 piece of evidence settles the central question on its own: **`std/json.em` is a recursive sum type
-with a full recursive-descent parser, written in pure Ember today** (`enum Json { … Arr(items:
+with a full recursive-descent parser, written in pure Ingle today** (`enum Json { … Arr(items:
 [Json]) }`, walked with `match`). That is the exact shape an AST is. The "can the language even
 hold an AST?" risk is therefore not theoretical — it is demonstrated in the stdlib.
 
-| Capability a compiler needs | Status in Ember today | Evidence |
+| Capability a compiler needs | Status in Ingle today | Evidence |
 |---|---|---|
 | Recursive sum types (the AST) | **Present** | `std/json.em` — `enum Json` with `Arr(items: [Json])`, recursive `parse`/`stringify` |
 | Enums + exhaustive `match` (token / node dispatch) | **Present** | language core; `tests/native/enum*.em` |
@@ -97,7 +97,7 @@ hold an AST?" risk is therefore not theoretical — it is demonstrated in the st
 | `argv` / env / exit code | **Present** | `args()` / `env()` / `exit()` builtins; `examples/14_cli.em` |
 | Modules for a multi-file compiler | **Present** | `import "path" as name`, module-qualified types/calls, `_`-privacy; the stdlib is itself multi-module |
 | FFI + owning a C handle (only if we need C bindings) | **Present** | `extern "c"`; `resource struct` with auto-`drop` (OFI-122 Phase 1) |
-| Stage-0 introspection to diff against | **Present** | `emberc --emit=tokens\|ast\|bytecode\|c\|run` |
+| Stage-0 introspection to diff against | **Present** | `inglec --emit=tokens\|ast\|bytecode\|c\|run` |
 | Differential + fuzz harness to keep a port honest | **Present** | `tests/native/` (VM vs compiled binary), Crucible, Ledger, Ceilings, opcheck, `make verify` |
 
 **Note the correction to the earlier informal analysis:** file I/O and `argv` are *not* missing — they
@@ -120,7 +120,7 @@ What is genuinely missing or constrained:
   single-child recursion (`Binary(left, right)`) wants `Box<Expr>`. `Option<Box<int>>` already runs,
   so both shapes should be expressible — but we confirm the specific AST shapes on **both** backends
   in a spike before building on them (Stage A).
-- **Scale, watched not assumed.** The largest pure-Ember modules today are `std/flare.em` (~154 KB)
+- **Scale, watched not assumed.** The largest pure-Ingle modules today are `std/flare.em` (~154 KB)
   and `std/ui.em` (~78 KB) — good evidence the toolchain already handles large single modules. A
   compiler is bigger and deeply multi-module, so compile time and module-resolution depth are things
   to measure as we go, not take on faith.
@@ -139,15 +139,15 @@ else is smaller.
 **Incremental, differential, front-end-first. Keep stage 0 as the reference the whole way.**
 
 Port one stage at a time — lexer → parser → checker → backend — and after each, run stage 0 and the
-Ember port over the same corpus and **diff the artifact stage 0 already knows how to emit**. The
+Ingle port over the same corpus and **diff the artifact stage 0 already knows how to emit**. The
 existing `--emit` modes are purpose-built oracles for exactly this:
 
 | Ported stage | Diff against | Stage-0 oracle |
 |---|---|---|
-| Lexer | token stream | `emberc --emit=tokens` |
-| Parser | AST dump | `emberc --emit=ast` |
+| Lexer | token stream | `inglec --emit=tokens` |
+| Parser | AST dump | `inglec --emit=ast` |
 | Checker | accept/reject + diagnostic text | the diagnostics stage 0 emits on compile (clean-compile vs expected-rejection programs) |
-| Bytecode backend | disassembly **and** run output | `emberc --emit=bytecode`, `emberc --emit=run` |
+| Bytecode backend | disassembly **and** run output | `inglec --emit=bytecode`, `inglec --emit=run` |
 
 Byte-identical or it isn't done. This is the same culture as `tests/native/` (which already diffs
 every program's VM run against its compiled-binary run) — we are pointing it at the compiler itself.
@@ -161,11 +161,11 @@ Recommended and adopted (Karl deferred the call). Reasoning:
   header). Diffing self-hosted output against stage 0 is cleanest when the target *is* the reference.
 - **No in-language `cc`/`system()` dependency to run results.** The one genuinely-missing primitive
   (§2) is avoided entirely on this path.
-- **Lowest friction**, which is what you want for a bootstrap. A VM-hosted `emberc` is slower than a
+- **Lowest friction**, which is what you want for a bootstrap. A VM-hosted `inglec` is slower than a
   native one — fine for bootstrapping, and not the end state.
 
 The **C-emitting native backend is a documented follow-on** (Stage 5), once the front end is already
-self-hosted. Only then do we need either `system()` (OFI-151) for an integrated `emberc -o bin`
+self-hosted. Only then do we need either `system()` (OFI-151) for an integrated `inglec -o bin`
 driver, or — simpler — have the self-hosted compiler emit C and let `make`/stage 0 run `cc`, exactly
 as the toolchain already does today.
 
@@ -173,12 +173,12 @@ as the toolchain already does today.
 
 ## 4. Stage-by-stage plan
 
-Each stage names what to build in Ember, the **exact** differential test, the done-when bar, and the
-risks. New Ember sources live under `selfhost/`; new tests under `tests/selfhost/`.
+Each stage names what to build in Ingle, the **exact** differential test, the done-when bar, and the
+risks. New Ingle sources live under `selfhost/`; new tests under `tests/selfhost/`.
 
 ### Stage 0 — freeze the reference (do this first)
 
-Tag a stage-0 `emberc` binary and keep `src/` buildable from scratch. From here on, stage 0 is
+Tag a stage-0 `inglec` binary and keep `src/` buildable from scratch. From here on, stage 0 is
 immutable for the purposes of the bootstrap; if the C compiler changes, re-tag deliberately. Document
 the from-zero rebuild so anyone can reproduce the reference.
 
@@ -193,36 +193,36 @@ the from-zero rebuild so anyone can reproduce the reference.
 - **Decide the `system()` question.** Not needed for VM-first; open **OFI-151** now only if we commit
   to an integrated native driver at Stage 5.
 
-### Stage 1 — lexer in Ember (`selfhost/lexer.em`)
+### Stage 1 — lexer in Ingle (`selfhost/lexer.em`)
 
 - **Build:** source `string` → `[Token]`, emitting in stage 0's exact `line:col  TYPE  lexeme` form.
 - **Differential:** for every `.em` across `examples/`, `tests/`, and `std/`, compare
-  `emberc --emit=tokens X` against a tiny Ember driver that `read_file`s `X`, lexes it, and prints
+  `inglec --emit=tokens X` against a tiny Ingle driver that `read_file`s `X`, lexes it, and prints
   tokens in the identical format. Diff must be empty.
 - **Done when:** token stream byte-identical over the whole corpus.
 - **Risks:** UTF-8 column counting; numeric/string-literal edge cases; **the vocabulary must stay
-  single-sourced** — `include/vocab.def` is the one source of truth, so generate the Ember lexer's
+  single-sourced** — `include/vocab.def` is the one source of truth, so generate the Ingle lexer's
   keyword/operator table *from* it rather than hand-copying (mirrors `tools/gen_editor_assets`). →
   proposed **OFI-153**.
 
-### Stage 2 — parser in Ember (`selfhost/parser.em`)
+### Stage 2 — parser in Ingle (`selfhost/parser.em`)
 
 - **Build:** `[Token]` → AST (the recursive enum from Stage A, grown to the full grammar in
   `docs/grammar.ebnf`).
-- **Differential:** AST dump vs `emberc --emit=ast` over the same corpus. Match stage 0's
+- **Differential:** AST dump vs `inglec --emit=ast` over the same corpus. Match stage 0's
   `ast_print` format (`src/ast_print.c`) so the diff is direct.
 - **Done when:** AST dump byte-identical over the corpus.
 - **Risks:** operator precedence; error-recovery parity; named-argument / 2-token-lookahead cases
   (the `pk2` path, OFI-140); keeping the AST shape faithful enough that downstream stages see the
   same tree stage 0 produces.
 
-### Stage 3 — checker in Ember (`selfhost/check.em`) — the long pole
+### Stage 3 — checker in Ingle (`selfhost/check.em`) — the long pole
 
 - **Build:** name resolution → types/inference → generics-erasure rules → ownership/move checking →
   contracts. This is the largest and subtlest component (`src/check.c` ~8.8k lines); stage it
   internally in that order rather than as one push.
 - **Differential:** **diagnostic parity** — over the programs the suite expects to compile clean
-  and the programs it expects stage 0 to **reject** (the `error_*` programs and similar), the Ember
+  and the programs it expects stage 0 to **reject** (the `error_*` programs and similar), the Ingle
   checker must reach the same accept/reject decision and emit the same error text as stage 0. Build
   out a dedicated checker corpus under `tests/selfhost/` as needed. *(Note: `tests/check` is the
   contract property-fuzzer and `tests/fault` is runtime faults — different concerns, not the
@@ -232,7 +232,7 @@ the from-zero rebuild so anyone can reproduce the reference.
   feature of the exercise, not a setback. Per CLAUDE.md, when a divergence appears, reach for
   `--emit` + the minimal offending source as the repro before patching.
 
-### Stage 4 — bytecode backend in Ember (`selfhost/codegen.em`)
+### Stage 4 — bytecode backend in Ingle (`selfhost/codegen.em`)
 
 - **Build:** AST → bytecode chunk, matching `src/codegen.c`.
 - **Differential:** `--emit=bytecode` disassembly parity **and** end-to-end run parity (program
@@ -242,12 +242,12 @@ the from-zero rebuild so anyone can reproduce the reference.
 - **Risks:** opcode coverage (lean on `opcheck`); witness / dictionary-passing for bounded generics;
   correct `drop`/cleanup emission.
 
-At the end of Stage 4 the **entire front end and the VM backend exist in Ember.**
+At the end of Stage 4 the **entire front end and the VM backend exist in Ingle.**
 
-### Stage 5 — C-emitting native backend in Ember (`selfhost/cgen_c.em`) — follow-on
+### Stage 5 — C-emitting native backend in Ingle (`selfhost/cgen_c.em`) — follow-on
 
 - **Build:** port `src/cgen_c.c` so the self-hosted compiler can also produce native binaries.
-- **Driver:** either add `system()` (OFI-151) so `emberc` invokes `cc` itself, or emit C and let
+- **Driver:** either add `system()` (OFI-151) so `inglec` invokes `cc` itself, or emit C and let
   `make`/stage 0 run `cc` — the same external-`cc` step the toolchain uses today.
 - **Differential:** the existing `tests/native/` VM-vs-binary diff, now with the self-hosted compiler
   producing the C.
@@ -258,9 +258,9 @@ At the end of Stage 4 the **entire front end and the VM backend exist in Ember.*
 
 Once stages 1–4 are green, run the bootstrap:
 
-1. **Stage 1 build** — compile `selfhost/*.em` with stage 0. Result: an `emberc` that *runs on the
+1. **Stage 1 build** — compile `selfhost/*.em` with stage 0. Result: an `inglec` that *runs on the
    VM* and whose own backend emits bytecode.
-2. **Self-compile** — run that emberc on its own source to produce stage-2 artifacts.
+2. **Self-compile** — run that inglec on its own source to produce stage-2 artifacts.
 3. **Fixed point** — require stage-1 output and stage-2 output to be **byte-identical**. That
    reproducibility is the proof the compiler reproduces itself.
 
@@ -301,7 +301,7 @@ rebuilt without itself is a trap; keeping stage 0 is what avoids it.
   to 1.15 M tokens, two malformed-input error positions fixed). OFI-153 (generate the keyword table from
   `vocab.def`) is the remaining refinement.
 - **M2 ✅ DONE 2026-06-27** — self-hosted parser (`selfhost/parser.em`, imports the lexer); AST diff
-  **empty over all valid corpus files** (530/530 at last count) (`emberc --emit=ast`), VM and native;
+  **empty over all valid corpus files** (530/530 at last count) (`inglec --emit=ast`), VM and native;
   gated in `make verify`. It parses itself identically. **Adversarially verified** (3-agent pass): spec
   MATCHES on everything (precedence, lossy-but-parsed contracts/lambdas/named-args, desugaring, `>>`
   split, interpolation, all productions); found + fixed two corpus-untriggered bugs — a float `1.5e3`
@@ -315,7 +315,7 @@ rebuilt without itself is a trap; keeping stage 0 is what avoids it.
 - **M3 🔨 IN PROGRESS (building 2026-06-27; dataflow engine landed 2026-06-28)** — self-hosted checker
   (`selfhost/checker.em`, methods-in-struct, int `SemType`); **full exact-diagnostic parity** the goal
   (Karl's call). The long pole. **Now gated as Stage 3 of `make selfhost`** (`check_dump.em` driver): the
-  verdict (ACCEPT/REJECT) is diffed against the `emberc --emit=bytecode` oracle over the corpus. The gate
+  verdict (ACCEPT/REJECT) is diffed against the `inglec --emit=bytecode` oracle over the corpus. The gate
   **reports** the verdict-match rate but **hard-fails on any false-reject** — the safety invariant (a false
   rejection is a real bug; a missed rejection is just unfinished work). **Status: 534/541 verdict-match, 0
   false-rejects, 7 not-yet-rejected** (VM == native; the semantics of each check were mapped from
@@ -394,7 +394,7 @@ rebuilt without itself is a trap; keeping stage 0 is what avoids it.
   `ast_print`, so M2 stays green).
 - **M4 🔨 IN PROGRESS — a broad subset byte-identical, 2026-06-27.** Self-hosted bytecode backend
   (`selfhost/codegen.em` + driver `codegen_dump.em`), emitting disassembly **byte-identical** to stage-0
-  `emberc --emit=bytecode` incl. the source-line column. Ports `src/codegen.c` (AST→bytecode) +
+  `inglec --emit=bytecode` incl. the source-line column. Ports `src/codegen.c` (AST→bytecode) +
   `src/chunk.c` (the disassembler); the 91-opcode table + LEB128/big-endian operand codec come straight
   from `include/opcode.h`. Gated as **Stage 4** of `make selfhost` over a growing fixture set
   (`tests/selfhost/codegen/*.em`, **14 byte-identical** at last count), both backends, whole pipeline
@@ -516,12 +516,12 @@ rebuilt without itself is a trap; keeping stage 0 is what avoids it.
 
 - **The checker is the long pole** — ~8.8k lines of the subtlest semantics in the project. It will
   surface OFIs; plan for that and stage it internally.
-- **Performance** — a VM-hosted `emberc` is slower than the C one. Acceptable for a bootstrap;
+- **Performance** — a VM-hosted `inglec` is slower than the C one. Acceptable for a bootstrap;
   revisit at Stage 5 when native self-hosted binaries arrive.
 - **Erased generics shape the compiler's own data structures** — no monomorphized specialization to
   lean on, and leak-until-exit in generic bodies. Both are fine for a batch process; design the
   compiler's types around them deliberately rather than discovering them late.
-- **Vocabulary single-sourcing** — `include/vocab.def` stays the one source; the Ember lexer's table
+- **Vocabulary single-sourcing** — `include/vocab.def` stays the one source; the Ingle lexer's table
   is generated from it, never hand-copied (OFI-153).
 - **Scope discipline** — self-host only as far as it serves the language. stage 0 is kept, not
   discarded; a stage that stops paying its way is paused, not forced.
@@ -535,7 +535,7 @@ The four proposed during planning, plus three surfaced by the Stage A dogfood:
 - **OFI-151** — `system()` / process-spawn builtin (Stage 5 native driver). **OPEN, deferred to Stage 5.**
 - **OFI-152** — bounds on generic enums / standalone methods. **OPEN, conditional** — only if AST/visitor
   modelling needs it (the recursive `[Json]`/`Box` shape does not).
-- **OFI-153** — generate an Ember-consumable token table from `include/vocab.def` (lexer prerequisite).
+- **OFI-153** — generate an Ingle-consumable token table from `include/vocab.def` (lexer prerequisite).
   **OPEN, opens with Stage 1.**
 - **OFI-154** — `tests/selfhost/` differential tier + `make selfhost` gate. **SHIPPED 2026-06-26.**
 - **OFI-155 (HIGH)** — native miscompiled in-place mutation of a value-struct field of a non-flat struct
@@ -570,7 +570,7 @@ The four proposed during planning, plus three surfaced by the Stage A dogfood:
 **🎉 THE VM FIXED POINT IS REACHED. M0–M4 self-compile.** Stage 0 is frozen (`stage0-v0.3.42`). The
 **self-hosted compiler reproduces its OWN COMPLETE SOURCE byte-identically** to the C reference, on both the
 bytecode VM and the native backend: **all four modules — `selfhost/lexer.em`, `selfhost/parser.em`,
-`selfhost/checker.em`, and `selfhost/codegen.em` — self-compile byte-identical end-to-end** (`emberc
+`selfhost/checker.em`, and `selfhost/codegen.em` — self-compile byte-identical end-to-end** (`inglec
 --emit=bytecode MODULE` == the self-hosted lexer→parser→codegen run on MODULE, on every function of every
 module). The whole self-hosted toolchain is gated in `make selfhost` at **1139/0**, folded into `make
 verify`. The lexer + parser are also byte-identical over the WHOLE corpus on both backends, the checker
@@ -581,7 +581,7 @@ arithmetic, interpolation render kinds, unary ops, methods, the move/drop discip
 Over the differential corpus (`tools/cgdiff.sh -c`) the self-hosted backend is byte-identical on a growing
 fraction of arbitrary programs; the compiler's own ~6000 lines are 100%.
 
-What "fixed point" means here: the differential is `emberc --emit=bytecode MODULE` (stage 0) vs `emberc
+What "fixed point" means here: the differential is `inglec --emit=bytecode MODULE` (stage 0) vs `inglec
 --emit=run selfhost/codegen_dump.em MODULE` (the self-hosted front end + codegen run on the VM). Compiling
 `codegen.em` this way IS the self-hosted codegen compiling its own source; doing it for all four modules is
 the self-hosted compiler reproducing itself. The remaining work toward a STANDALONE bootstrap is packaging
@@ -677,15 +677,15 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    ECall` change), plus a parse-time literal-range check (`int_literal_range`, a lexer/parser change). Then
    **M3c** — exact message + position parity over the error files (prerequisite: extend the parser AST to
    carry `line:col`; adding positions won't change `ast_print`, so M2 stays green).
-3. **The standalone bootstrap — STARTED.** **Step 1 LANDED:** `selfhost/emberc.em`, the UNIFIED driver
+3. **The standalone bootstrap — STARTED.** **Step 1 LANDED:** `selfhost/inglec.em`, the UNIFIED driver
    (lex → parse → check → codegen as one program), compiled to a native self-built compiler binary that
    rejects ill-typed programs (exit 65), emits valid bytecode byte-identical to stage-0, and reproduces all
    four of its own modules (gated, Stage 5 of `make selfhost`). **Step 2 — the M5 C-emit backend — IN
    PROGRESS.** Decision (recorded): emit C and let clang build the native binary, rather than a bytecode
-   serialization format + a stage-0 loader — because it mirrors Ember's *existing* architecture (stage-0
+   serialization format + a stage-0 loader — because it mirrors Ingle's *existing* architecture (stage-0
    already has a C-emit native backend, `--emit=c`/`-o`), completes the self-hosting mirror (the 5th of
    stage-0's 5 components), reuses the *same* byte-identical differential (`--emit=c` is the oracle, vs no
-   oracle for serialized bytecode), produces Ember's native artifact with nothing new added to stage-0, and
+   oracle for serialized bytecode), produces Ingle's native artifact with nothing new added to stage-0, and
    walks toward the kernel's bare-metal codegen. `selfhost/cgen_c.em` + `cgen_c_dump.em` + the `tools/ccdiff.sh`
    differential harness drive it, gated as Stage 6 of `make selfhost` (one fixture per increment under
    `tests/selfhost/cgen_c/`, each byte-identical to stage-0 `--emit=c` on BOTH the VM and the self-built
@@ -766,7 +766,7 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    FIRST full self-hosted module to self-compile through the native C-emit backend — the first real native-
    bootstrap step. It is now a permanent gate in `make selfhost` ("whole MODULES self-C-emit byte-identical").
    Next targets, in order: the **parser** (`selfhost/parser.em`), then the **checker** and **codegen**, then
-   the unified **emberc.em** — at which point the self-built native compiler can rebuild itself. **M5l (done,
+   the unified **inglec.em** — at which point the self-built native compiler can rebuild itself. **M5l (done,
    fixture `generics.em`) added GENERIC-STRUCT MONOMORPHIZATION** — the biggest remaining language feature and
    the first thing the parser needs (its whole AST is `Box<Expr>` / `Box<Ty>` / `Box<Stmt>`): a generic struct
    gets one runtime sid per distinct instantiation used, numbered after the declared structs and collected in
@@ -827,7 +827,7 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    AEK 11, is a scalar, not a refcounted single-Value like a `[string]`) — the keystone that resolved a real
    struct-over-clone bug via a `fn_ret_elem_struct` table for `[Struct]`-returning methods. **M5r (codegen,
    4050 lines)** was ~14 hunks: FLOAT literals (`EFloat` → `FLOAT_VAL`; the corpus's only float literal is 0.0,
-   where Ember's `%g` interpolation coincides with stage-0's `%.17g`); `[float]` element kind; a float array
+   where Ingle's `%g` interpolation coincides with stage-0's `%.17g`); `[float]` element kind; a float array
    element renders at kind 9 (`aek_to_render_kind`); and a BORROWED array stored into a container is
    own_into_slot-CLONED (moves_local==2 — arrays are unique-owner, so the container gets an independent copy).
    Deferred: a SCALAR generic type arg (Box<int> — packed, unused by the compiler), Option/Result generic ENUMs,
@@ -849,7 +849,7 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    regenerates an identical copy of itself. `make selfhost` 1209/0, verified macOS clang + Linux gcc (Docker).
    Orthogonal
    follow-up: float-literal emission needs a `%.17g` builtin
-   (Ember interpolation is `%g`, so `FLOAT_VAL` can't be produced from a bare `{f}`). OFI-166 (the C
+   (Ingle interpolation is `%g`, so `FLOAT_VAL` can't be produced from a bare `{f}`). OFI-166 (the C
    operand-eval-order discipline — sequence side-effecting subexpressions into ordered statements; gcc
    evaluates a binop/call's operands right-to-left where clang/the VM go left-to-right) is observed
    throughout, verified on Linux gcc via Docker before each push. After structs: enums/match, then
