@@ -67,12 +67,21 @@ fn seen_has(seen: [string], p: string) -> bool {
 }
 
 
+// Loaded is the merged program: the flat decl list plus each decl's owning MODULE index (BFS load order),
+// so codegen can resolve an unqualified free-fn call to its same-module definition.
+struct Loaded {
+    decls: [ps.Decl]
+    mod_of: [int]
+}
+
+
 // load_modules parses the entry module and every module it transitively imports, BFS over imports, deduped
 // by resolved path, returning the merged declaration list ([entry decls, import1 decls, …]).
-fn load_modules(entry: string) -> [ps.Decl] {
+fn load_modules(entry: string) -> Loaded {
     var seen: [string] = []
     var queue: [string] = []
     var combined: [ps.Decl] = []
+    var mod_of: [int] = []
     seen.append(entry)
     queue.append(entry)
     var qi = 0
@@ -87,6 +96,7 @@ fn load_modules(entry: string) -> [ps.Decl] {
                 break
             }
             combined.append(decls[di])
+            mod_of.append(qi)                    // this decl's owning module = its BFS load order (matches stage-0)
             di = di + 1
         }
         var ii = 0
@@ -109,7 +119,7 @@ fn load_modules(entry: string) -> [ps.Decl] {
         }
         qi = qi + 1
     }
-    return combined
+    return Loaded { decls: combined, mod_of: mod_of }
 }
 
 
@@ -119,13 +129,13 @@ fn main() -> int {
         println("usage: emberc --emit=run selfhost/codegen_dump.em <file.em>")
         return 1
     }
-    let decls = load_modules(argv[0])
-    let fn_names = cg.build_fn_names(decls)
-    let structs = cg.build_structs(decls)
-    let enums = cg.build_enums(decls, structs)
-    let fn_rets = cg.build_fn_rets(decls, structs, enums.e_names)
-    let globals = cg.build_globals(decls)
-    let instances = cg.build_struct_instances(decls, structs.names)
-    cg.disassemble_program(decls, fn_names, fn_rets, structs, enums, globals, instances)
+    let lm = load_modules(argv[0])
+    let fn_names = cg.build_fn_names(lm.decls)
+    let structs = cg.build_structs(lm.decls)
+    let enums = cg.build_enums(lm.decls, structs)
+    let fn_rets = cg.build_fn_rets(lm.decls, structs, enums.e_names)
+    let globals = cg.build_globals(lm.decls)
+    let instances = cg.build_struct_instances(lm.decls, structs.names)
+    cg.disassemble_program(lm.decls, lm.mod_of, fn_names, fn_rets, structs, enums, globals, instances)
     return 0
 }

@@ -16,6 +16,7 @@ import "serialize" as sz
 struct Loaded {
     decls: [ps.Decl]
     sources: [string]
+    mod_of: [int]
 }
 
 
@@ -77,6 +78,7 @@ fn load_modules(entry: string) -> Loaded {
     var queue: [string] = []
     var combined: [ps.Decl] = []
     var sources: [string] = []
+    var mod_of: [int] = []
     seen.append(entry)
     queue.append(entry)
     var qi = 0
@@ -92,6 +94,7 @@ fn load_modules(entry: string) -> Loaded {
             }
             combined.append(decls[di])
             sources.append(queue[qi])
+            mod_of.append(qi)
             di = di + 1
         }
         var ii = 0
@@ -114,7 +117,7 @@ fn load_modules(entry: string) -> Loaded {
         }
         qi = qi + 1
     }
-    return Loaded { decls: combined, sources: sources }
+    return Loaded { decls: combined, sources: sources, mod_of: mod_of }
 }
 
 
@@ -127,7 +130,7 @@ fn main() -> int {
     let entry = argv[0]
     let out = argv[1]
     let loaded = load_modules(entry)
-    sz.serialize_program(loaded.decls, loaded.sources, out)
+    sz.serialize_program(loaded.decls, loaded.mod_of, loaded.sources, out)
     exit(0)
     return 0
 }

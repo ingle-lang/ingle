@@ -506,6 +506,7 @@ fn count_functions(decls: [ps.Decl]) -> int {
 // summing ch.lifted.len()) so the instance base is known before the function table is emitted — identical to
 // codegen.disassemble_program's pass 0. Needed because the .emb header carries func_count up front.
 fn count_lifted_lambdas(decls: [ps.Decl], fn_names: [string], fn_rets: cg.FnRets, structs: cg.StructTable, enums: cg.EnumTable, globals: cg.GlobalConsts, instances: [string], gf: cg.GenFns, wit: cg.WitInfo) -> int {
+    let no_mods: [int] = []              // module-local resolution is disabled in the .emb path (global fallback)
     var no_caps: [cg.CaptureFlag] = []
     var no_keys: [string] = []
     var total = 0
@@ -523,7 +524,7 @@ fn count_lifted_lambdas(decls: [ps.Decl], fn_names: [string], fn_rets: cg.FnRets
                         break
                     }
                     if methods[mi].has_body {
-                        let ch = cg.compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid, fn_names.len(), no_caps, gf.names, gf.pquals, no_keys, fn_names.len(), wit, false)
+                        let ch = cg.compile_fn(methods[mi], fn_names, no_mods, 0 - 1, fn_rets, structs, enums, globals, instances, sid, fn_names.len(), no_caps, gf.names, gf.pquals, no_keys, fn_names.len(), wit, false)
                         total = total + ch.lifted.len()
                     }
                     mi = mi + 1
@@ -532,7 +533,7 @@ fn count_lifted_lambdas(decls: [ps.Decl], fn_names: [string], fn_rets: cg.FnRets
             }
             case DFn(f) {
                 if f.has_body {
-                    let ch = cg.compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, fn_names.len(), no_caps, gf.names, gf.pquals, no_keys, fn_names.len(), wit, false)
+                    let ch = cg.compile_fn(f, fn_names, no_mods, 0 - 1, fn_rets, structs, enums, globals, instances, 0 - 1, fn_names.len(), no_caps, gf.names, gf.pquals, no_keys, fn_names.len(), wit, false)
                     total = total + ch.lifted.len()
                 }
             }
@@ -550,6 +551,7 @@ fn count_lifted_lambdas(decls: [ps.Decl], fn_names: [string], fn_rets: cg.FnRets
 // numbering matches. A lambda's arity is its capture count plus its declared param count (captures are its
 // leading slots).
 fn emit_lifted_chunks(mut w: Writer, ch: cg.Chunk, source: string, fn_names: [string], fn_rets: cg.FnRets, structs: cg.StructTable, enums: cg.EnumTable, globals: cg.GlobalConsts, instances: [string], gf: cg.GenFns, inst_keys: [string], inst_base: int, wit: cg.WitInfo) {
+    let no_mods: [int] = []              // module-local resolution is disabled in the .emb path (global fallback)
     var li = 0
     loop {
         if li >= ch.lifted.len() {
@@ -558,15 +560,17 @@ fn emit_lifted_chunks(mut w: Writer, ch: cg.Chunk, source: string, fn_names: [st
         w.emit_str("<lambda>")
         w.emit_optstr(source)
         w.emit_uvarint(ch.lifted[li].caps.len() + ch.lifted[li].decl.params.len())
-        let lch = cg.compile_fn(ch.lifted[li].decl, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, 0, ch.lifted[li].caps, gf.names, gf.pquals, inst_keys, inst_base, wit, false)
+        let lch = cg.compile_fn(ch.lifted[li].decl, fn_names, no_mods, 0 - 1, fn_rets, structs, enums, globals, instances, 0 - 1, 0, ch.lifted[li].caps, gf.names, gf.pquals, inst_keys, inst_base, wit, false)
         w.emit_chunk(lch)
         li = li + 1
     }
 }
 
 
-fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
+fn serialize_program(decls: [ps.Decl], mod_of: [int], sources: [string], out_path: string) {
+    let no_mods: [int] = []              // global fallback for instances/lambdas (their module is inert)
     let fn_names = cg.build_fn_names(decls)
+    let fn_mods = cg.build_fn_modules(decls, mod_of)
     let structs = cg.build_structs(decls)
     let enums = cg.build_enums(decls, structs)
     let fn_rets = cg.build_fn_rets(decls, structs, enums.e_names)
@@ -654,7 +658,7 @@ fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
                         w.emit_str(name + "." + methods[mi].name)
                         w.emit_optstr(sources[i])
                         w.emit_uvarint(methods[mi].params.len())
-                        let ch = cg.compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid, lambda_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, false)
+                        let ch = cg.compile_fn(methods[mi], fn_names, fn_mods, cg.mod_at(mod_of, i), fn_rets, structs, enums, globals, instances, sid, lambda_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, false)
                         w.emit_chunk(ch)
                         lambda_base = lambda_base + ch.lifted.len()
                     }
@@ -667,7 +671,7 @@ fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
                     w.emit_str(f.name)
                     w.emit_optstr(sources[i])
                     w.emit_uvarint(f.params.len())
-                    let ch = cg.compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, lambda_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, false)
+                    let ch = cg.compile_fn(f, fn_names, fn_mods, cg.mod_at(mod_of, i), fn_rets, structs, enums, globals, instances, 0 - 1, lambda_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, false)
                     w.emit_chunk(ch)
                     lambda_base = lambda_base + ch.lifted.len()
                 }
@@ -693,7 +697,7 @@ fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
                         break
                     }
                     if methods[mi].has_body {
-                        let ch = cg.compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sid2, lb2, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, false)
+                        let ch = cg.compile_fn(methods[mi], fn_names, fn_mods, cg.mod_at(mod_of, j), fn_rets, structs, enums, globals, instances, sid2, lb2, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, false)
                         emit_lifted_chunks(w, ch, sources[j], fn_names, fn_rets, structs, enums, globals, instances, gf, insts.keys, inst_base, wit)
                         lb2 = lb2 + ch.lifted.len()
                     }
@@ -703,7 +707,7 @@ fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
             }
             case DFn(f) {
                 if f.has_body {
-                    let ch = cg.compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, lb2, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, false)
+                    let ch = cg.compile_fn(f, fn_names, fn_mods, cg.mod_at(mod_of, j), fn_rets, structs, enums, globals, instances, 0 - 1, lb2, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, false)
                     emit_lifted_chunks(w, ch, sources[j], fn_names, fn_rets, structs, enums, globals, instances, gf, insts.keys, inst_base, wit)
                     lb2 = lb2 + ch.lifted.len()
                 }
@@ -733,7 +737,7 @@ fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
                         w.emit_str(f.name)
                         w.emit_optstr(sources[di])
                         w.emit_uvarint(f.params.len())
-                        let ich = cg.compile_fn(f, fn_names, fn_rets, structs, enums, globals, instances, 0 - 1, inst_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, true)
+                        let ich = cg.compile_fn(f, fn_names, no_mods, 0 - 1, fn_rets, structs, enums, globals, instances, 0 - 1, inst_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, true)
                         w.emit_chunk(ich)
                     }
                 }
@@ -747,7 +751,7 @@ fn serialize_program(decls: [ps.Decl], sources: [string], out_path: string) {
                             w.emit_str(name + "." + methods[mi].name)
                             w.emit_optstr(sources[di])
                             w.emit_uvarint(methods[mi].params.len())
-                            let ich = cg.compile_fn(methods[mi], fn_names, fn_rets, structs, enums, globals, instances, sidp, inst_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, true)
+                            let ich = cg.compile_fn(methods[mi], fn_names, no_mods, 0 - 1, fn_rets, structs, enums, globals, instances, sidp, inst_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, true)
                             w.emit_chunk(ich)
                         }
                         mi = mi + 1

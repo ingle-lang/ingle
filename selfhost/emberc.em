@@ -31,6 +31,7 @@ import "serialize" as sz
 struct Loaded {
     decls: [ps.Decl]
     sources: [string]
+    mod_of: [int]               // each decl's owning module index (BFS order) — for module-local fn resolution
 }
 
 
@@ -98,6 +99,7 @@ fn load_modules(entry: string) -> Loaded {
     var queue: [string] = []
     var combined: [ps.Decl] = []
     var sources: [string] = []
+    var mod_of: [int] = []
     seen.append(entry)
     queue.append(entry)
     var qi = 0
@@ -113,6 +115,7 @@ fn load_modules(entry: string) -> Loaded {
             }
             combined.append(decls[di])
             sources.append(queue[qi])
+            mod_of.append(qi)                    // this decl's owning module = its BFS load order
             di = di + 1
         }
         var ii = 0
@@ -135,21 +138,21 @@ fn load_modules(entry: string) -> Loaded {
         }
         qi = qi + 1
     }
-    return Loaded { decls: combined, sources: sources }
+    return Loaded { decls: combined, sources: sources, mod_of: mod_of }
 }
 
 
 // emit_program codegens every function of every module (merged decls) and prints its disassembly, in
 // stage-0's `--emit=bytecode` format — a struct's methods are emitted as `Struct.method` in declaration
 // order so CALL indices line up.
-fn emit_program(decls: [ps.Decl]) {
+fn emit_program(decls: [ps.Decl], mod_of: [int]) {
     let fn_names = cg.build_fn_names(decls)
     let structs = cg.build_structs(decls)
     let enums = cg.build_enums(decls, structs)
     let fn_rets = cg.build_fn_rets(decls, structs, enums.e_names)
     let globals = cg.build_globals(decls)
     let instances = cg.build_struct_instances(decls, structs.names)
-    cg.disassemble_program(decls, fn_names, fn_rets, structs, enums, globals, instances)
+    cg.disassemble_program(decls, mod_of, fn_names, fn_rets, structs, enums, globals, instances)
 }
 
 
@@ -171,9 +174,9 @@ fn main() -> int {
         //    print the `--emit=bytecode` disassembly (the differential path, byte-identical to stage 0).
         let loaded = load_modules(entry)
         if argv.len() >= 2 {
-            sz.serialize_program(loaded.decls, loaded.sources, argv[1])
+            sz.serialize_program(loaded.decls, loaded.mod_of, loaded.sources, argv[1])
         } else {
-            emit_program(loaded.decls)
+            emit_program(loaded.decls, loaded.mod_of)
         }
     }
     // `exit` sets the real process code AND suppresses the runtime's `=> N` echo, so emberc-self's output
