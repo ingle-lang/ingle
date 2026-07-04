@@ -1,11 +1,11 @@
-# The Ember Manifesto
+# The Ingle Manifesto
 
 *Design philosophy and founding decisions. Draft 1 — June 2026.*
 
-Ember is a statically-typed, brace-delimited systems language. This document records **what
+Ingle is a statically-typed, brace-delimited systems language. This document records **what
 we learned from the languages that came before us** — chiefly Rust, the defining systems
 language of this era — and **the deliberate choices we are making in response.** Every
-language-design decision in Ember should trace back to a principle here.
+language-design decision in Ingle should trace back to a principle here.
 
 ---
 
@@ -25,7 +25,7 @@ By 2026 the systems-language conversation is dominated by three poles:
 - **Go** — still the productivity champion for networked services: trivial concurrency, fast
   compiles, a real GC. The cost is runtime overhead and less control.
 
-Ember's thesis: **Rust proved the destination (compile-time safety, zero-cost abstractions)
+Ingle's thesis: **Rust proved the destination (compile-time safety, zero-cost abstractions)
 is right, but the road there is harder than it needs to be.** We aim for Rust-grade safety
 with something much closer to Go/Zig-grade *approachability and iteration speed.*
 
@@ -33,39 +33,39 @@ with something much closer to Go/Zig-grade *approachability and iteration speed.
 
 ## 2. What Rust got right (we keep these)
 
-These are settled questions. Ember does not relitigate them.
+These are settled questions. Ingle does not relitigate them.
 
 1. **Memory safety without a GC, enforced at compile time.** Ownership-based lifetime
    management eliminates use-after-free, double-free, null-deref, and data races as a *class*.
-   This is Rust's central victory and Ember's non-negotiable baseline.
+   This is Rust's central victory and Ingle's non-negotiable baseline.
 2. **Zero-cost abstractions.** High-level constructs that compile to code as tight as
    hand-written low-level code. No runtime tax for expressiveness.
 3. **Sum types + exhaustive pattern matching.** `enum`/`match` (algebraic data types) are the
-   single most-loved feature of modern languages. Ember has them as first-class citizens.
+   single most-loved feature of modern languages. Ingle has them as first-class citizens.
 4. **Errors as values, not exceptions.** A `Result`-style type forces callers to acknowledge
    failure. No invisible non-local control flow.
 5. **No null.** Optionality is an explicit type (`Option`-style), not a hole in every
    reference.
 6. **Immutable by default.** Mutability is opt-in and visible.
 7. **First-class tooling as part of the language, not an afterthought.** Cargo is half of why
-   Rust succeeded. Ember ships its build system, package manager, formatter, and test runner
+   Rust succeeded. Ingle ships its build system, package manager, formatter, and test runner
    *in the box, from day one,* with one canonical way to do each.
 8. **Safety-by-default with an explicit escape hatch.** Rust's `unsafe` is the right model: a
-   small, greppable, auditable region where you take the wheel. Ember keeps this.
+   small, greppable, auditable region where you take the wheel. Ingle keeps this.
 
 ---
 
 ## 3. What Rust got wrong (we improve on these)
 
 Drawn from the Rust team's own 2026 retrospective and the wider 2025–2026 critique. These are
-Ember's reasons to exist.
+Ingle's reasons to exist.
 
 ### 3.1 The borrow checker is too steep, too early
 New Rust developers spend **weeks to months "fighting the borrow checker"**; code that's
 correct in C/Go/Python gets rejected for reasons newcomers have never had to think about.
 Experts stop complaining — but the funnel loses people before they become experts.
 
-> **Ember's answer:** Safety must be *progressively disclosed*. A beginner should write
+> **Ingle's answer:** Safety must be *progressively disclosed*. A beginner should write
 > correct, safe programs on day one without learning lifetime theory. Lifetimes/regions
 > exist, but explicit lifetime *annotations* are the rare exception, not a daily tax —
 > inference does the work, and the common patterns (tree-shaped ownership, function-local
@@ -79,7 +79,7 @@ ceremony; the ecosystem fragmented around runtimes (Tokio won by momentum; async
 discontinued in 2025); and you **lose the stack trace** when debugging. Async Rust "has many
 more rough edges than sync Rust and requires a different mindset."
 
-> **Ember's answer:** Concurrency is a *language* concern, not a library concern, and there is
+> **Ingle's answer:** Concurrency is a *language* concern, not a library concern, and there is
 > **one** runtime, in the standard library. We favor a model without function coloring —
 > lightweight tasks / structured concurrency where a normal function can be suspended by the
 > scheduler (Go-goroutine / green-thread ergonomics) — so there is no async/sync split to
@@ -91,7 +91,7 @@ more rough edges than sync Rust and requires a different mindset."
 30–120s for medium projects, 5–10 min clean builds on large dependency trees. Even the Rust
 team flags this as a future scaling risk; it's especially painful for GUI/visual iteration.
 
-> **Ember's answer:** **Fast iteration is a design constraint, not a nice-to-have.** We design
+> **Ingle's answer:** **Fast iteration is a design constraint, not a nice-to-have.** We design
 > the language to be cheaply compilable: a clean module/compilation-unit boundary,
 > incremental-by-default builds, a fast debug path that prioritizes build speed over runtime
 > speed, and we resist language features whose cost is paid in compile time across the whole
@@ -101,7 +101,7 @@ team flags this as a future scaling risk; it's especially painful for GUI/visual
 Async complexity, trait/lifetime interactions, and accreted features make the language large.
 "Simple business logic that should take an hour takes half a day."
 
-> **Ember's answer:** Bias toward **one obvious way** (Go's discipline) over **every powerful
+> **Ingle's answer:** Bias toward **one obvious way** (Go's discipline) over **every powerful
 > way** (C++/Rust's accretion). New features must pay for their complexity budget. We'd rather
 > ship a smaller language people hold entirely in their heads than a maximal one they navigate
 > by IDE.
@@ -109,7 +109,7 @@ Async complexity, trait/lifetime interactions, and accreted features make the la
 ### 3.5 Ecosystem trust & maturity is unguided
 Users struggle to pick "trustworthy, appropriate crates"; whole industries lack mature support.
 
-> **Ember's answer:** A curated, versioned **standard library that's actually batteries-
+> **Ingle's answer:** A curated, versioned **standard library that's actually batteries-
 > included** (the things every program needs — collections, async runtime, HTTP, JSON, time,
 > randomness — are blessed and in-tree), reducing how often you reach into an unvetted
 > dependency at all. Package provenance and a trust signal are first-class in the package
@@ -117,7 +117,7 @@ Users struggle to pick "trustworthy, appropriate crates"; whole industries lack 
 
 ---
 
-## 4. Ember's founding principles (the firm choices)
+## 4. Ingle's founding principles (the firm choices)
 
 1. **Safe by default, simple by default, fast to build — pick all three.** If a feature
    forces a trade among safety, approachability, and iteration speed, that's a design smell;
@@ -219,7 +219,7 @@ width family and `float` land with the value-model expansion, but the model is f
 doesn't have to be retrofitted.*
 
 **Integer overflow traps** (aborts with a runtime error) rather than silently wrapping or
-invoking undefined behaviour — the safety-first default, matching Ember's correctness focus
+invoking undefined behaviour — the safety-first default, matching Ingle's correctness focus
 (Swift, and Rust in debug, do the same). Explicit wrapping operations and a faster
 wrap-in-release mode are possible later; trapping is the floor. *Decided & implemented June 2026
 (via overflow-checked arithmetic; `float` runs as f64, `int` as i64, no implicit int↔float
@@ -227,20 +227,20 @@ coercion).*
 
 ## 5b. Syntax & the LLM-first principle — *decided June 2026*
 
-**Ember's primary audience is an LLM with no prior Ember training, then humans.** Coding is
-moving to AI; we design for the model that has never seen Ember but has read every other
+**Ingle's primary audience is an LLM with no prior Ingle training, then humans.** Coding is
+moving to AI; we design for the model that has never seen Ingle but has read every other
 language.
 
 **Governing principle — "least surprise, for the model":** a zero-shot LLM predicts semantics
 from surface syntax using priors from existing languages. The correct keyword/form is the one
-whose cross-language *connotation matches Ember's actual behavior.* Where connotation and
+whose cross-language *connotation matches Ingle's actual behavior.* Where connotation and
 behavior agree, zero-shot generation is correct; where they conflict, the syntax lures the
 model into bugs. This principle outranks both FROG continuity and brevity.
 
 Decisions that follow from it (all embodied in [examples/](examples/)):
 
 - **`match` / `case`** for pattern matching — *not* `switch`. `switch` carries a strong prior
-  of fallthrough / `break` / `default` / non-exhaustive value-compare, all false in Ember;
+  of fallthrough / `break` / `default` / non-exhaustive value-compare, all false in Ingle;
   `match` correctly connotes exhaustive, no-fallthrough, pattern-binding. We keep FROG's `case`
   arm keyword (knowledge preserved) and only replace the misleading head keyword.
 - **Keyword ownership model** — borrow immutably by default (no annotation), `mut` for a
@@ -254,7 +254,7 @@ Decisions that follow from it (all embodied in [examples/](examples/)):
   *parameter*, not the type. (Earlier drafts put it on the type for named params; that was
   inconsistent with `mut self` and is fixed.)
 - **Interface conformance is nominal and explicit, via `implements`** — `struct User implements
-  Ord, Eq { … }`. Ember does not infer conformance structurally (Go-style): an explicit
+  Ord, Eq { … }`. Ingle does not infer conformance structurally (Go-style): an explicit
   declaration gives better diagnostics (§3.5) and is unambiguous for a zero-shot model, and a
   dedicated keyword beats overloading `:` (already used for `field: type` and `T: Bound`).
   Conformance is declared in the type header, not in separate `impl` blocks; retroactive
@@ -276,7 +276,7 @@ Decisions that follow from it (all embodied in [examples/](examples/)):
   are where types matter most to humans and models, so they are mandatory; local `let`/`var`
   may use inference.
 - **`{name}` string interpolation**, `->` return types, braces for all blocks.
-- **No statement terminators — newlines are significant (Go-style).** Ember has no
+- **No statement terminators — newlines are significant (Go-style).** Ingle has no
   semicolons (the examples never use them). The lexer emits an implicit terminator at a line
   break only when the line's last token can end a statement (identifier, literal, `)`, `]`,
   `}`, `?`, or `return`/`break`/`continue`); after a token that implies continuation (an
@@ -286,12 +286,12 @@ Decisions that follow from it (all embodied in [examples/](examples/)):
 
 ## 5c. Execution model & build method — *decided June 2026*
 
-Ember compiles to **bytecode executed by a stack VM**. It is not a tree-walking interpreter —
+Ingle compiles to **bytecode executed by a stack VM**. It is not a tree-walking interpreter —
 the goal is compiled-language speed, and a tree-walker would be both throwaway and a second
 backend to keep in lockstep. There is **one backend**.
 
-*Amended June 2026 (native backend).* Ember now also has a **native release path**: a second
-lowering, AST→C, that emits a standalone binary (`emberc -o`). This does **not** reopen the
+*Amended June 2026 (native backend).* Ingle now also has a **native release path**: a second
+lowering, AST→C, that emits a standalone binary (`inglec -o`). This does **not** reopen the
 dual-backend trap above. The rule that earns the lesson is narrower than "one backend" — it is
 **one front-end and one reference semantics**: the lexer/parser/checker are shared, and the **VM
 remains canonical** (it is what `--check`/`--replay`/`--prove`/`--trace` run, and what the native
@@ -305,7 +305,7 @@ is a later concern and just more surface to keep in sync).
 
 **Method — the walking skeleton.** We learned from FROG that building the whole language as an
 interpreter and *then* bolting on a VM causes a painful retrofit, dual-backend drift, and
-opcode staleness. So Ember grows the **entire pipeline end-to-end from a trivial subset
+opcode staleness. So Ingle grows the **entire pipeline end-to-end from a trivial subset
 outward**: every feature is added through *all* stages in one slice and is not "done" until it
 executes. The front-end can never get ahead of the backend.
 
@@ -325,11 +325,11 @@ executes. The front-end can never get ahead of the backend.
 through from the start rather than retrofitted (the FROG `--tape` lesson: bolted on late, it
 could only observe coarse, pre-existing checkpoints). The `Chunk` carries a **source line
 table** (instruction → source line) filled by codegen, and the VM's dispatch loop fires one
-**observer-only** event per instruction to an optional sink (NULL = ~zero cost). `emberc --tape`
+**observer-only** event per instruction to an optional sink (NULL = ~zero cost). `inglec --tape`
 (alias `--emit=trace`) records the execution **tape** as JSON-Lines — `{ip, op, line, stack}`
 per step — source-correlated and growing automatically with every opcode. For an LLM-first
 language this is a feature, not just a debug tool. Richer *semantic* events (error propagation,
-`nursery` task lifecycle, `?` boundaries) and user-registerable hooks (an Ember function
+`nursery` task lifecycle, `?` boundaries) and user-registerable hooks (an Ingle function
 subscribing, FROG-style) layer onto the same seam as those features land; we don't design the
 event catalogue up front.
 
@@ -364,7 +364,7 @@ forward FROG's convention rather than discarding hard-won familiarity.
 ## 5e. Contracts & machine-verifiable specification — *decided June 2026*
 
 **Functions may carry executable contracts — `requires` preconditions and `ensures`
-postconditions — and this is Ember's flagship differentiator.** A contract is an ordinary
+postconditions — and this is Ingle's flagship differentiator.** A contract is an ordinary
 bool expression written between the signature and the body; `ensures` clauses may name
 `result`, the return value:
 
@@ -383,9 +383,9 @@ fn clamp(x: int, lo: int, hi: int) -> int
 **Why this, and why now — the reason traces to §5b (LLM-first).** Coding is moving to AI, and the
 2025–26 evidence is blunt: LLMs generate Python well because its syntax is free, and generate
 Rust poorly because *its ownership/mutability syntax is hard for a model to comprehend and
-produce*. Ember's bet is to be the first language that is **both** memory-safe-without-GC **and**
+produce*. Ingle's bet is to be the first language that is **both** memory-safe-without-GC **and**
 LLM-legible. Contracts complete that bet, because the AI-native-language frontier converges on two
-requirements: **structured tracing as a first-class effect** (Ember already has it — §5c, the
+requirements: **structured tracing as a first-class effect** (Ingle already has it — §5c, the
 tape) and **every function carrying a formal specification** — because a model is far better at
 checking *"does this implementation satisfy this constraint?"* than *"does this code match this
 vague comment?"*. Contracts are that specification, and fused with the tape they close a loop **no
@@ -409,7 +409,7 @@ for AI authorship.
   elided. This is §4.1 ("safe, simple, fast to build — pick all three") applied: correctness in
   development, no tax in production.
 - **Contracts are bool expressions** that may call ordinary predicate functions (`is_sorted(xs)`),
-  so the spec language *is* Ember — nothing new for a model to learn. They should read, not mutate
+  so the spec language *is* Ingle — nothing new for a model to learn. They should read, not mutate
   (a borrow-only discipline); enforced purity, struct invariants, `old(x)` pre-state, and static
   proof of the clauses we can discharge are deliberate later layers, not the foundation.
 
@@ -428,46 +428,46 @@ copyable, so it may be aliased and returned by value without `move`. `Copy` is w
 bound and composes (`T: Ord + Copy`); it is a *contextual marker*, not a keyword (zero keyword
 surface, §3.4). At a call, a non-copyable argument for a `Copy` parameter is a clean error.
 
-**The Ember-native part:** `Copy` means **every type *except* a struct or array.** Scalars copy
+**The Ingle-native part:** `Copy` means **every type *except* a struct or array.** Scalars copy
 bitwise; strings, enums, and closures are immutable and reference-counted, so "copying" one is a
 cheap, sound `incref`. Only the unique-owner *aggregates* are non-`Copy`. This is broader and
-simpler than Rust's `Copy` (which excludes `String`), and it falls out of Ember's value model:
+simpler than Rust's `Copy` (which excludes `String`), and it falls out of Ingle's value model:
 the move/Copy split is exactly the unique-owner / shareable split the runtime already draws. This
-is the concrete shape of the **mutable value semantics** Ember shares with the post-Rust frontier
+is the concrete shape of the **mutable value semantics** Ingle shares with the post-Rust frontier
 — ownership safety with no lifetime annotations, now sound through generics.
 
 ## 5g. Graphics & the native backend — *decided June 2026*
 
-**Ember does graphics, and it does them immediate-mode.** This is a deliberate bet that the place
+**Ingle does graphics, and it does them immediate-mode.** This is a deliberate bet that the place
 Rust most visibly fails — GUI — is where an LLM-first language can most visibly win.
 
 **Why immediate-mode.** A UI is graph-shaped, shared, mutable state, which is the single worst case
-for *any* ownership model (Rust's borrow checker and Ember's move/borrow alike). Rust's GUIs
+for *any* ownership model (Rust's borrow checker and Ingle's move/borrow alike). Rust's GUIs
 converged on immediate-mode (egui) precisely because it sidesteps that: the UI is a **pure function
-of state that exists for one frame** — no retained widget tree, no `Rc<RefCell>` graph. For Ember
+of state that exists for one frame** — no retained widget tree, no `Rc<RefCell>` graph. For Ingle
 this is doubly right: (1) it keeps the ownership model (§5, §5f) clean — the graph-shaped state
 that fights every borrow checker simply never appears; (2) it is the most LLM-legible shape there
 is — `if ui.button("Save") { save() }`, no callbacks-with-lifetimes, no widget lifecycle, app state
-is just plain Ember values the loop owns. Retained-mode trees with event handlers are exactly the
+is just plain Ingle values the loop owns. Retained-mode trees with event handlers are exactly the
 lifetime-entangled code LLMs fail at — the same reason they fail at Rust.
 
-**Architecture — Ember describes, C renders.** The heavy work (layout, GPU, the OS event pump)
-lives in native C; Ember only *describes* each frame, so 60fps stays reachable on the bytecode VM
-(the Dear ImGui model). Ember drives the loop itself (`loop { if win.should_close() break; …
+**Architecture — Ingle describes, C renders.** The heavy work (layout, GPU, the OS event pump)
+lives in native C; Ingle only *describes* each frame, so 60fps stays reachable on the bytecode VM
+(the Dear ImGui model). Ingle drives the loop itself (`loop { if win.should_close() break; …
 draw … }`) rather than a host callback — the loop body *is* the frame, the most legible shape — and
 input is **polled and returned as values** (`key_down(k) -> bool`), never callback-registered, in
-keeping with Ember's "errors are values, no hidden control flow."
+keeping with Ingle's "errors are values, no hidden control flow."
 
-**The backend is a single, blessed, in-tree dependency, hidden behind an Ember API.** Per §3.5
-(batteries-included, not a pile of unvetted crates), Ember reaches the screen through **one**
+**The backend is a single, blessed, in-tree dependency, hidden behind an Ingle API.** Per §3.5
+(batteries-included, not a pile of unvetted crates), Ingle reaches the screen through **one**
 curated C library — **raylib** — exposed as native primitives, exactly like `print`/`read_file`.
-This is Ember's first third-party C dependency, taken deliberately. Text is rendered with a real
+This is Ingle's first third-party C dependency, taken deliberately. Text is rendered with a real
 **embedded TrueType font** (Inter, OFL-1.1, baked into the binary so it stays self-contained and
 zero-install) — not a bitmap font — through the same single `draw_text`/`measure_text` chokepoint,
 so the whole toolkit gets crisp, properly-metricked type for free. Crucially the backend is an
 *implementation detail*: users `import "std/draw"` (primitives) and `import "std/ui"` (immediate-mode
-widgets, layered in Ember on top), never raylib — so the engine is swappable (raylib → SDL3) without
-touching a line of Ember. Graphics is an **opt-in build** (`make graphics`, `-DEMBER_GRAPHICS=1`):
+widgets, layered in Ingle on top), never raylib — so the engine is swappable (raylib → SDL3) without
+touching a line of Ingle. Graphics is an **opt-in build** (`make graphics`, `-DEMBER_GRAPHICS=1`):
 the default compiler stays dependency-free, and the test suite never needs a display.
 
 The superpowers stack: **contracts** verify UI-state invariants — `std/ui`'s `slider` carries an
@@ -499,10 +499,10 @@ Remaining: scroll regions (now just a clip plus a content offset) and a window r
 
 ## 5h. Foreign function interface (C) — *decided June 2026*
 
-Ember prizes an **empty dependency tree** (§3.5, §4) and a self-contained runtime — so calling
+Ingle prizes an **empty dependency tree** (§3.5, §4) and a self-contained runtime — so calling
 into C is a deliberate, bounded door, opened the way the graphics backend was (§5g): in-tree,
 explicit, and not the default path. The decision: a program declares foreign functions in an
-**`extern "c"` block**, naming the C-side signature in ordinary Ember syntax —
+**`extern "c"` block**, naming the C-side signature in ordinary Ingle syntax —
 
 ```ember
 extern "c" {
@@ -512,8 +512,8 @@ extern "c" {
 ```
 
 — and then calls them like any function (`sin(x)`). The `extern` declaration **is the trust
-boundary**: there is no raw `unsafe` block; the signature you write is the contract Ember
-type-checks against, and a mismatch with the real C function is the one place Ember's guarantees
+boundary**: there is no raw `unsafe` block; the signature you write is the contract Ingle
+type-checks against, and a mismatch with the real C function is the one place Ingle's guarantees
 stop (documented as the escape hatch). The reasons this is the right shape: it reads the way a
 zero-shot model expects (§5b — `extern "C"` is the C/C++/Rust convention), it keeps foreign calls
 *visible at the use site* (a declared block, not an ambient import), and it gives the compiler a
@@ -524,28 +524,28 @@ math library** (`libm` is part of the standard C runtime — no new dependency):
 type-checked scalar marshalling, and an `OP_CALL_C` dispatch through an in-tree registry of typed
 wrappers (no `libffi`, no `dlopen` — the empty-tree principle holds). The next brick is **structs
 by value** — exactly where the *C ABI matters*. The dependency-free way to get it **exactly right**:
-**delegate the ABI to the system C compiler.** At the `extern` boundary Ember flattens a struct
+**delegate the ABI to the system C compiler.** At the `extern` boundary Ingle flattens a struct
 argument to its scalar leaves (it already holds all-scalar structs as a flat run of slots — §5c,
 value-types); each registry wrapper reassembles a *concrete C struct* from those leaves and passes
 it **by value**, so the C compiler generates the platform's exact aggregate calling convention
-(arm64 AAPCS64, x86-64 SysV, …) for free, and flattens any struct result back to leaves. So Ember
+(arm64 AAPCS64, x86-64 SysV, …) for free, and flattens any struct result back to leaves. So Ingle
 needs no hand-rolled register/stack marshalling and no C-ABI layout table — the boundary is defined
 by the **leaf scalar sequence**, and the C side owns the ABI.
 
 The third brick — **pointers, buffers, and opaque handles** — extends the same leaf model: a
 `string` passes as a borrowed `const char*`, a packed scalar array (`[u8]`/`[i32]`/…) passes as a
 borrowed buffer (`mut` if C writes it), and an opaque `Ptr` round-trips a C handle (`FILE*`, …) that
-Ember never dereferences. Each is **borrowed for the duration of the call** — Ember keeps ownership
+Ingle never dereferences. Each is **borrowed for the duration of the call** — Ingle keeps ownership
 and frees nothing C owns — so the `extern` block stays the whole trust boundary with no `unsafe`.
 This is enough to bind real C (libc file I/O, string functions). Returning C-owned memory (a
-`char*` Ember must copy or free) and arbitrary dynamic linking remain deliberate future widenings,
+`char*` Ingle must copy or free) and arbitrary dynamic linking remain deliberate future widenings,
 never the default.
 
 A `Ptr` handle is **linear** — used *exactly once* — extending the keyword ownership model (§5) to a
 resource the runtime can't see inside. *At most once:* a closing call takes it `move`, so reuse after
 close is a caught double-free. *At least once:* an owned handle that reaches the end of its scope
 un-closed, on any path, is a compile error — the leak the equivalent C silently commits. The compiler
-proves consume-on-every-path entirely at check time (no runtime cost, no destructor — Ember can't know
+proves consume-on-every-path entirely at check time (no runtime cost, no destructor — Ingle can't know
 a foreign handle's closer); the cost is that a `Ptr` must live in a local and be closed or returned, not
 stashed in a struct/`Option`/`Map`. This is the manifesto's bet in miniature — *least surprise for the
 model* (write the obvious open/use/close and the compiler keeps you honest) over *least typing* — and it
@@ -553,15 +553,15 @@ makes the two oldest FFI footguns, double-close and leak, both unrepresentable.
 
 ## 5i. Capabilities & the agent era — *decided June 2026 (right-sized after a pre-mortem)*
 
-**The agent-era goal:** Ember should let you bound and audit what *model-written, model-run* code is
+**The agent-era goal:** Ingle should let you bound and audit what *model-written, model-run* code is
 allowed to do. A pre-mortem (researching Deno's permission model and WASI's component model) reframed
 *how* to get there, and what to lead with:
 
 - **The sandbox is delivered by the platform, not by pervasive in-language plumbing.** WASI Preview 2 /
   the Component Model is already a capability-based, ambient-authority-free, *polyglot* standard for
   running untrusted code — load a component, grant it exactly the capabilities it needs, at syscall
-  granularity. The cheapest, most-standard way for Ember to "run agent code safely" is therefore to
-  **target WASI/components** (also Ember's portability + interop play) plus a **Deno-style runtime
+  granularity. The cheapest, most-standard way for Ingle to "run agent code safely" is therefore to
+  **target WASI/components** (also Ingle's portability + interop play) plus a **Deno-style runtime
   permission baseline** natively. Building a heavy in-language object-capability system to re-derive
   this would be a chocolate teacup — high ergonomic cost for a benefit the platform already gives.
 - **What in-language capabilities add that the platform can't:** per-module / per-call granularity
@@ -592,7 +592,7 @@ extern "c" uses ffi { fn cvec2_len(v: Vec2) -> f64 }   // the C escape hatch bec
 ```
 
 **Why capabilities, not an effect system — the data settled this.** Row-polymorphic effect systems
-(Koka/Links) reintroduce the exact disease Ember was built to cure: *"adding a new effect deep in the
+(Koka/Links) reintroduce the exact disease Ingle was built to cure: *"adding a new effect deep in the
 call stack requires updating every function signature to the top"* — the async-colouring trap (§3.2)
 generalised. Their inference (row unification) is hard and their errors cryptic (violates §4.5); OCaml
 5 shipped effect *handlers* but **deliberately left effects untyped**; and effect rows are novel syntax
@@ -611,7 +611,7 @@ for OS/WASI sandboxing against genuinely adversarial native code.
 
 ## 5j. The verification & determinism loop — *decided June 2026 (the lead AI-era differentiator)*
 
-**This is the strongest, most universal, most defensible bet for the agent era — and Ember is already
+**This is the strongest, most universal, most defensible bet for the agent era — and Ingle is already
 half-built for it.** The pre-mortem (§5i) found that *running* model code safely is largely a solved,
 platform-level problem (WASI, microVMs); what *every* agent interaction needs, and what no mainstream
 language gives, is a **closed correctness loop**: the model writes code + a machine-checkable
@@ -621,7 +621,7 @@ ergonomic tax** (it's opt-in and the spec doubles as documentation), and is the 
 LLM-first thesis (§5b): the surface the model is *best* at is one with an executable spec and a
 tight feedback signal.
 
-Ember already has the two hard pieces no one else fused:
+Ingle already has the two hard pieces no one else fused:
 - **Executable contracts** (§5e) — `requires`/`ensures`/`result`, debug-checked, release-elided.
 - **The machine-readable execution tape** (§5c) — every run emits structured JSON-Lines events,
   including `contract_violation`.
@@ -631,7 +631,7 @@ The decision is to complete the loop, in bricks, each useful alone:
 1. **`assert(cond [, "msg"])`** — an in-language assertion that lowers to the contract-check
    machinery, so a violation is a structured tape event, not a bare crash. The primitive the rest
    builds on. *(First brick.)*
-2. **Property-based checking driven by contracts** — `emberc --check` (and later a `check` block):
+2. **Property-based checking driven by contracts** — `inglec --check` (and later a `check` block):
    generate inputs that satisfy a function's `requires`, run it, and report the first input that
    violates an `ensures`/`assert` as a tape counterexample. The contract *is* the spec; the tool
    fuzzes it. Scalars first, then structs/arrays; shrinking later.
@@ -642,9 +642,9 @@ The decision is to complete the loop, in bricks, each useful alone:
 4. **Machine-checked contracts (later, opt-in)** — discharge `requires`/`ensures` statically via an
    SMT backend for the fragment that's decidable; fall back to property-checking otherwise.
 
-The payoff: an Ember function carries its spec, gets auto-fuzzed into counterexamples, and any run is
+The payoff: an Ingle function carries its spec, gets auto-fuzzed into counterexamples, and any run is
 replayable — a feedback loop a model closes on its own. *No mainstream language combines an executable
-spec, a structured trace, and deterministic replay; this is Ember's moat.*
+spec, a structured trace, and deterministic replay; this is Ingle's moat.*
 
 ## 5k. Newtypes & refinement types — *decided June 2026 (constraints on data)*
 
@@ -669,7 +669,7 @@ Haskell, Gleam, Rust, and Go — little novelty to mispredict.
   stated once and travels with the value everywhere.
 
 **Honesty about scope (§3.4 — features pay for their complexity).** This is deliberately the
-*decidable, runtime-degradable* band, not liquid/dependent types: the predicate is ordinary Ember,
+*decidable, runtime-degradable* band, not liquid/dependent types: the predicate is ordinary Ingle,
 checked at construction; static *discharge* of that check via the prover is a future bonus, never the
 headline, and the SMT/quantifier completeness chase is explicitly refused (its ergonomics are a
 documented dead end). v1 keeps refinement bases numeric/bool with a pure constructor argument;

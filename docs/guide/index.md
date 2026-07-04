@@ -65,10 +65,10 @@ A few conventions:
 
 ## Running Ingle at all
 
-Ingle programs end in `.em`. You compile and run one with the `inglec` compiler:
+Ingle programs end in `.ig`. You compile and run one with the `inglec` compiler:
 
 ```
-inglec --emit=run hello.em
+inglec --emit=run hello.ig
 ```
 
 That compiles the program *and* executes it, printing any output, then a final line showing
@@ -131,7 +131,7 @@ below, grouped by why you'd reach for it.
 
 | Target | Produces | Notes |
 |--------|----------|-------|
-| `make asan` | `build/inglec-asan` | AddressSanitizer build — running a `.em` program flags use-after-free / overflow with a stack trace. |
+| `make asan` | `build/inglec-asan` | AddressSanitizer build — running a `.ig` program flags use-after-free / overflow with a stack trace. |
 | `make asan-par` | `build/inglec-asan-par` | The same, exercising the cross-thread (parallel) paths. |
 | `make asan-trace` | `build/inglec-trace` | ASan plus the double-drop detector — the "memory tape" of [Chapter 19](/guide/ch-19). |
 

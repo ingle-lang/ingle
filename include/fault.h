@@ -3,7 +3,7 @@
 
 #include <stdio.h>
 
-// A Fault is Ember's ONE structured failure artifact (the campaign in docs/faults.md):
+// A Fault is Ingle's ONE structured failure artifact (the campaign in docs/faults.md):
 // every failure class — a runtime abort, a contract violation, a compile error, an Err
 // reaching main — is meant to converge onto this single record, rendered TWO ways from one
 // source of truth: a HUMAN render (teacher-voice, the familiar stderr stream) and an AGENT

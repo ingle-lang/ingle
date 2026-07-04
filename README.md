@@ -60,8 +60,8 @@ fn main() -> int {
 ```
 
 ```sh
-build/inglec --emit=run hello.em      # run on the VM
-build/inglec -o hello hello.em        # compile a native binary
+build/inglec --emit=run hello.ig      # run on the VM
+build/inglec -o hello hello.ig        # compile a native binary
 ./hello
 ```
 
@@ -72,7 +72,7 @@ build/inglec -o hello hello.em        # compile a native binary
 - [docs/THE_INGLE_BOOK.md](docs/THE_INGLE_BOOK.md) — the long-form guided tour.
 - [docs/architecture.md](docs/architecture.md) — compiler/toolchain engineering decisions.
 - [docs/flare.md](docs/flare.md) — Flare, the declarative UI layer over the graphics backend.
-- [examples/](examples/) — sample `.em` programs.
+- [examples/](examples/) — sample `.ig` programs.
 
 ## Editor support
 

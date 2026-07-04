@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-// The `.emb` container format is specified in docs/design/bytecode-container.md. In brief: a fixed header
+// The `.igb` container format is specified in docs/design/bytecode-container.md. In brief: a fixed header
 // (magic "EMB\x01", format version, VM ABI), a program header (entry index + prelude Result/Option ids),
 // then the struct-type table (field KINDS, not byte offsets — the loader repacks), the enum-variant table,
 // and the function table (per-function chunk: verbatim code bytes, run-length-encoded line/col, an int/float
@@ -132,7 +132,7 @@ int bytecode_write(const CompiledProgram *prog, const char *path) {
     bb_uvarint(&b, (uint64_t)prog->variant_count);
 
     // Struct-type table: per field we store the KIND + nested-inline id + name; the loader recomputes
-    // offset[]/total_size (so this stays valid for an Ember serializer that has kinds but not offsets).
+    // offset[]/total_size (so this stays valid for an Ingle serializer that has kinds but not offsets).
     for (int s = 0; s < prog->struct_count; s++) {
         const StructType *st = &prog->structs[s];
         bb_str(&b, st->name);
@@ -169,9 +169,9 @@ int bytecode_write(const CompiledProgram *prog, const char *path) {
 
         // Line table, run-length-encoded (a whole instruction shares one line). Count runs, then emit each
         // as {run length, line}. Phase 1 is LINE-precise, not column-precise: the self-hosted codegen
-        // tracks per-node lines but not columns, so storing lines only is what lets an Ember serializer be
+        // tracks per-node lines but not columns, so storing lines only is what lets an Ingle serializer be
         // byte-identical to stage 0 (docs/design/bytecode-container.md). Columns default to 0 at load — a
-        // Fault from a `.emb` is line-precise; the col is restorable later via a col-tracking pass.
+        // Fault from a `.igb` is line-precise; the col is restorable later via a col-tracking pass.
         size_t run_count = 0;
         for (size_t i = 0; i < ch->code_len; ) {
             int line = ch->lines ? ch->lines[i] : 0;

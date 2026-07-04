@@ -152,7 +152,7 @@ one without learning lifetime theory. Ingle keeps ownership — values move, bor
 default, mutation is opt-in — but there are no lifetime annotations to write, no `&`/`&mut`
 sigils, and the common tree-shaped patterns need zero ceremony. Where data is genuinely
 graph-shaped, the sanctioned tools are a generational
-[`std/slotmap`](https://github.com/ingle-lang/ingle-lang/blob/main/std/slotmap.em) and a
+[`std/slotmap`](https://github.com/ingle-lang/ingle-lang/blob/main/std/slotmap.ig) and a
 deeply-immutable `rc struct`, rather than an escalating fight with a borrow checker. The dangerous
 direction — a move — is the one you must type.
 
@@ -247,7 +247,7 @@ ramp after the type-check — a native backend that emits C — but the shape is
 with the file that owns each arrow:
 
 ```
-  source text (.em)
+  source text (.ig)
       │   lexer      src/lexer.c     characters  → tokens
       ▼
   tokens
@@ -271,10 +271,10 @@ documents them in its own `--help` text, which is worth quoting as it appears in
 
 ```c
                 "usage:\n"
-                "  inglec <file.em>                inspect/compile a source file (default --emit=tokens)\n"
-                "  inglec --emit=<mode> <file.em>  mode: run|ast|bytecode|c|docs|prove|check|replay|trace|tokens\n"
-                "  inglec -o <bin> <file.em>       compile to a native binary (C backend)\n"
-                "  inglec --tape <file.em>         record the execution tape (alias for --emit=trace)\n"
+                "  inglec <file.ig>                inspect/compile a source file (default --emit=tokens)\n"
+                "  inglec --emit=<mode> <file.ig>  mode: run|ast|bytecode|c|docs|prove|check|replay|trace|tokens\n"
+                "  inglec -o <bin> <file.ig>       compile to a native binary (C backend)\n"
+                "  inglec --tape <file.ig>         record the execution tape (alias for --emit=trace)\n"
                 "  inglec --lsp                    run the language server (JSON-RPC over stdio)\n"
                 "  inglec --doctor                 check your setup and print the fix for anything wrong\n"
 ```
@@ -292,12 +292,12 @@ compiler wrong, **65** the source had an error (lexing, parsing, type-checking, 
 fault), **66** the file couldn't be read, **0** all was well.
 
 Every journey needs a traveller. Here is ours — seven lines from the test suite,
-[`tests/codegen/functions.em`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/codegen/functions.em),
+[`tests/codegen/functions.ig`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/codegen/functions.ig),
 chosen because the suite locks its output at two different stages, so you will see it again in
 Chapter 9 compiled to bytecode, instruction by instruction:
 
 ```ember
-// functions.em — locks multi-function bytecode and the OP_CALL instruction.
+// functions.ig — locks multi-function bytecode and the OP_CALL instruction.
 fn add(a: int, b: int) -> int {
     return a + b
 }
@@ -312,7 +312,7 @@ fn main() -> int {
 > machine executes (or into C, for a standalone binary). The `--emit` flag is a set of inspection
 > hatches, one per station.
 
-> **Machine-room trivia.** Run `inglec hello.em` with no flags at all and you get… the token
+> **Machine-room trivia.** Run `inglec hello.ig` with no flags at all and you get… the token
 > stream. The default `--emit` mode is `tokens` — a small archaeological trace of the walking
 > skeleton: the lexer was the first station built, so printing tokens was once all the compiler
 > could do, and the default has simply never needed to change.
@@ -439,7 +439,7 @@ without ceremony. You write ordinary line-broken code; the lexer does the punctu
 ### What the suite sees
 
 The lexer's regression test,
-[`tests/lexer/literals.em`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/lexer/literals.em),
+[`tests/lexer/literals.ig`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/lexer/literals.ig),
 starts with two unremarkable lines:
 
 ```ember
@@ -587,7 +587,7 @@ inner call parses `2`, sees `*`, which does bind tighter, so `2 * 3` is built in
 recursion and returned as a finished sub-tree, which becomes `+`'s right child. Twenty-two lines,
 every precedence level Ingle has, and associativity falls out of the `+ 1`. The parser's
 regression suite locks the result — from
-[`tests/parser/expressions.em`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/parser/expressions.em):
+[`tests/parser/expressions.ig`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/parser/expressions.ig):
 
 ```ember
 let a = 1 + 2 * 3 - 4 / 2 % 2
@@ -980,10 +980,10 @@ stack of values. There is deliberately no optimizing intermediate representation
 bytecode — the recorded reasoning is that an IR is "more surface to keep in sync," and Ingle's
 speed story for release builds is the native backend, not a cleverer interpreter.
 
-Time to keep Chapter 3's promise. Our traveller, `tests/codegen/functions.em` once more:
+Time to keep Chapter 3's promise. Our traveller, `tests/codegen/functions.ig` once more:
 
 ```ember
-// functions.em — locks multi-function bytecode and the OP_CALL instruction.
+// functions.ig — locks multi-function bytecode and the OP_CALL instruction.
 fn add(a: int, b: int) -> int {
     return a + b
 }
@@ -1213,7 +1213,7 @@ spends casually.
 
 ## Chapter 11 — The Second Road: Native Code
 
-For most of its life an Ingle program runs on the VM. When it graduates — `inglec -o app app.em` —
+For most of its life an Ingle program runs on the VM. When it graduates — `inglec -o app app.ig` —
 it takes the second road: [`src/cgen_c.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/cgen_c.c)
 walks the *same checked, annotated AST* and emits a self-contained **C translation unit**, which
 the system C compiler builds and links against a small runtime
@@ -1309,7 +1309,7 @@ typedef struct {
 The VM fires one of these immediately before every instruction, to at most one subscribed sink;
 with no sink the cost is a single nil check per instruction. Sinks are **observer-only** — they
 may log, write, or ask a model for an opinion, but they cannot alter execution. Run
-`inglec --tape program.em` and the built-in sink writes the **tape**: one JSON object per
+`inglec --tape program.ig` and the built-in sink writes the **tape**: one JSON object per
 event, one per line — function, instruction, source line, stack depth — the complete story of a
 run, in a format chosen because a tool or a model can consume it line by line. Because the events
 are fired from the dispatch loop itself, the tape grows automatically with every opcode ever
@@ -1365,7 +1365,7 @@ vague comment?'"*
 
 What makes contracts more than assertions is the tooling stacked on them, and the test suite
 demonstrates the first layer with a deliberately buggy function. From
-[`tests/check/contract_fuzz.em`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/check/contract_fuzz.em):
+[`tests/check/contract_fuzz.ig`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/check/contract_fuzz.ig):
 
 ```ember
 fn abs_val(x: int) -> int
@@ -1707,7 +1707,7 @@ Ingle on bare metal.
 **Self-hosting** lives in
 [`selfhost/`](https://github.com/ingle-lang/ingle-lang/blob/main/selfhost) and proceeds stage by
 stage — lexer, parser, checker, codegen, and now the native C emitter, each a fresh Ingle program
-(`lexer.em`, `parser.em`, `checker.em`, `codegen.em`, `cgen_c.em`) ported from its C counterpart.
+(`lexer.ig`, `parser.ig`, `checker.ig`, `codegen.ig`, `cgen_c.ig`) ported from its C counterpart.
 The discipline is the same differential religion as everywhere else: the C compiler — frozen and
 reproducible-from-zero as the git tag `stage0-v0.3.42` — is the oracle, and `make selfhost`
 demands the ported stage produce **byte-identical output** to it (the suite stood at 1209

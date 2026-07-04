@@ -119,9 +119,9 @@ if f == null_ptr() {
 
 ## What must keep compiling (the corpus)
 
-`examples/16_ffi.em`, `tests/run/ffi_pointers.em`, `tests/run/ffi_null_handle.em`,
-`tests/run/ptr_move.em`, `tests/native/ptr_move.em`, and `public/.../flare_chat.em` all
-close their handles unconditionally → all stay green. `error_ptr_double_close.em` stays a
+`examples/16_ffi.ig`, `tests/run/ffi_pointers.ig`, `tests/run/ffi_null_handle.ig`,
+`tests/run/ptr_move.ig`, `tests/native/ptr_move.ig`, and `public/.../flare_chat.ig` all
+close their handles unconditionally → all stay green. `error_ptr_double_close.ig` stays a
 compile error. New negative tests assert the leak shapes are now rejected.
 
 ## Verification

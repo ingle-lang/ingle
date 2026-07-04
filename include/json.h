@@ -4,8 +4,8 @@
 #include <stddef.h>
 
 // A minimal, dependency-free JSON reader + writer for the language server (LSP speaks JSON-RPC).
-// Ember already EMITS JSON everywhere (the tape, diagnostics, --emit modes); this is the missing
-// half — PARSING incoming JSON — kept in-tree like every other Ember primitive. The reader builds
+// Ingle already EMITS JSON everywhere (the tape, diagnostics, --emit modes); this is the missing
+// half — PARSING incoming JSON — kept in-tree like every other Ingle primitive. The reader builds
 // a small tagged value tree; the writer is a growable text buffer for building responses.
 
 typedef enum {

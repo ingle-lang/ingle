@@ -1,4 +1,4 @@
-# The `.emb` bytecode container — a serializable `CompiledProgram` (self-hosting Phase 1)
+# The `.igb` bytecode container — a serializable `CompiledProgram` (self-hosting Phase 1)
 
 > Status: **DESIGN — awaiting review.** This is the Phase 1 deliverable of the standalone-toolchain
 > campaign (see [self-hosting.md](self-hosting.md)). It specifies the on-disk format that makes the
@@ -11,19 +11,19 @@
 Today the self-hosted pipeline reaches two fixed points, but neither yields a *runnable* artifact from
 Ingle-only code:
 
-- `selfhost/inglec.em` (lex → parse → **check** → codegen) emits stage-0's `--emit=bytecode`
+- `selfhost/inglec.ig` (lex → parse → **check** → codegen) emits stage-0's `--emit=bytecode`
   **disassembly text** — verifiable, but not executable.
-- `selfhost/cgen_c.em` emits real C that compiles to a binary, but **skips the checker** and needs a C
+- `selfhost/cgen_c.ig` emits real C that compiles to a binary, but **skips the checker** and needs a C
   compiler present to run anything.
 
 To make the *bytecode* path a real compiler (the bytecode-first decision, so we keep no-`cc`
 `--emit=run` execution), the Ingle codegen must write its `Chunk`s to a file that the existing C VM can
-load and run. That file is the `.emb` container. The C VM gains one new mode, `--run-bytecode`, that
-loads a `.emb` and executes it exactly as `--emit=run` would.
+load and run. That file is the `.igb` container. The C VM gains one new mode, `--run-bytecode`, that
+loads a `.igb` and executes it exactly as `--emit=run` would.
 
 **Scope of Phase 1:** serialize/deserialize + one builtin + the loader mode + a differential gate. It does
 **not** add language-feature coverage to the backend (that is Phase 2). Phase 1 is proven on the subset the
-self-hosted codegen already compiles byte-identically — the four `selfhost/*.em` modules — by requiring
+self-hosted codegen already compiles byte-identically — the four `selfhost/*.ig` modules — by requiring
 `run-bytecode` stdout to equal stage-0 `--emit=run` stdout.
 
 ## 2. What is (and isn't) serialized
@@ -147,16 +147,16 @@ computes `offset[]` and `total_size`** by running the canonical packing algorith
 
 ## 5. The serializer (Ingle side)
 
-Lives next to codegen — a new `selfhost/serialize.em` (or a `write_container` entry in `codegen.em`) that
+Lives next to codegen — a new `selfhost/serialize.ig` (or a `write_container` entry in `codegen.ig`) that
 replaces `disassemble()` in the emit driver. It emits **from** the existing Ingle data model: the per-
 function `Chunk` (parallel arrays `code`/`lines`/`const_int`/`const_float`/`strings`) plus the
-`StructTable`/`EnumTable`/`fn_names`/globals/instances tables `inglec.em` already builds.
+`StructTable`/`EnumTable`/`fn_names`/globals/instances tables `inglec.ig` already builds.
 
 Two invariants it must preserve (facet 5):
 
 1. **Function order is load-bearing.** `build_fn_names` walks decls in order, emitting `Struct.method`
    entries when the struct decl is reached, then free functions — and `CALL <index>` operands are resolved
-   against exactly this order. The serializer emits functions in the same walk (`inglec.em`'s `emit_program`
+   against exactly this order. The serializer emits functions in the same walk (`inglec.ig`'s `emit_program`
    already iterates this way; it just calls `write_container` instead of `disassemble`).
 2. **Monomorphized-instance and prelude ordering** (struct instance id = `struct_count + inst_index`;
    prelude `Option`/`Result` appended after user enums) must be emitted as-numbered so the loader's tables
@@ -176,7 +176,7 @@ check.c + vocab.def + the cgen native band) — a known, bounded pattern.
 
 ## 6. The loader (C side)
 
-A new `--run-bytecode <file.emb>` mode in `src/main.c`, mirroring `emit_run` (main.c:529):
+A new `--run-bytecode <file.igb>` mode in `src/main.c`, mirroring `emit_run` (main.c:529):
 
 1. `fread` the whole file; validate `magic`, `format_ver`, and **`vm_abi`** (reject a mismatch loudly —
    the bytecode bakes in native-builtin ids and opcode numbers, so a container is pinned to the VM ABI
@@ -187,14 +187,14 @@ A new `--run-bytecode <file.emb>` mode in `src/main.c`, mirroring `emit_run` (ma
    `report_unhandled_error` (main.c:480) for an `Err`/`None` reaching `main`, and the `exit(code)` /
    returned-value exit semantics.
 
-A tiny `inglec --emit=bytecode-bin <file.em> -o out.emb` mode (stage-0) is added too, so the container can
+A tiny `inglec --emit=bytecode-bin <file.ig> -o out.igb` mode (stage-0) is added too, so the container can
 be produced by stage-0 *and* by the self-hosted compiler — giving the gate a stage-0 oracle container to
 diff structure against, independent of execution.
 
 ## 7. Risks & resolutions
 
 - **ABI pinning (facet 4).** `CALL_NATIVE <id>`, opcode numbers, and `ArrayElemKind` values are baked into
-  the byte stream. A `.emb` is therefore valid only for the VM build that matches `vm_abi`. Resolution: a
+  the byte stream. A `.igb` is therefore valid only for the VM build that matches `vm_abi`. Resolution: a
   single `EMBER_BYTECODE_ABI` constant (bumped whenever opcodes / native ids / AEK renumber — tie it to the
   existing `make opcheck` surface), checked at load. This is expected for a bytecode format and is not a
   distribution goal in Phase 1 (same-tree produce+run).
@@ -212,20 +212,20 @@ diff structure against, independent of execution.
 Added to `tests/run-selfhost.sh` after Stage 5. For each module the self-hosted codegen already compiles
 byte-identically (`lexer`/`parser`/`checker`/`codegen`, and any small runnable fixtures):
 
-1. self-hosted `inglec` → `.emb` container;
-2. stage-0 `--run-bytecode container.emb` → stdout **A**;
-3. stage-0 `--emit=run module.em` → stdout **B**;
+1. self-hosted `inglec` → `.igb` container;
+2. stage-0 `--run-bytecode container.igb` → stdout **A**;
+3. stage-0 `--emit=run module.ig` → stdout **B**;
 4. **PASS iff A == B**, byte-for-byte.
 
 This proves the serialized bytecode *runs* and produces identical observable behavior to stage-0's
-in-memory execution — the Phase 1 finish line. Round-trip structural equality (stage-0-produced `.emb`
+in-memory execution — the Phase 1 finish line. Round-trip structural equality (stage-0-produced `.igb`
 re-emitted) is an additional cheaper check.
 
 ## 9. Open questions for review
 
-1. **Container extension**: `.emb`? (Analogous to `.pyc`/`.class`/`.wasm`.)
-2. **Serializer home**: a new `selfhost/serialize.em`, or a `write_container` section inside
-   `codegen.em`? (Leaning `serialize.em` — keeps `codegen.em` focused and the differential surfaces
+1. **Container extension**: `.igb`? (Analogous to `.pyc`/`.class`/`.wasm`.)
+2. **Serializer home**: a new `selfhost/serialize.ig`, or a `write_container` section inside
+   `codegen.ig`? (Leaning `serialize.ig` — keeps `codegen.ig` focused and the differential surfaces
    unchanged.)
 3. **`from_bytes` vs `write_bytes(path,[u8])`**: I recommend `from_bytes` (orthogonal string constructor,
    reuses `write_file`), but a direct `write_bytes` avoids materializing the intermediate string. Either is

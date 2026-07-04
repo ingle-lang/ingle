@@ -19,7 +19,7 @@ import "std/sqlite" as sql
 ```
 
 ```
-build/inglec-db --emit=run myprogram.em      # the database build (make db)
+build/inglec-db --emit=run myprogram.ig      # the database build (make db)
 ```
 
 ## Why vendored, not linked

@@ -1,15 +1,15 @@
-# Ember — Zed extension (source)
+# Ingle — Zed extension (source)
 
-This directory is the **canonical source** for the Ember [Zed](https://zed.dev) extension. Like the
+This directory is the **canonical source** for the Ingle [Zed](https://zed.dev) extension. Like the
 VS Code one (`editors/vscode/`), it is small, intentional editor *glue* — the language intelligence
-lives in the compiler (`emberc --lsp`, in `src/lsp.c`), not here.
+lives in the compiler (`inglec --lsp`, in `src/lsp.c`), not here.
 
 | File | Role |
 |------|------|
-| `src/lib.rs` | The extension (Rust → WebAssembly). Tells Zed how to launch `emberc --lsp`; nothing else. |
+| `src/lib.rs` | The extension (Rust → WebAssembly). Tells Zed how to launch `inglec --lsp`; nothing else. |
 | `Cargo.toml` | Pins `zed_extension_api` (0.4.x — the last release targeting `wasm32-wasip1`). |
 | `extension.toml` | Manifest: registers the tree-sitter grammar and the language server. |
-| `languages/ember/config.toml` | Declares the `Ember` language for `.em`, comments (`//`), brackets. |
+| `languages/ember/config.toml` | Declares the `Ingle` language for `.ig`, comments (`//`), brackets. |
 | `languages/ember/highlights.scm` | tree-sitter highlight queries — **syntax highlighting**. |
 | `tree-sitter-ember/` | The tree-sitter grammar (its own git repo; Zed builds it from `src/parser.c`). |
 
@@ -17,15 +17,15 @@ lives in the compiler (`emberc --lsp`, in `src/lsp.c`), not here.
 
 - **Syntax highlighting + outline** come from the tree-sitter grammar (`tree-sitter-ember`) and
   `highlights.scm`. The grammar is **lexical-depth only** — it tokenizes; it does not re-parse
-  Ember's semantics. (A full grammar would be a second parser of Ember syntax, the "two frontends"
+  Ingle's semantics. (A full grammar would be a second parser of Ingle syntax, the "two frontends"
   trap; the C compiler stays the one frontend — see `docs/architecture.md`.)
 - **Diagnostics / hover / go-to-definition / completion / document symbols** come from the LSP
-  (`emberc --lsp`). The two are separate — one can work while the other doesn't.
+  (`inglec --lsp`). The two are separate — one can work while the other doesn't.
 
 ## Prerequisites
 
-1. **emberc installed** — `make install` (deploys `~/.ember/bin/emberc`). `src/lib.rs` looks for
-   `emberc` on the worktree PATH first, then falls back to `~/.ember/bin/emberc`.
+1. **inglec installed** — `make install` (deploys `~/.ingle/bin/inglec`). `src/lib.rs` looks for
+   `inglec` on the worktree PATH first, then falls back to `~/.ingle/bin/inglec`.
 2. **Rust via `rustup`, NOT Homebrew.** Zed compiles the extension to wasm itself and drives the
    build through rustup. With brew's `rust` it cannot add the wasm target and the build fails. Set up:
    ```
@@ -33,12 +33,12 @@ lives in the compiler (`emberc --lsp`, in `src/lsp.c`), not here.
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    rustup target add wasm32-wasip1
    ```
-   This toolchain is needed only to *build the Zed extension* — `emberc` itself stays dependency-free.
+   This toolchain is needed only to *build the Zed extension* — `inglec` itself stays dependency-free.
 
 ## Stuck? Run the doctor first
 
 ```
-make doctor        # checks emberc, the stdlib, the frontend, AND the Rust+wasm toolchain Zed needs
+make doctor        # checks inglec, the stdlib, the frontend, AND the Rust+wasm toolchain Zed needs
 ```
 It prints `[ok]`/`[!!]` for each piece with the exact fix — start here before debugging anything.
 
@@ -48,7 +48,7 @@ It prints `[ok]`/`[!!]` for each piece with the exact fix — start here before 
 make build-zed     # cargo build --release --target wasm32-wasip1 (sanity-build the wasm module)
 ```
 then in Zed: command palette → **`zed: install dev extension`** → select this `editors/zed/`
-directory. Zed compiles the wasm module and the grammar and activates them for any `.em` file.
+directory. Zed compiles the wasm module and the grammar and activates them for any `.ig` file.
 
 After changing `src/lib.rs`, `config.toml`, or `highlights.scm`, rebuild the dev extension from the
 same menu (or `make build-zed` then reinstall).

@@ -1,2 +1,2 @@
 error[refinement_violation]: refinement violated constructing 'Pos' (line 12)
-  --> tests/run/error_refinement_nested.em:12:21 (in main)
+  --> tests/run/error_refinement_nested.ig:12:21 (in main)

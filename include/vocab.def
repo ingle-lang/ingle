@@ -1,4 +1,4 @@
-// vocab.def — the single source of truth for Ember's lexical vocabulary.
+// vocab.def — the single source of truth for Ingle's lexical vocabulary.
 //
 // Keywords, builtins, and primitive types each appear here EXACTLY ONCE. Every consumer
 // (the lexer's keyword recogniser, the LSP's hover/completion, and the TextMate grammar

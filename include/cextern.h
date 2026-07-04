@@ -3,17 +3,17 @@
 
 #include "value.h"
 
-// Foreign (C) functions exposed to Ember through an `extern "c"` block (MANIFESTO §5h, the FFI).
+// Foreign (C) functions exposed to Ingle through an `extern "c"` block (MANIFESTO §5h, the FFI).
 // Dispatch is through this in-tree registry of typed wrappers (no libffi, no dlopen).
 //
 // The boundary is defined by the **leaf scalar sequence**: a struct argument is flattened to its
-// scalar leaves on the Ember side (it is held as a flat run of slots already — value-types), and
+// scalar leaves on the Ingle side (it is held as a flat run of slots already — value-types), and
 // the wrapper reassembles a *concrete C struct* from those leaves and passes it BY VALUE, so the
 // system C compiler generates the platform's exact aggregate calling convention (the C ABI). A
 // struct result is flattened back to leaves the same way. A `kind` codes one leaf:
 //   'f' = float  (f32/f64)
 //   'i' = int    (i8..i64 / u8..u64)
-//   'p' = const char*  — the leaf is an Ember `string` Value; the wrapper reads AS_CSTRING (its
+//   'p' = const char*  — the leaf is an Ingle `string` Value; the wrapper reads AS_CSTRING (its
 //         bytes are NUL-terminated). Borrowed for the call's duration (§5h pointers).
 //   'b' = buffer — the leaf is a packed scalar array (`[u8]`/`[i32]`/…) Value; the wrapper reads
 //         ((ObjArray*)AS_OBJ(v))->data and ->length. Borrowed; a `mut` buffer may be written in
@@ -30,7 +30,7 @@ typedef struct {
     char        out_kind[CEXTERN_MAX_LEAVES];
     int         ret_is_struct;            // 1 if the C function returns a struct (reassemble)
     int         ret_is_string;            // 1 if the wrapper returns a malloc'd char* that the FFI
-                                          // COPIES into an Ember string, then frees (the §5h / OFI-043
+                                          // COPIES into an Ingle string, then frees (the §5h / OFI-043
                                           // copy-on-return rule). The pointer is delivered in out[0]
                                           // as a PTR_VAL; the VM/native marshalling does copy + free.
 } CExternSig;

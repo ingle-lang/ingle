@@ -1,4 +1,4 @@
-# Ember reference compiler — build rules.
+# Ingle reference compiler — build rules.
 # `make`           builds the compiler at build/inglec (dev: -O0 -g, debuggable)
 # `make test`      runs the regression suite (tests/run.sh)
 # `make test-update` regenerates snapshot goldens (review the diff first!)
@@ -7,7 +7,7 @@
 # `make graphics`  builds the graphics compiler at build/inglec-gfx (-O2, raylib)
 # `make kernel`    builds the bare-metal aarch64 image kernel/kernel.elf (OFI-167; needs LLVM cross + qemu)
 # `make test-kernel` boots kernel.elf on QEMU aarch64 virt and checks the UART output
-# `make bench`     builds release, then runs + times every benchmarks/*.em
+# `make bench`     builds release, then runs + times every benchmarks/*.ig
 # `make parbench`  builds serial + parallel, runs the parallel speedup comparison
 # `make clean`     removes all build artifacts
 
@@ -29,7 +29,7 @@ LDLIBS_MATH   := -lm
 # Without this, stale objects can desync silently (see git history / OFI-003).
 CFLAGS  := -std=c17 -Wall -Wextra -Werror -Iinclude -O0 -g -MMD -MP $(PORTABLE_DEFS)
 BIN     := build/inglec
-# The native backend's runtime library, linked into compiled Ember programs (emberc -o).
+# The native backend's runtime library, linked into compiled Ingle programs (emberc -o).
 # Defined here (before `all`) so it is in `all`'s prerequisites — GNU make expands a rule's
 # prerequisites when the rule is read, so a later definition would expand to empty.
 RT_LIB  := build/libember_rt.a
@@ -68,7 +68,7 @@ PARALLEL_FLAGS := -std=c17 -Wall -Wextra -Werror -Iinclude -O2 -DNDEBUG -DEMBER_
 # M:N green-thread scheduler build (OFI-071): many fibers multiplexed over a worker pool, replacing
 # the 1:1 pthread-per-spawn model. Layered on the EMBER_PARALLEL thread-safe heap (so both flags).
 # Gated/opt-in until it clears every gate (Crucible + TSan + the mn-stress fuzzer + the suites),
-# then the default `make parallel` flips to it. Build: `build/inglec-mn --emit=run <file.em>`.
+# then the default `make parallel` flips to it. Build: `build/inglec-mn --emit=run <file.ig>`.
 MN_BIN         := build/inglec-mn
 MN_FLAGS       := -std=c17 -Wall -Wextra -Werror -Iinclude -O2 -DNDEBUG -DEMBER_MN=1 -DEMBER_PARALLEL=1 $(PORTABLE_DEFS) -pthread
 # TSan over the M:N runtime — the right instrument for scheduler data races (ready-queue splices,
@@ -117,7 +117,7 @@ NET_FLAGS        := -std=c17 -Wall -Wextra -Iinclude -O2 -DNDEBUG -DEMBER_NET=1 
 NETGFX_BIN       := build/inglec-net-gfx
 # The desktop app also builds with -DEMBER_PARALLEL so it can run its blocking HTTPS fetch on a
 # spawned worker fiber (its own OS thread) while the raylib render loop stays responsive on the
-# main thread — see public/claude-desktop/gui.em (nursery + try_recv). pthread is in libc on
+# main thread — see public/claude-desktop/gui.ig (nursery + try_recv). pthread is in libc on
 # macOS, so no extra link flag is needed.
 NETGFX_FLAGS     := -std=c17 -Wall -Wextra -Iinclude -O2 -DNDEBUG -DEMBER_NET=1 -DEMBER_GRAPHICS=1 -DEMBER_PARALLEL=1 $(PORTABLE_DEFS) -pthread
 
@@ -125,7 +125,7 @@ NETGFX_FLAGS     := -std=c17 -Wall -Wextra -Iinclude -O2 -DNDEBUG -DEMBER_NET=1 
 # the VENDORED SQLite amalgamation (third_party/sqlite). Unlike net/graphics this needs no system
 # package — SQLite is two checked-in files — so `make db` works on any machine, dependency-free. The
 # default build stays SQL-free, so `make` / `make test` never compile sqlite3.c. Run a program with:
-#   build/inglec-db --emit=run <file.em>
+#   build/inglec-db --emit=run <file.ig>
 DB_BIN       := build/inglec-db
 DB_FLAGS     := -std=c17 -Wall -Wextra -Iinclude -O2 -DNDEBUG -DEMBER_SQLITE=1 $(PORTABLE_DEFS)
 # sqlite3.c is third-party C: compiled once into its own object with its own flags (NOT held to our
@@ -136,7 +136,7 @@ SQLITE_CFLAGS := -std=c17 -O2 -DNDEBUG -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_
 
 # AddressSanitizer builds. The older Apple clang's ASan runtime hung at startup on this macOS, so
 # memory work was historically RSS-verified only; Apple clang 21 fixed that and ASan now runs. These
-# instrument the VM + runtime + codegen so running a .em program flags use-after-free / double-free /
+# instrument the VM + runtime + codegen so running a .ig program flags use-after-free / double-free /
 # heap-overflow with a stack trace. -O1 keeps traces readable at usable speed. NOTE: LeakSanitizer is
 # unsupported on macOS, so leaks stay RSS-verified — ASan covers the temporal/spatial bugs RSS can't.
 # asan-par adds -DEMBER_PARALLEL=1 to exercise the channel/nursery cross-thread paths under ASan.
@@ -167,7 +167,7 @@ $(BIN): $(OBJECTS)
 build/%.o: src/%.c | build
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# The native backend's runtime, packaged as a static library that compiled Ember
+# The native backend's runtime, packaged as a static library that compiled Ingle
 # programs (`emberc -o`) link against. Built from src/runtime.c + src/cextern.c — both
 # self-contained (no front-end, no VM dispatch), so a generated binary pulls in only the
 # object runtime (allocation, refcount, drop, struct/marshalling) and the C FFI registry
@@ -189,7 +189,7 @@ $(RT_LIB_PAR): src/runtime.c src/cextern.c include/ember_rt.h include/value.h in
 	ar rcs $@ build/runtime_rt_par.o build/cextern_rt_par.o
 
 # The graphics+net runtime (see RT_LIB_NETGFX): runtime + cextern + graphics.c with all three defines,
-# so `emberc-net-gfx -o app app.em` links a standalone native GUI binary. Third-party cflags come from
+# so `emberc-net-gfx -o app app.ig` links a standalone native GUI binary. Third-party cflags come from
 # curl-config / pkg-config; graphics.c is the raylib backend the shared ember_gfx_native() calls into.
 NETGFX_RT_DEFS := -DEMBER_NET=1 -DEMBER_GRAPHICS=1 -DEMBER_PARALLEL=1
 NETGFX_RT_CFLAGS := `curl-config --cflags` `pkg-config --cflags raylib freetype2`
@@ -238,7 +238,7 @@ release: | build
 	@$(call LINK_COMPAT,$(RELEASE_BIN))
 
 # AddressSanitizer compilers (see ASAN_FLAGS). Run the suite under one with:
-#   make asan && ASAN_OPTIONS=detect_leaks=0 build/inglec-asan --emit=run <file.em>
+#   make asan && ASAN_OPTIONS=detect_leaks=0 build/inglec-asan --emit=run <file.ig>
 # Single invocation like release so the instrumented objects never collide with the dev build's.
 asan: | build
 	$(CC) $(ASAN_FLAGS) $(SOURCES) $(LDLIBS_MATH) -o $(ASAN_BIN)
@@ -251,7 +251,7 @@ asan-par: | build
 # The "memory tape": ASan + the reclaim double-drop detector (-DEMBER_DROP_TRACE). The pool hides a
 # use-after-free from plain ASan (it recycles, not free()s), so the detector stamps a sentinel after
 # each reclaim and aborts with both drop sites if an object is reclaimed twice. This caught OFI-058.
-# Run: ASAN_OPTIONS=detect_leaks=0 build/inglec-trace --emit=run <file.em>
+# Run: ASAN_OPTIONS=detect_leaks=0 build/inglec-trace --emit=run <file.ig>
 asan-trace: | build
 	$(CC) $(ASAN_FLAGS) -DEMBER_DROP_TRACE=1 $(SOURCES) $(LDLIBS_MATH) -o build/inglec-trace
 	@$(call LINK_COMPAT,build/inglec-trace)
@@ -271,7 +271,7 @@ install: release
 	rm -f "$(PREFIX)/bin/inglec" "$(PREFIX)/bin/emberc"
 	cp $(RELEASE_BIN) "$(PREFIX)/bin/inglec"
 	ln -sf inglec "$(PREFIX)/bin/emberc"
-	cp std/*.em "$(PREFIX)/std/"
+	cp std/*.ig "$(PREFIX)/std/"
 	@echo "installed inglec (+ emberc alias) + std to $(PREFIX)  (VS Code: emberLsp.serverPath = $(PREFIX)/bin/inglec)"
 
 # Deploy the VS Code extension. The CANONICAL SOURCE is editors/vscode/ in this repo.
@@ -279,7 +279,7 @@ install: release
 # only loads extensions listed in ~/.vscode/extensions/extensions.json, which is written
 # by a proper install. Hand-copying a folder there is silently ignored (the old method;
 # it cost us a debugging session). So we PACKAGE a .vsix from editors/vscode and install
-# it via the `code` CLI, which registers it correctly and GLOBALLY (lights up any .em
+# it via the `code` CLI, which registers it correctly and GLOBALLY (lights up any .ig
 # file system-wide). node_modules (vscode-languageclient, bundled into the vsix) is
 # fetched with npm only when absent so re-packs are offline + fast. Re-run after editing
 # the grammar or glue: `make install-vscode`, then reload the VS Code window.
@@ -289,8 +289,8 @@ install-vscode:
 		echo "fetching vscode-languageclient (one-time)…"; \
 		cd editors/vscode && npm install --omit=dev; \
 	fi
-	cd editors/vscode && npx --yes @vscode/vsce package --allow-missing-repository -o /tmp/ember-lang.vsix
-	"$(CODE_CLI)" --install-extension /tmp/ember-lang.vsix --force
+	cd editors/vscode && npx --yes @vscode/vsce package --allow-missing-repository -o /tmp/ingle-lang.vsix
+	"$(CODE_CLI)" --install-extension /tmp/ingle-lang.vsix --force
 	@echo "installed VS Code extension via $(CODE_CLI)  (reload the VS Code window to pick it up)"
 
 # Build the Zed extension (Rust → WebAssembly). The CANONICAL SOURCE is editors/zed/. Needs Rust via
@@ -392,7 +392,7 @@ asan-mn: | build
 	@$(call LINK_COMPAT,$(ASAN_MN_BIN))
 
 # M:N scheduler + graphics (and + networking) compilers — run the GUI apps on M:N. Single invocation
-# like `graphics`/`net-graphics`. Run: build/inglec-mn-net-gfx --emit=run <app.em>
+# like `graphics`/`net-graphics`. Run: build/inglec-mn-net-gfx --emit=run <app.ig>
 mn-graphics: | build
 	$(CC) $(MN_GFX_FLAGS) `pkg-config --cflags raylib freetype2` $(SOURCES) `pkg-config --libs raylib freetype2` $(LDLIBS_MATH) -o $(MN_GFX_BIN)
 	@$(call LINK_COMPAT,$(MN_GFX_BIN))
@@ -402,19 +402,19 @@ mn-net-graphics: | build
 	@$(call LINK_COMPAT,$(MN_NETGFX_BIN))
 
 # Graphics compiler (see GRAPHICS_FLAGS). Links raylib + FreeType (hinted text) via pkg-config;
-# single invocation like release. Run a demo with: build/inglec-gfx --emit=run <file.em>
+# single invocation like release. Run a demo with: build/inglec-gfx --emit=run <file.ig>
 graphics: $(RT_LIB_NETGFX) | build
 	$(CC) $(GRAPHICS_FLAGS) `pkg-config --cflags raylib freetype2` $(SOURCES) `pkg-config --libs raylib freetype2` $(LDLIBS_MATH) -o $(GRAPHICS_BIN)
 	@$(call LINK_COMPAT,$(GRAPHICS_BIN))
 
 # Networking compiler (see NET_FLAGS): links libcurl via curl-config, registers the http_post
-# FFI wrapper. Run an HTTPS program with: build/inglec-net --emit=run <file.em>
+# FFI wrapper. Run an HTTPS program with: build/inglec-net --emit=run <file.ig>
 net: | build
 	$(CC) $(NET_FLAGS) `curl-config --cflags` $(SOURCES) `curl-config --libs` $(LDLIBS_MATH) -o $(NET_BIN)
 	@$(call LINK_COMPAT,$(NET_BIN))
 
 # Combined networking + graphics compiler — the desktop app (public/) needs both: HTTPS for
-# the Anthropic API and raylib for the GUI. Run with: build/inglec-net-gfx --emit=run <file.em>
+# the Anthropic API and raylib for the GUI. Run with: build/inglec-net-gfx --emit=run <file.ig>
 net-graphics: $(RT_LIB_NETGFX) | build
 	$(CC) $(NETGFX_FLAGS) `curl-config --cflags` `pkg-config --cflags raylib freetype2` $(SOURCES) `curl-config --libs` `pkg-config --libs raylib freetype2` $(LDLIBS_MATH) -o $(NETGFX_BIN)
 	@$(call LINK_COMPAT,$(NETGFX_BIN))
@@ -424,7 +424,7 @@ $(SQLITE_OBJ): third_party/sqlite/sqlite3.c third_party/sqlite/sqlite3.h | build
 	$(CC) $(SQLITE_CFLAGS) -c third_party/sqlite/sqlite3.c -o $(SQLITE_OBJ)
 
 # Database compiler (see DB_FLAGS): registers the std/sqlite FFI wrappers and links the vendored
-# SQLite object. Run a SQL program with: build/inglec-db --emit=run <file.em>
+# SQLite object. Run a SQL program with: build/inglec-db --emit=run <file.ig>
 db: $(SQLITE_OBJ) | build
 	$(CC) $(DB_FLAGS) -Ithird_party/sqlite $(SOURCES) $(SQLITE_OBJ) $(LDLIBS_MATH) -o $(DB_BIN)
 	@$(call LINK_COMPAT,$(DB_BIN))
@@ -443,9 +443,9 @@ test-db: db
 KERNEL_SHARED := kernel/boot.o kernel/vectors.o kernel/timer.o kernel/runtime.o kernel/platform.o
 
 kernel: $(BIN)
-	$(BIN) --emit=c --freestanding kernel/hello.em > kernel/hello.c
-	$(BIN) --emit=c --freestanding kernel/faultdemo.em > kernel/faultdemo.c
-	$(BIN) --emit=c --freestanding kernel/timerdemo.em > kernel/timerdemo.c
+	$(BIN) --emit=c --freestanding kernel/hello.ig > kernel/hello.c
+	$(BIN) --emit=c --freestanding kernel/faultdemo.ig > kernel/faultdemo.c
+	$(BIN) --emit=c --freestanding kernel/timerdemo.ig > kernel/timerdemo.c
 	$(KERNEL_CC) $(KERNEL_CC_FLAGS) -c kernel/boot.S -o kernel/boot.o
 	$(KERNEL_CC) $(KERNEL_CC_FLAGS) -c kernel/vectors.S -o kernel/vectors.o
 	$(KERNEL_CC) $(KERNEL_CC_FLAGS) $(KERNEL_FS_FLAGS) -c kernel/timer.c -o kernel/timer.o
@@ -480,7 +480,7 @@ test-net: net
 
 # Self-hosting bootstrap differential (docs/design/self-hosting.md). Runs the compiler-shaped programs
 # under tests/selfhost/ on BOTH backends and requires byte-identical stdout — the drift guard for the
-# staged port of the compiler into Ember. Depends on `all` so build/inglec and the runtime static libs
+# staged port of the compiler into Ingle. Depends on `all` so build/inglec and the runtime static libs
 # (needed by `emberc -o`'s native link) exist; dependency-free, no display/libs.
 selfhost: all
 	@tests/run-selfhost.sh
@@ -566,7 +566,7 @@ parbench: release parallel
 # time are both shown so correctness and speed are visible together.
 bench: release
 	@echo "== benchmarks (optimized -O2 build) =="
-	@for f in benchmarks/*.em; do \
+	@for f in benchmarks/*.ig; do \
 		echo ""; echo "--- $$f ---"; \
 		time $(RELEASE_BIN) --emit=run $$f; \
 	done

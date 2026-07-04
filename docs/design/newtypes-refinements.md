@@ -46,7 +46,7 @@ Two sibling features, both *constraints attached to data*:
   usability barriers (the killer is *epistemic*: "why won't the solver prove it?"). The proposal already
   scopes that away; the discipline is to **stay** scoped — no SMT, no quantifiers, no measures.
 - **OFI-026 is NOT a blocker** (the validation's one false claim, traced to a stale comment now fixed as
-  OFI-148). Unit-return `ensures` on a `mut self` mutator is **closed and sound** — `std/ui.em` uses it
+  OFI-148). Unit-return `ensures` on a `mut self` mutator is **closed and sound** — `std/ui.ig` uses it
   in production. So refined *mutable struct fields* are deferred not because of silent corruption, but
   only because Ingle has no *automatic* struct-invariant mechanism yet (manual `ensures` on each mutator
   works but isn't ergonomic). That makes field refinements a clean **v2**, not a landmine.
@@ -66,7 +66,7 @@ Two sibling features, both *constraints attached to data*:
 | Static prover `--emit=prove` (Fourier–Motzkin, linear int, ≤8 vars, single-`return` body) | shipped | `src/prove.c` |
 | Property fuzzer `--emit=check` (300 trials, rejects `requires`-violations, shrinks) | shipped | `src/vm.c:4705` |
 | LSP inlay `✓ proved` / `○ runtime-checked` via `prove_fn_verdicts` | shipped | `src/lsp.c:2094` |
-| Unit-return `ensures` on `mut self` | shipped (OFI-026 closed) | `src/check.c:6987`; `std/ui.em:375` |
+| Unit-return `ensures` on `mut self` | shipped (OFI-026 closed) | `src/check.c:6987`; `std/ui.ig:375` |
 | `type X = Y` declaration / refinement / newtype / branded syntax | **ABSENT** | grammar `Type = [T] \| ident<...>` |
 | Subtyping / non-nominal coercion | **ABSENT** (Ingle is nominal) | — |
 
@@ -116,8 +116,8 @@ type Email   = string
    wrapper (`src/codegen.c`, `src/cgen_c.c`).
 4. **LSP:** hover shows `type Name = Base`; the mismatch diagnostic reads "OrderId is not UserId"
    (`src/lsp.c`).
-5. **Docs + tests:** a `THE_INGLE_BOOK` section; `tests/run/newtype_mismatch.em` (the cross-type pass is
-   a compile error), `tests/run/newtype_roundtrip.em` (construct → unwrap), and a native-differential
+5. **Docs + tests:** a `THE_INGLE_BOOK` section; `tests/run/newtype_mismatch.ig` (the cross-type pass is
+   a compile error), `tests/run/newtype_roundtrip.ig` (construct → unwrap), and a native-differential
    case confirming byte-identical / zero-cost output.
 
 ### 3.4 v1 EXCLUDES
@@ -187,7 +187,7 @@ PLDI 2025).
 4. **Prover + LSP:** attempt discharge at the construction site; honest `✓ / ○ + reason` inlay.
 5. **`--check`:** domain-aware generation for ranged ints.
 6. **Fault:** a `refinement_violation` code rendered through the OFI-111b value walker.
-7. **Docs + tests:** `tests/fault/refinement_violation.em`, `tests/run/ranged_int.em`, and a
+7. **Docs + tests:** `tests/fault/refinement_violation.ig`, `tests/run/ranged_int.ig`, and a
    `--check` counterexample test for a deliberately-too-loose constructor.
 
 ### 4.5 v1 EXCLUDES

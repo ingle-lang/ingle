@@ -84,7 +84,7 @@ JSON is its own module (`std/json`, decision D3) so `std/http` stays protocol-ag
 
 ## Status — realized 2026-06-20
 
-The first shipped `std/http.em` is a **thin wrapper over the C externs**, not yet the `Request`/`Response`
+The first shipped `std/http.ig` is a **thin wrapper over the C externs**, not yet the `Request`/`Response`
 builder above. It exposes exactly the surface the desktop apps already used inline, lifted into one module:
 
 ```ember
@@ -102,7 +102,7 @@ caller. It was driven by the Claude app's local‑model support — listing inst
 `GET /api/tags`, and the streaming `open`/`post` are both POST‑only. A transfer failure comes back as the
 same `{"_curl_error":"…"}` sentinel string `post` uses, so the caller always gets an inspectable string.
 
-`chat.em` (blocking `http.post`) and the new reusable `anthropic` client (streaming `http.open`/`next`/
+`chat.ig` (blocking `http.post`) and the new reusable `anthropic` client (streaming `http.open`/`next`/
 `close`, fed to `std/sse`) both import it; the inline `extern http_post`/`http_open` blocks are gone —
 **Phase 0's "delete `extern http_post` from both apps" is done.** The richer builder API (`Request`/
 `Response`/`Method`/`HttpError`, `send`/`pump`) remains the planned evolution, and must design around one
@@ -157,7 +157,7 @@ N parallel requests = N `spawn`s in a nursery; the nursery joins (and cancels la
 ## Implementation phases
 
 - **Phase 0 — MVP (this milestone).** The three `curl_multi` `Ptr` externs above + `std/http` (`get`/
-  `post`/`send`/`pump`/`Response`) + `std/sse` + `std/json` (real parse). Convert `flare_chat.em` to a
+  `post`/`send`/`pump`/`Response`) + `std/sse` + `std/json` (real parse). Convert `flare_chat.ig` to a
   streaming typewriter and delete `extern http_post`/`build_request`/`extract_text` from both apps.
   *Tradeoff:* one OS thread per in-flight request (fine for a chat app, 1–4 concurrent). Cancellation is
   real but coarse (aborts at the next `http_next` pump, via `CURLOPT_XFERINFOFUNCTION`).

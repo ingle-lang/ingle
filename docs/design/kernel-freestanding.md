@@ -10,7 +10,7 @@
 ## Why now
 
 Writing an **OS kernel in Ingle** is the north star (see [[ember-kernel-endgame]] in memory / MANIFESTO). The
-self-hosting campaign was the maturity play and it's done: the native **C-emit backend** (`selfhost/cgen_c.em`,
+self-hosting campaign was the maturity play and it's done: the native **C-emit backend** (`selfhost/cgen_c.ig`,
 `inglec --emit=c` / `-o`) now reproduces the whole compiler byte-identical **and rebuilds itself into a
 native binary**. That C-emit backend is the **on-ramp to bare-metal codegen** — the same AST→C path, but
 producing code that runs with **no OS and no libc**.
@@ -37,7 +37,7 @@ producing code that runs with **no OS and no libc**.
   `clang -target aarch64-none-elf -ffreestanding -nostdlib …` works. **No cross-gcc needed.**
 - **`qemu-system-aarch64` is NOT installed** → `brew install qemu` (per "install the tool, don't work
   around"). This is the only missing piece.
-- **`extern "c"` FFI reaches the native C-emit backend** (`examples/16_ffi.em`) — so an Ingle program can
+- **`extern "c"` FFI reaches the native C-emit backend** (`examples/16_ffi.ig`) — so an Ingle program can
   `extern "c" fn uart_putc(c: i32)` and we supply the C body in the freestanding shim. That is the MMIO
   output mechanism for the first spike.
 
@@ -62,13 +62,13 @@ after (allocator, interrupts, the no-alloc subset, a richer runtime) is incremen
 ### Concrete steps to first light
 
 1. `brew install qemu` (the only missing tool).
-2. **Heap-free Ingle source** (`kernel/hello.em` or similar): a `main` that calls `extern "c" fn uart_putc`
+2. **Heap-free Ingle source** (`kernel/hello.ig` or similar): a `main` that calls `extern "c" fn uart_putc`
    in a loop over the bytes of a message. First cut can even hardcode the bytes (no string type) to stay
    100% heap-free; a fixed-size byte array is the next step.
 3. **Freestanding emit.** Start the SIMPLEST way possible before touching the compiler: hand-write a tiny
    `kernel/rt.c` shim (`uart_putc` writing to `*(volatile uint32_t*)0x09000000 = c;`, plus any `em_*`
    stubs the emitted C references for the heap-free subset — ideally none) and compile the stock
-   `inglec --emit=c hello.em` output against it with `-ffreestanding -nostdlib`. If the emitted C pulls in
+   `inglec --emit=c hello.ig` output against it with `-ffreestanding -nostdlib`. If the emitted C pulls in
    libc/runtime the heap-free subset shouldn't need, that tells us exactly what a `--freestanding` preamble
    must strip — the first real compiler task.
 4. **Boot stub + linker script.** `kernel/boot.S` (aarch64 `_start`: set `sp`, `bl main`, then spin) and
@@ -106,7 +106,7 @@ Hello from Ingle!
 ...
 ```
 
-emitted by the heap-free `kernel/hello.em` — a message written byte-by-byte through `uart_putc`, then a
+emitted by the heap-free `kernel/hello.ig` — a message written byte-by-byte through `uart_putc`, then a
 counted loop (the three dots) that exercises the integer runtime (`em_add`/`em_eq_op`/`em_truthy`) with no
 OS underneath. The pipeline: default `inglec --emit=c` → freestanding shim (`kernel/rt.c` + shadow
 `kernel/ember_rt.h`) → boot stub (`kernel/boot.S`) → linker script (`kernel/kernel.ld`) → QEMU. Opt-in
@@ -136,10 +136,10 @@ OS underneath. The pipeline: default `inglec --emit=c` → freestanding shim (`k
 
 ### Files
 
-`kernel/hello.em` (source) · `kernel/rt.c` + `kernel/ember_rt.h` (freestanding shim — the exact `em_*`
+`kernel/hello.ig` (source) · `kernel/rt.c` + `kernel/ember_rt.h` (freestanding shim — the exact `em_*`
 surface the heap-free subset references) · `kernel/boot.S` (aarch64 `_start`: park secondaries, enable
 FP/SIMD, set sp, call `main`, semihosting `SYS_EXIT`) · `kernel/kernel.ld` (load at `0x4008_0000`) ·
-`tests/run/error_direct_extern_vm.em` (the VM-rejection golden).
+`tests/run/error_direct_extern_vm.ig` (the VM-rejection golden).
 
 ### Milestone 1b — `--freestanding` emit mode ✅ (2026-07-01, same day)
 
@@ -147,7 +147,7 @@ FP/SIMD, set sp, call `main`, semihosting `SYS_EXIT`) · `kernel/kernel.ld` (loa
 
 - **A bare `int main(void)` entry** — no argc/argv, no `printf` result-echo, no exit heap sweep — that
   **returns Ingle main's int result as the exit code**. `boot.S` forwards it through the semihosting exit
-  block, so the QEMU exit code is a value **computed by Ingle on bare metal**: `hello.em` returns its loop
+  block, so the QEMU exit code is a value **computed by Ingle on bare metal**: `hello.ig` returns its loop
   counter and `make test-kernel` asserts `qemu exit == 3`. The verification loop closes over a computed
   value, not just printed text.
 - **Emit-time rejection of hosted-only constructs** with clear messages instead of late link errors:
@@ -216,7 +216,7 @@ which prints a **kernel panic** and halts:
 
 `boot.S` sets `VBAR_EL1` as soon as the stack is up (before `mmu_init`), so even a setup-time fault is
 reported. The **fault-vector regression** is a second image, `kernel/faultdemo.elf` (from
-`kernel/faultdemo.em`), which deliberately executes a `BRK` via the `cpu_break` direct extern;
+`kernel/faultdemo.ig`), which deliberately executes a `BRK` via the `cpu_break` direct extern;
 `make test-kernel` boots it and asserts the panic banner + the decoded syndrome (`EC=0x3c`, a BRK).
 `EC` is the field that matters — `0x25` data abort, `0x07` SIMD/FP trapped, `0x3c` BRK — so a future
 fault is a one-line diagnosis instead of a mystery.

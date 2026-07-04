@@ -17,7 +17,7 @@ enum {
     ARR_OP_REMOVE_AT   = 5    // arr.remove_at(i) — remove + return element i, shifting the tail down
 };
 
-// The Ember abstract syntax tree.
+// The Ingle abstract syntax tree.
 //
 // Nodes come in five families — Type, Expr, Stmt, Pattern, Decl — each a tagged
 // union (a `kind` discriminant plus a `union as`). Every node and every child
@@ -252,9 +252,9 @@ struct Expr {
             int         box_result;
             // FFI (§5h): registry index of the foreign (C) function this call targets, set by
             // the checker for a call to an `extern "c"` function; codegen emits OP_CALL_C. -1
-            // for an ordinary Ember call.
+            // for an ordinary Ingle call.
             int         cextern_index;
-            // FFI structs-by-value (3b.6): the Ember struct id the C function RETURNS, so the VM
+            // FFI structs-by-value (3b.6): the Ingle struct id the C function RETURNS, so the VM
             // reassembles a struct from the wrapper's result leaves; -1 for a scalar return.
             int         cextern_ret_sid;
             // OFI-167 (native direct-extern): this call targets an `extern "c"` function that is

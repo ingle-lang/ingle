@@ -3,7 +3,7 @@
 
 #include "program.h"
 
-// The `.emb` bytecode container (docs/design/bytecode-container.md): a serialized CompiledProgram — the
+// The `.igb` bytecode container (docs/design/bytecode-container.md): a serialized CompiledProgram — the
 // exact artifact the VM executes — so a compiler can emit a RUNNABLE program, not just a disassembly.
 // This is the Phase 1 step that lets the self-hosted bytecode backend produce something executable; for
 // now stage 0 both writes (`--emit=bytecode-bin`) and loads/runs (`--run-bytecode`) it, which also gives

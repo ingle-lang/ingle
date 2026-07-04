@@ -28,7 +28,7 @@ typedef struct {
 
 // Cap on recursive-descent nesting for expressions and types. Hand-written recursive
 // descent has no stack-overflow protection, so deeply nested input (`((((…))))`, a long
-// `---…` chain, `[[[…]]]`) would otherwise crash emberc with a SIGSEGV instead of a clean
+// `---…` chain, `[[[…]]]`) would otherwise crash inglec with a SIGSEGV instead of a clean
 // diagnostic. 1000 is far beyond any human-written nesting yet leaves ample C stack.
 #define MAX_PARSE_DEPTH 1000
 
@@ -478,7 +478,7 @@ static Type *parse_type(Parser *p) {
 // ---- Expressions (recursive descent with precedence climbing). ----
 
 // binary_prec returns the binding power of a binary operator, or 0 if `t` is not
-// one. Higher binds tighter. All Ember binary operators are left-associative.
+// one. Higher binds tighter. All Ingle binary operators are left-associative.
 static int binary_prec(TokenType t) {
     switch (t) {
         case TOK_OR:                                   return 1;   // ||
@@ -513,7 +513,7 @@ static int binary_prec(TokenType t) {
 // well-formed types; a malformed type-ish span at worst yields a parse error in
 // parse_type, never a silent miscompile.
 //
-// LOAD-BEARING INVARIANT: this rests on "no expression begins with '{'". If Ember
+// LOAD-BEARING INVARIANT: this rests on "no expression begins with '{'". If Ingle
 // ever gains brace-initial expressions (map/record literals, block-expressions),
 // `> {` stops being unambiguous and OFI-002 must be reopened — that is the point of
 // stating it here. See docs/grammar.ebnf and docs/language.md.

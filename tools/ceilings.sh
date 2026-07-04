@@ -21,11 +21,11 @@
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-EMB="$ROOT/build/emberc"
+EMB="$ROOT/build/inglec"
 KNOWN="$ROOT/tools/ceilings-known.txt"
 N="${1:-600}"   # default well past BOTH 256 and the old 512-class internal buffers (a regression
                 # that reintroduces a fixed array sized ≤512 is then caught by the standard gate)
-export EMBER_STD="$ROOT/std"
+export INGLE_STD="$ROOT/std"
 
 TMP="${TMPDIR:-/tmp}/ceilings.$$"
 mkdir -p "$TMP"
@@ -39,21 +39,21 @@ say "ceilings: building compiler…"
 # sum(a..b) inclusive — the checksum most probes fold their values into.
 sum_range() { awk -v a="$1" -v b="$2" 'BEGIN { s = 0; for (i = a; i <= b; i++) s += i; print s }'; }
 
-# ---- probe generators: each writes $TMP/<dim>.em and echoes that program's EXPECTED stdout --------
+# ---- probe generators: each writes $TMP/<dim>.ig and echoes that program's EXPECTED stdout --------
 # Every probe folds the values it touches into a printed checksum, so a wrapped index (wrong
 # constant/local/field/function) changes the number and is caught — a silent miscompile can't pass.
 
 gen_const() {           # > N distinct constant literals in ONE function (OP_CONST → OP_CONST_LONG)
     { echo "fn main() -> int {"; echo "    var acc = 0"
       i=0; while [ "$i" -lt "$N" ]; do echo "    acc = acc + $((1000 + i))"; i=$((i + 1)); done
-      echo '    print("{acc}")'; echo "    return 0"; echo "}"; } > "$TMP/const.em"
+      echo '    print("{acc}")'; echo "    return 0"; echo "}"; } > "$TMP/const.ig"
     sum_range 1000 $((1000 + N - 1))
 }
 
 gen_string() {          # > N distinct string literals in ONE function (OP_STRING → OP_STRING_LONG)
     { echo "fn main() -> int {"; echo "    var acc = 0"
       i=0; while [ "$i" -lt "$N" ]; do echo "    acc = acc + \"s$i=\".len()"; i=$((i + 1)); done
-      echo '    print("{acc}")'; echo "    return 0"; echo "}"; } > "$TMP/string.em"
+      echo '    print("{acc}")'; echo "    return 0"; echo "}"; } > "$TMP/string.ig"
     awk -v n="$N" 'BEGIN { s = 0; for (i = 0; i < n; i++) s += length("s" i "="); print s }'
 }
 
@@ -62,7 +62,7 @@ gen_local() {           # > N live locals in ONE function (OP_GET_LOCAL / OP_SET
       i=0; while [ "$i" -lt "$N" ]; do echo "    let v$i = $i"; i=$((i + 1)); done
       echo "    var acc = 0"
       i=0; while [ "$i" -lt "$N" ]; do echo "    acc = acc + v$i"; i=$((i + 1)); done
-      echo '    print("{acc}")'; echo "    return 0"; echo "}"; } > "$TMP/local.em"
+      echo '    print("{acc}")'; echo "    return 0"; echo "}"; } > "$TMP/local.ig"
     sum_range 0 $((N - 1))
 }
 
@@ -72,7 +72,7 @@ gen_func() {            # > N functions in the program (OP_CALL function-table i
     { i=0; while [ "$i" -lt "$N" ]; do echo "fn fn_$i() -> int { return $i }"; i=$((i + 1)); done
       echo "fn main() -> int {"; echo "    var acc = 0"
       i=0; while [ "$i" -lt "$N" ]; do echo "    acc = acc + fn_$i()"; i=$((i + 1)); done
-      echo '    print("{acc}")'; echo "    return 0"; echo "}"; } > "$TMP/func.em"
+      echo '    print("{acc}")'; echo "    return 0"; echo "}"; } > "$TMP/func.ig"
     sum_range 0 $((N - 1))
 }
 
@@ -84,7 +84,7 @@ gen_structtype() {      # > N distinct struct TYPES (struct-type id operand). Ea
           i=$((i + 1)); done
       echo "fn main() -> int {"; echo "    var acc = 0"
       i=0; while [ "$i" -lt "$N" ]; do echo "    acc = acc + g$i()"; i=$((i + 1)); done
-      echo '    print("{acc}")'; echo "    return 0"; echo "}"; } > "$TMP/structtype.em"
+      echo '    print("{acc}")'; echo "    return 0"; echo "}"; } > "$TMP/structtype.ig"
     sum_range 0 $((N - 1))
 }
 
@@ -97,7 +97,7 @@ gen_field() {           # ONE struct with > N fields (OP_GET_FIELD / OP_SET_FIEL
           if [ "$i" -gt 0 ]; then printf ","; fi; printf " f%d: %d" "$i" "$i"; i=$((i + 1)); done
       echo " }"; echo "    var acc = 0"
       i=0; while [ "$i" -lt "$N" ]; do echo "    acc = acc + b.f$i"; i=$((i + 1)); done
-      echo '    print("{acc}")'; echo "    return 0"; echo "}"; } > "$TMP/field.em"
+      echo '    print("{acc}")'; echo "    return 0"; echo "}"; } > "$TMP/field.ig"
     sum_range 0 $((N - 1))
 }
 
@@ -112,19 +112,19 @@ gen_variant() {         # ONE enum with > N variants (OP_NEW_ENUM variant index,
       echo "    match e {"
       i=0; while [ "$i" -lt "$N" ]; do echo "        case V$i { acc = $i }"; i=$((i + 1)); done
       echo "    }"
-      echo '    print("{acc}")'; echo "    return 0"; echo "}"; } > "$TMP/variant.em"
+      echo '    print("{acc}")'; echo "    return 0"; echo "}"; } > "$TMP/variant.ig"
     echo $((N - 1))
 }
 
 DIMS="const string local func structtype field variant"
 
-# `emberc --emit=run` and the compiled binary both append a `=> <return value>` trailer after the
+# `inglec --emit=run` and the compiled binary both append a `=> <return value>` trailer after the
 # program's own output; strip it so the comparison sees just the printed checksum.
 strip_trailer() { printf '%s' "$1" | sed 's/[[:space:]]*=>[[:space:]]*-\{0,1\}[0-9]\{1,\}[[:space:]]*$//'; }
 
 # classify <dim> <expected> -> echoes WORKS | CAPPED:<msg> | FAIL:<reason>
 classify() {
-    dim="$1"; expected="$2"; em="$TMP/$dim.em"
+    dim="$1"; expected="$2"; em="$TMP/$dim.ig"
     out=$(strip_trailer "$("$EMB" --emit=run "$em" 2>"$TMP/err")"); rc=$?
     if [ "$out" = "$expected" ] && [ "$rc" -eq 0 ]; then
         # WORKS on the VM — the binary must agree (a native-only wrap is still a miscompile).

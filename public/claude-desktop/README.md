@@ -1,25 +1,25 @@
-# Claude Desktop (Ember)
+# Claude Desktop (Ingle)
 
-A Claude Desktop look‑alike written in **Ember** — the acid test for the language: a real,
+A Claude Desktop look‑alike written in **Ingle** — the acid test for the language: a real,
 interactive, network‑backed desktop application driven by the Anthropic Messages API.
 
-This is the flagship **example application** for Ember — the largest piece of dogfooding in the
+This is the flagship **example application** for Ingle — the largest piece of dogfooding in the
 repo — with its own README here. It is **not** part of the language core or standard library; it
-is a real, shippable app *written in* Ember, and it exists to harden the language under the load of
+is a real, shippable app *written in* Ingle, and it exists to harden the language under the load of
 a genuine networked, interactive program.
 
 ## What it is
 
-- **Phase 1 — the bridge (done).** A CLI (`chat.em`) that talks to Claude over HTTPS: it reads
+- **Phase 1 — the bridge (done).** A CLI (`chat.ig`) that talks to Claude over HTTPS: it reads
   `ANTHROPIC_API_KEY` from the environment, builds a Messages‑API request, POSTs it, and prints
-  Claude's reply. This proves Ember ↔ Anthropic end‑to‑end.
-- **Phase 2 — the GUI (done).** A desktop window (`gui.em`) styled like Claude Desktop for macOS:
+  Claude's reply. This proves Ingle ↔ Anthropic end‑to‑end.
+- **Phase 2 — the GUI (done).** A desktop window (`gui.ig`) styled like Claude Desktop for macOS:
   a warm sidebar (Claude mark, "+ New chat"), a centred conversation column with right‑aligned user
   bubbles and left‑aligned "Claude" replies, word‑wrapping + scroll, a full text editor in the input
-  bar (caret, arrows, repeat, blink), and a coral send button. Built on Ember's raylib graphics
+  bar (caret, arrows, repeat, blink), and a coral send button. Built on Ingle's raylib graphics
   backend; the full multi‑turn history is sent to the API each turn.
-- **Phase 3 — Flare rewrite (done, current primary app).** `flare_chat.em` rebuilds the desktop
-  app on `std/flare` (Ember's React-ergonomics UI layer) with `std/sse` + `std/json` for true
+- **Phase 3 — Flare rewrite (done, current primary app).** `flare_chat.ig` rebuilds the desktop
+  app on `std/flare` (Ingle's React-ergonomics UI layer) with `std/sse` + `std/json` for true
   token-by-token streaming. Features: switchable conversation list, scrollable markdown transcript
   (`std/markdown` + `std/highlight`), a `text_area` composer (Shift+Enter newline, Enter send),
   a settings modal with `segmented` controls for model / max-tokens / theme / zoom, and full
@@ -97,13 +97,13 @@ natives (font 0 is the embedded Inter, always present as a fallback):
 Loading at runtime (rather than embedding) keeps the repo lean and is the correct way to use
 Apple's system fonts (they may be used by apps on the platform but not redistributed/embedded). Each
 `load_font` returns `-1` if the file isn't there, and the app falls back to the body font — so it
-still runs on a non‑mac. **To try other faces, just change the path string** in `gui.em` — e.g.
+still runs on a non‑mac. **To try other faces, just change the path string** in `gui.ig` — e.g.
 `/System/Library/Fonts/Supplemental/Georgia.ttf`, `.../Charter.ttc`, `.../Baskerville.ttc`, or a
 downloaded OFL font like Fraunces / JetBrains Mono.
 
-## How Ember talks to the Anthropic API
+## How Ingle talks to the Anthropic API
 
-Ember has no networking of its own, so the app **executes a C library** through the FFI — the same
+Ingle has no networking of its own, so the app **executes a C library** through the FFI — the same
 way you'd call libc, but for libcurl:
 
 ```ember
@@ -115,15 +115,15 @@ extern "c" {
 Two pieces of language work made this possible (both landed in the core compiler):
 
 1. **FFI string return** (`ret_is_string`, closes OFI‑043's read direction). A C wrapper returns a
-   `malloc`'d `char*`; the FFI marshalling copies it into an owned Ember `string` and frees the C
+   `malloc`'d `char*`; the FFI marshalling copies it into an owned Ingle `string` and frees the C
    buffer — "copy‑on‑return". Before this, the FFI could only *send* borrowed pointers to C.
 2. **A libcurl `http_post` wrapper** (`src/cextern.c`, guarded by `#if EMBER_NET`). It does the
    HTTPS POST with a write‑callback into a growing buffer and hands the response back as the string.
    It is **opt‑in**, exactly like the raylib graphics backend — the default `make` / `make test`
    stay dependency‑free. The `headers` argument is one string of `\n`‑separated header lines.
 
-This is "Tadpole for Ember": a thin, typed bridge to a battle‑tested C HTTP stack, with all of the
-request building and response parsing written in pure Ember.
+This is "Tadpole for Ingle": a thin, typed bridge to a battle‑tested C HTTP stack, with all of the
+request building and response parsing written in pure Ingle.
 
 ## Local models (Ollama)
 
@@ -138,14 +138,14 @@ ollama pull llama3.2      # or any chat model — mistral-nemo, qwen2.5, phi4, �
 
 # then launch the GUI build and switch Provider → Ollama in Settings
 make net-graphics
-build/emberc-net-gfx --emit=run public/claude-desktop/flare_chat.em
+build/inglec-net-gfx --emit=run public/claude-desktop/flare_chat.ig
 ```
 
 **How it works.** Model discovery is a `GET /api/tags` (the new `std/http.get`), filtered to
 completion‑capable models (embedding‑only models are hidden). Chat uses Ollama's
 **OpenAI‑compatible** `/v1/chat/completions` with `stream: true`, so its Server‑Sent Events decode
 through the same `std/sse` as the Anthropic path — *one streaming code path, two providers*. The
-client lives in `ollama.em` (the twin of `anthropic.em`); a second worker fiber runs it alongside the
+client lives in `ollama.ig` (the twin of `anthropic.ig`); a second worker fiber runs it alongside the
 Claude worker, and replies multiplex onto the one response channel the render loop already drains.
 
 - **`OLLAMA_HOST`** (optional) — point at a non‑default daemon (`host:port` or a full URL). Defaults
@@ -163,7 +163,7 @@ make net
 
 # set your key and ask Claude something
 export ANTHROPIC_API_KEY=sk-ant-...
-build/emberc-net --emit=run public/claude-desktop/chat.em "Explain Ember in one sentence."
+build/inglec-net --emit=run public/claude-desktop/chat.ig "Explain Ingle in one sentence."
 ```
 
 `./run.sh "your message"` does both steps. The model defaults to `claude-opus-4-8`.
@@ -175,7 +175,7 @@ build/emberc-net --emit=run public/claude-desktop/chat.em "Explain Ember in one 
 make net-graphics
 
 export ANTHROPIC_API_KEY=sk-ant-...
-build/emberc-net-gfx --emit=run public/claude-desktop/gui.em
+build/inglec-net-gfx --emit=run public/claude-desktop/gui.ig
 ```
 
 `./run-gui.sh` does both steps. Type a message and press **Enter** *or click the coral send
@@ -193,25 +193,25 @@ positions were changing the whole time, which proved the loop and OS input were 
 simply wasn't wiring the clicks.
 
 ```sh
-EMBER_TAPE=/tmp/gui.tape build/emberc-net-gfx --emit=run public/claude-desktop/gui.em
+EMBER_TAPE=/tmp/gui.tape build/inglec-net-gfx --emit=run public/claude-desktop/gui.ig
 # in another terminal:
 tail -f /tmp/gui.tape
 ```
 
 The whole GUI — layout, message bubbles, word‑wrap, scroll, the text input, the JSON request/reply
-handling — is pure Ember (`gui.em`, ~430 lines). Only two things are C: the HTTPS transport
+handling — is pure Ingle (`gui.ig`, ~430 lines). Only two things are C: the HTTPS transport
 (libcurl, via `http_post`) and the windowing/drawing primitives (raylib, the same backend the
-`examples/*_ui.em` demos use).
+`examples/*_ui.ig` demos use).
 
 ## Notes & gotchas
 
-- **JSON braces must be escaped in Ember string literals** (`\{` `\}`) because `{...}` is string
-  interpolation. `chat.em` builds JSON with a small set of helpers + `from_char_code` for the
+- **JSON braces must be escaped in Ingle string literals** (`\{` `\}`) because `{...}` is string
+  interpolation. `chat.ig` builds JSON with a small set of helpers + `from_char_code` for the
   structural characters, and a `json_escape` for the user's text.
-- The whole JSON request/response handling is **pure Ember** — only the transport is C.
-- The combined GUI build (Phase 2) is `make net-graphics` → `build/emberc-net-gfx`.
-- **The GUI runs on the VM.** Graphics is a VM-only backend (`--emit=run`), so `gui.em` is not
-  compiled by the native AST→C backend; the network CLI (`chat.em`) runs on either.
+- The whole JSON request/response handling is **pure Ingle** — only the transport is C.
+- The combined GUI build (Phase 2) is `make net-graphics` → `build/inglec-net-gfx`.
+- **The GUI runs on the VM.** Graphics is a VM-only backend (`--emit=run`), so `gui.ig` is not
+  compiled by the native AST→C backend; the network CLI (`chat.ig`) runs on either.
 - **Input must be wired explicitly.** raylib (via `frame_end`→`EndDrawing`) polls OS input every
   frame and the live getters `mouse_x`/`mouse_y`/`mouse_down`/`char_pressed`/`key_pressed` read it —
   but a widget only reacts if the app hit-tests it. The send button and **New chat** pill are

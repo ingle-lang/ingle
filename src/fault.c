@@ -1,7 +1,7 @@
 #include "fault.h"
 #include "jsonw.h"
 
-// The active render mode. Defaults to HUMAN so an ordinary `emberc --emit=run` at a terminal
+// The active render mode. Defaults to HUMAN so an ordinary `inglec --emit=run` at a terminal
 // keeps a readable, teacher-voice failure; `--faults=agent` flips it to JSON Lines for an LLM.
 static FaultRenderMode g_fault_mode = FAULT_RENDER_HUMAN;
 

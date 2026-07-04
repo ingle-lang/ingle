@@ -64,7 +64,7 @@ interpolation** (`"{ expr }"`) and **UTF-8 string methods** (`len`/`bytes`/`char
 module-qualified function calls + types, with `_`-prefix privacy); **executable contracts**
 (`requires`/`ensures` with `result`, type-checked always, runtime-checked in debug and elided in
 `--release`, reporting violations as structured events on the tape); and `return`. Run a program
-with `inglec --emit=run file.em`.
+with `inglec --emit=run file.ig`.
 
 **Interfaces** are fully runtime now: as **generic bounds** (`<T: Ord>`, static witness dispatch)
 and as **value types** (`let s: Shape = …`, `[Shape]`, dynamic dispatch through a boxed
@@ -87,7 +87,7 @@ ordinary `//` comments — they are attached to the declaration in the AST and b
 source of API documentation, surfaced two ways from the one comment:
 
 - the language server shows them on **hover** and in **completion** (`inglec --lsp`), and
-- `inglec --emit=docs <file.em>` renders them to a Markdown reference page.
+- `inglec --emit=docs <file.ig>` renders them to a Markdown reference page.
 
 So a comment written once is both the editor tooltip and the docs, and the two cannot drift.
 `////` (four or more slashes) and `//` are ordinary comments and are ignored. **[runs]**
@@ -289,8 +289,8 @@ fn clamp(x: int, lo: int, hi: int) -> int
   serial and the parallel runtimes (they are compiled into the bytecode).
 
 ```
-inglec --emit=run         file.em     # debug: contracts checked (the default)
-inglec --emit=run --release file.em   # release: contracts elided
+inglec --emit=run         file.ig     # debug: contracts checked (the default)
+inglec --emit=run --release file.ig   # release: contracts elided
 ```
 
 ### `assert` — inline checks that join the trace
@@ -311,7 +311,7 @@ function's `requires`, runs it, and reports the first input that violates an `en
 (or crashes) as a **counterexample**:
 
 ```
-inglec --emit=check file.em
+inglec --emit=check file.ig
 # check sum_pt: FAILED
 #   counterexample: sum_pt({-1, 0})  =>  postcondition failed in 'sum_pt' (ensures, line 12)
 # {"event":"check_failed","fn":"sum_pt","input":"sum_pt({-1, 0})","detail":…}
@@ -343,7 +343,7 @@ them (performing no real I/O and no real foreign calls) — and verifies the two
 **byte-for-byte identical**:
 
 ```
-inglec --emit=replay file.em
+inglec --emit=replay file.ig
 # replay: deterministic — 5 nondeterministic event(s) recorded (5 random, 0 clock, 0 read_line, 0 read_file, 0 ffi); both runs identical
 # {"event":"replay","status":"deterministic","events":5,"random":5,"clock":0,"read_line":0,"read_file":0,"ffi":0}
 ```
@@ -367,7 +367,7 @@ discharges the proof statically, with no external solver. For each `ensures`, it
 integer-infeasibility, so a proof is sound):
 
 ```
-inglec --emit=prove file.em
+inglec --emit=prove file.ig
 # prove add_nonneg: ensures @line 4 — PROVED          (a>=0 ∧ b>=0  ⊢  a+b >= 0)
 # prove scale:      ensures @line 12 — PROVED          (x>=0         ⊢  2x   >= x)
 # prove shift:      ensures @line 19 — not proved (use --check)
@@ -408,7 +408,7 @@ fn main() -> int {
 And Ingle talks to the **environment it was launched in**, so it can be a real command-line tool:
 
 - **`args() -> [string]`** — the command-line arguments passed to the program (everything after
-  the source file on the `inglec --emit=run file.em …` line). Empty when none were given.
+  the source file on the `inglec --emit=run file.ig …` line). Empty when none were given.
 - **`env(name: string) -> string`** — the value of an environment variable, or `""` if unset.
 - **`exit(code: int)`** — terminate the program immediately with an exit code (`0` = success).
   Execution stops at the call; nothing after it runs and `main`'s return value is not printed.
@@ -1463,17 +1463,17 @@ becomes the default. **Still deferred:** `select`/timeouts, and main↔child cha
 A source file is a module. `import "path" as name` brings another module into scope under an
 explicit alias, and its members are used **qualified** through that alias — so a name's origin is
 always visible (no implicit flat merging, no collisions). Paths resolve relative to the importing
-file (with `.em` appended); all transitively-imported modules are loaded, deduped, and compiled as
+file (with `.ig` appended); all transitively-imported modules are loaded, deduped, and compiled as
 one program (mutual imports are fine).
 
 ```ember
-// modlib/mathx.em
+// modlib/mathx.ig
 fn _step(n: int) -> int { return n + 1 }      // private (leading _)
 fn square(n: int) -> int { return n * n }     // public
 fn cube(n: int) -> int { return square(n) * _step(n - 1) }
 ```
 ```ember
-// main.em
+// main.ig
 import "modlib/mathx" as mathx
 fn main() -> int {
     return mathx.square(5) + mathx.cube(2)     // 33
@@ -1504,13 +1504,13 @@ module may of course also export a constructor *function* (`geom.make(…)`); ei
 access and methods work normally, since a value's type is module-independent once resolved.
 
 ```ember
-// geom.em
+// geom.ig
 struct Point { x: int  y: int }
 fn make(x: int, y: int) -> Point { return Point { x: x, y: y } }
 fn sum(p: Point) -> int { return p.x + p.y }
 ```
 ```ember
-// main.em
+// main.ig
 import "geom" as geom
 fn main() -> int {
     let p = geom.Point { x: 3, y: 4 }   // qualified construction literal
@@ -1621,7 +1621,7 @@ extern "c" {
 Passing a heap value (a `string` literal, a freshly-built array) borrows it for the call and the
 caller reclaims it afterward, so `strlen("hello")` leaks nothing. (A C function that *returns*
 owned memory — a `char*` Ingle would have to copy or free — is a deliberate future widening; see
-OFI-043. Arbitrary dynamic linking likewise remains future work.) See `examples/16_ffi.em`.
+OFI-043. Arbitrary dynamic linking likewise remains future work.) See `examples/16_ffi.ig`.
 
 > **Replay note:** `--emit=replay` captures a C call's scalar *result* but not the bytes a C
 > function writes into a borrowed `mut` buffer, so a program that reads a file into a `[u8]` and uses
@@ -1866,7 +1866,7 @@ JSON-Lines, the same machine-readable shape as the execution tape.
 
 ```
 make graphics                                   # builds build/inglec-gfx (links raylib)
-INGLE_STD=./std build/inglec-gfx --emit=run examples/graphics/17_flare.em
+INGLE_STD=./std build/inglec-gfx --emit=run examples/graphics/17_flare.ig
 ```
 
 **Status — [runs]:** layout, the widgets above, overlays, animation, theming/zoom, virtual lists,
@@ -1881,18 +1881,18 @@ selection in Markdown, and free-floating windows. The full tour is in
 ## Using the compiler
 
 ```
-inglec file.em                  # default: print the token stream
-inglec --emit=tokens   file.em  # token stream
-inglec --emit=ast      file.em  # parsed AST
-inglec --emit=bytecode file.em  # bytecode disassembly (with source lines)
-inglec --emit=run      file.em  # compile and execute; prints "=> <value>"
-inglec --emit=c        file.em  # emit the native C lowering to stdout
-inglec -o prog         file.em  # compile to a standalone native binary
-inglec --emit=trace    file.em  # execution tape, JSON Lines (alias: --tape)
-inglec --emit=check    file.em  # property-check contracts (see Contracts)
-inglec --emit=prove    file.em  # statically prove contracts where decidable
-inglec --emit=replay   file.em  # record/replay determinism check
-inglec --emit=docs     file.em  # render /// doc comments to a Markdown page
+inglec file.ig                  # default: print the token stream
+inglec --emit=tokens   file.ig  # token stream
+inglec --emit=ast      file.ig  # parsed AST
+inglec --emit=bytecode file.ig  # bytecode disassembly (with source lines)
+inglec --emit=run      file.ig  # compile and execute; prints "=> <value>"
+inglec --emit=c        file.ig  # emit the native C lowering to stdout
+inglec -o prog         file.ig  # compile to a standalone native binary
+inglec --emit=trace    file.ig  # execution tape, JSON Lines (alias: --tape)
+inglec --emit=check    file.ig  # property-check contracts (see Contracts)
+inglec --emit=prove    file.ig  # statically prove contracts where decidable
+inglec --emit=replay   file.ig  # record/replay determinism check
+inglec --emit=docs     file.ig  # render /// doc comments to a Markdown page
 inglec --lsp                    # run the language server
 inglec --doctor                 # environment / toolchain self-check
 ```
@@ -1912,9 +1912,9 @@ Compile errors are designed to **explain the fix in terms of your program, not t
 moved, and suggests how to fix it:
 
 ```
-prog.em:6:12: error: use of 'p' after it was moved
-prog.em:6:12: help: a move transfers ownership; pass it without `move` to borrow it instead, or make a copy before the move
-prog.em:5:13: note: value moved here
+prog.ig:6:12: error: use of 'p' after it was moved
+prog.ig:6:12: help: a move transfers ownership; pass it without `move` to borrow it instead, or make a copy before the move
+prog.ig:5:13: note: value moved here
 ```
 
 Because Ingle is designed LLM-first (§5b), diagnostics are also available **as data**: add
@@ -1924,13 +1924,13 @@ secondary `note` location — so a model that wrote the code can parse the error
 without scraping text:
 
 ```
-inglec --emit=run --diagnostics=json prog.em
-{"severity":"error","file":"prog.em","line":6,"col":12,"message":"use of 'p' after it was moved","near":null,"help":"a move transfers ownership; …","note":{"line":5,"col":13,"message":"value moved here"}}
+inglec --emit=run --diagnostics=json prog.ig
+{"severity":"error","file":"prog.ig","line":6,"col":12,"message":"use of 'p' after it was moved","near":null,"help":"a move transfers ownership; …","note":{"line":5,"col":13,"message":"value moved here"}}
 ```
 
 ## The execution tape — [runs]
 
-`inglec --tape file.em` runs the program and writes a **tape**: one JSON object per executed
+`inglec --tape file.ig` runs the program and writes a **tape**: one JSON object per executed
 instruction, in order, to stdout. Each event records the instruction offset, the opcode, the
 **source line** it came from, and a snapshot of the value stack at that moment:
 

@@ -1,6 +1,6 @@
 name: CI
 
-# Build + test Ember on both supported platforms. There were no prebuilt releases and no CI when
+# Build + test Ingle on both supported platforms. There were no prebuilt releases and no CI when
 # this landed, so this is also the first automated proof the macOS build keeps working — but the
 # headline reason it exists is to keep the Linux port honest: a macOS-ism (a missing -lm, a glibc
 # feature-test macro, a gcc -Werror gripe) that compiles on a Mac but breaks Linux fails here.
@@ -37,7 +37,7 @@ jobs:
 
       # --- Self-hosting bootstrap differential: compiler-shaped programs (recursive ASTs, symbol
       #     tables) run on both backends with byte-identical stdout. The drift guard for the staged
-      #     port of the compiler into Ember (docs/design/self-hosting.md). ---
+      #     port of the compiler into Ingle (docs/design/self-hosting.md). ---
       - name: Self-hosting differential
         run: make selfhost
 

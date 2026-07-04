@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 
-// TokenType enumerates every lexical category Ember's scanner can produce.
+// TokenType enumerates every lexical category Ingle's scanner can produce.
 // The order is not significant except that TOK_COUNT must stay last so it
 // records the total and can size the name table in token.c.
 typedef enum {

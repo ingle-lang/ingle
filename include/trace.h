@@ -5,7 +5,7 @@
 #include "opcode.h"
 #include <stddef.h>
 
-// Ember's execution-observability seam (the basis for the FROG-style `--tape`).
+// Ingle's execution-observability seam (the basis for the FROG-style `--tape`).
 //
 // The VM fires one TraceEvent immediately *before* it executes each instruction.
 // A trace sink subscribes to those events; the VM holds at most one (passed to

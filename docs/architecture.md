@@ -217,7 +217,7 @@ missed a caller in another module would silently break the build, so correctness
 workspace, not just the open file (Karl's call). Keying on def-column would have been precise in
 theory but is unreliable in practice; keying on (def-file, def-line) plus the spelling is robust
 against the coarse column and still scope-correct (two same-named locals in different functions have
-different def-lines, so they never conflate). The cost is re-indexing each workspace `.em` file per
+different def-lines, so they never conflate). The cost is re-indexing each workspace `.ig` file per
 request (the server walks the root captured at `initialize`, skipping `.git`/`target`/`node_modules`,
 and reads unsaved buffers from the open-document store); fine at the current corpus size, with a
 project-index cache the obvious later refinement — the same "caching is deferred" note as hover and
@@ -262,7 +262,7 @@ LSP reports semantic errors, not lowering results, and check-only never touches 
 **Why.** The signatures are pure data (`draw_rect` = 5 ints) with zero raylib dependency, so gating
 them bought nothing and cost correctness: the installed LSP is the default build, so opening any file
 that imports `std/ui`/`std/draw` flagged every graphics call as "undefined function" and cascaded
-through the whole file (OFI-078: 182 false diagnostics on `examples/11_menus.em`, vs 0 from a graphics
+through the whole file (OFI-078: 182 false diagnostics on `examples/11_menus.ig`, vs 0 from a graphics
 build). Decoupling "the language knows these functions" from "this build links raylib" makes one
 dependency-free binary serve the editor correctly for all programs. The check-only LSP path is the
 right LSP semantics anyway and sidesteps the question of lowering a graphics call in a non-graphics
@@ -299,7 +299,7 @@ linear-integer fragment; the inlay is honest about everything else (`runtime-che
 
 **Rule.** `inglec --doctor` verifies the pieces a working language server needs and prints a
 `[ok]`/`[!!]` line per check with the *exact* fix for anything wrong: the binary in use, that the
-standard library resolves (`<g_std_dir>/string.em` opens), and that the shared frontend is healthy
+standard library resolves (`<g_std_dir>/string.ig` opens), and that the shared frontend is healthy
 (it type-checks a trivial program in-process via `check_diagnostics`), and — the staleness check —
 whether the INSTALLED binary the editor's LSP actually runs (`~/.ingle/bin/inglec`) matches this build
 (it `popen`s the installed `--version` and compares to `EMBER_VERSION`; mismatched = "rebuilt but not
@@ -409,7 +409,7 @@ The sink indirection is the minimum needed to serve different outputs from one t
 
 ## Decision: the example programs are full-compiled by the test suite, not just lex+parsed
 
-The `examples/*.em` showcase programs double as the living integration baseline, but `tests/run.sh`
+The `examples/*.ig` showcase programs double as the living integration baseline, but `tests/run.sh`
 historically only **smoke-tested** them through lex + parse. That let two flagship examples
 (`03_errors`, `05_concurrency`) silently drift off the implemented language — calling functions that
 no longer existed and using `?` on a non-`Result` — because nothing type-checked them (OFI-030). The
@@ -434,7 +434,7 @@ carries a `SemKind` (function/type/variant/constant/module/…), the owning modu
 (`container`), the symbol's `///` doc, a constant's value, a struct field's byte offset+size (Ingle
 has native layout), and a `def_file`/`def_line` definition site — so the hover card shows
 `(kind) scope.name signature`, the doc, and a "declared in file:line" provenance line, and
-go-to-definition jumps cross-file into `std/*.em`.
+go-to-definition jumps cross-file into `std/*.ig`.
 
 Key enablers, all reusing existing machinery rather than adding a second analysis (the rust-analyzer
 lesson the LSP already follows): the shared `typefmt_fn`/`typefmt_type` formatter renders every
@@ -607,7 +607,7 @@ reinterpret — sign-extending for the signed kinds — so each wraps at its own
 44u8`, two's-complement for `i8`). Dedicated opcodes (rather than a "wrapping" flag on the existing
 arithmetic kind byte) keep the change isolated and avoid touching every `OP_ADD/SUB/MUL` emit site —
 the operand-count discipline the VM relies on (see the opcode-operand note). Showcase + regression:
-FNV-1a written in pure Ingle (`tests/run/wrapping_arith.em`).
+FNV-1a written in pure Ingle (`tests/run/wrapping_arith.ig`).
 
 
 ## Decision: UTF-8 strings at code-point granularity — byte-level len/bytes, code-point chars/char_count
@@ -674,7 +674,7 @@ overall: returnable/storable views, array→slice auto-coercion, and mutable wri
 **Rule.** Ingle gains a **second lowering** alongside `src/codegen.c`'s AST→bytecode: `src/cgen_c.c`
 walks the *same* checked AST (reusing the checker's `resolved_fn`, `num_kind`, `MonoPlan` and
 `StructLayout`) and emits a self-contained **C** translation unit. `inglec --emit=c` writes the C;
-`inglec -o <bin> file.em` writes it and invokes the system C compiler to link it against the runtime
+`inglec -o <bin> file.ig` writes it and invokes the system C compiler to link it against the runtime
 in `include/ember_rt.h`, producing a standalone binary. The **bytecode VM stays the canonical
 reference semantics** — the analysis/verification emit modes (`run`, `check`, `replay`, `prove`,
 `trace`) remain VM-only, native is the *release/standalone* path. The two are held in lockstep by a
@@ -732,7 +732,7 @@ left boxed in the VM and so unflagged). `src/cgen_c.c` resolves these via `sid_o
 struct-specific boxed runtime helpers (`em_struct`/`em_get_field`/…) were removed; the boxed
 object runtime (`alloc_instance`/`drop_value`/`field_loc`) stays for the VM and for the
 imminent boxed aggregates (enums). Differential-tested across moves, mutation, `mut self`,
-nested structs, and methods (tests/native/struct*.em).
+nested structs, and methods (tests/native/struct*.ig).
 
 
 ## Decision: boxed-aggregate runtime helpers mirror the VM — read/borrow, never consume
@@ -1057,7 +1057,7 @@ normally (planted heap-overflow is reported with a trace; instrumented `inglec` 
 in ~0.4 s). Added two Makefile targets mirroring the `release` variant pattern: **`asan`** →
 `build/inglec-asan` (`-O1 -g -fsanitize=address -fno-omit-frame-pointer`) and **`asan-par`** →
 `build/inglec-asan-par` (same + `-DEMBER_PARALLEL=1`, to exercise the channel/nursery cross-thread paths).
-Run with `ASAN_OPTIONS=detect_leaks=0 build/inglec-asan --emit=run <file.em>`.
+Run with `ASAN_OPTIONS=detect_leaks=0 build/inglec-asan --emit=run <file.ig>`.
 
 **Scope.** ASan covers the temporal/spatial bugs (use-after-free, double-free, heap-overflow) that RSS
 stress can't see. It does **not** cover leaks — **LeakSanitizer remains unsupported on macOS** — so leak
@@ -1154,7 +1154,7 @@ shared by several tasks — and is safe regardless of join-vs-drop ordering: a b
 peer still references, so there is no use-after-free window. Verified: channel-create loops go RSS-FLAT (was
 5→57 MB at 200k), all channel scenarios (shared-by-N, returned, abandoned-buffered, cross-thread home reclaim)
 are ASan + double-drop-detector clean, the 312 goldens + native differential stay green, and
-`error_channel_deadlock` still detects. Regression: `tests/run/channel_refcount.em` (+ a cross-thread variant
+`error_channel_deadlock` still detects. Regression: `tests/run/channel_refcount.ig` (+ a cross-thread variant
 in `tests/parallel/`).
 
 
@@ -1352,11 +1352,11 @@ HTTP status is a `Response` field, not an error (`send` fails only on transport)
 are separate modules. The capability model (`Net` token) is adopted as the NEXT language milestone, not
 smuggled in here.
 
-**Realized 2026-06-20.** The `std/http.em` wrapper module now actually exists, closing the gap between
+**Realized 2026-06-20.** The `std/http.ig` wrapper module now actually exists, closing the gap between
 this decision's "user code sees only `import "std/http"`" and the reality that the desktop app had been
 declaring the four streaming externs (plus blocking `http_post`) in an inline `extern "c"` block. The
 module wraps them as clean names — `http.post` (blocking, whole body) and `http.open`/`next`/`status`/
-`close` (the streaming pull) — and is imported by `chat.em`, by the new reusable `anthropic` client
+`close` (the streaming pull) — and is imported by `chat.ig`, by the new reusable `anthropic` client
 (which owns `stream_worker`), and is provable end-to-end against a live endpoint. Lifting the spawnable
 `stream_worker` into that library module is what surfaced and closed OFI-091 (qualified-callee `spawn`).
 
@@ -1374,7 +1374,7 @@ resolves it with `resolve_qualified_fn` (the same helper the direct-call path us
 named-function + not-extern guards. `check_expr` then performs the normal qualified-call resolution,
 caching `resolved_fn`/witnesses/arg-layout on the node — which **both** backends already read unchanged
 (`codegen.c`'s `OP_SPAWN` and `cgen_c.c`'s `emit_spawn` key off `resolved_fn`, never the callee kind). No
-backend change, ~12 lines. VM==native verified; regression `tests/run/spawn_qualified.em`.
+backend change, ~12 lines. VM==native verified; regression `tests/run/spawn_qualified.ig`.
 
 
 ## Decision: `Ptr` linearity (must-close) is a checker-only AND-merge dataflow, not a destructor
@@ -1456,8 +1456,8 @@ untouched. Verified tape-silent (graphics goldens unchanged after the builtin + 
 
 The control is per-block-orientation-tagged in its paint node (`"v"`/`"h"` in the otherwise-unused text slot) so
 the painted hairline matches the drag axis by construction at any rect, and its `before` flag generalises to a
-pane on either side of the handle (both branches test-covered in `tests/graphics/splitter.em`). The app wiring
-(`flare_chat.em` sidebar) made the sidebar width a persisted `state_int` the splitter drives, and the max is
+pane on either side of the handle (both branches test-covered in `tests/graphics/splitter.ig`). The app wiring
+(`flare_chat.ig` sidebar) made the sidebar width a persisted `state_int` the splitter drives, and the max is
 window-aware so a wide sidebar can't squeeze the transcript off a narrow window.
 
 
@@ -1682,7 +1682,7 @@ against. The decisions:
   The build is portable C17 with an empty dependency tree (Apple clang or gcc); Linux needs only the
   additive `-D_DEFAULT_SOURCE`, `-lm`, and `-pthread` already baked into the one Makefile (see the Linux
   decision above; OFI-141). The four oracle modes are then available immediately:
-  `./build/inglec --emit=tokens|ast|bytecode|run <file.em>`.
+  `./build/inglec --emit=tokens|ast|bytecode|run <file.ig>`.
 
 - **stage 0 is kept indefinitely.** A self-hosted language that can't be rebuilt without itself is a
   trap; keeping a from-C reference (and the tag that pins it) is what guarantees the project can always
@@ -1741,7 +1741,7 @@ backend. The decisions, in the order they were contested:
   `int main(void)` — no argc/argv (nothing provides them), no stdio result-echo (output is whatever the
   program wrote through its direct externs), no exit heap sweep (the heap-free subset never allocates).
   Returning the result costs nothing and buys a real differential hook: the QEMU smoke test asserts on an
-  exit code *computed by Ingle arithmetic on bare metal* (`hello.em` returns its loop counter → qemu exits
+  exit code *computed by Ingle arithmetic on bare metal* (`hello.ig` returns its loop counter → qemu exits
   3). Verification-over-print is the project's whole ethos; the exit code is the cheapest computed channel.
 - **Hosted-only constructs are rejected at EMIT time, not link time, when the emitter knows.**
   `spawn`/`nursery` (pthreads; a kernel is its own scheduler) and hosted-REGISTRY extern calls (`em_ffi` +
@@ -1820,7 +1820,7 @@ seed (the Rust-drops-OCaml / Go-retires-its-C-compiler end state).
 
 - **Bytecode-first sequencing.** The VM is the canonical backend and `--emit=run` gives no-`cc` execution
   (a core zero-dependency property). So the first runnable self-hosted path is the bytecode one: a
-  serializable `CompiledProgram` container + a C VM loader (`--run-bytecode`), then `codegen.em` to
+  serializable `CompiledProgram` container + a C VM loader (`--run-bytecode`), then `codegen.ig` to
   full-corpus coverage, then unify with the checker. Native C-emit parity comes second and folds into the
   kernel campaign, where the AST→C path's unique value (bare-metal codegen, libC/3rd-party linking) lives.
   See [docs/design/bytecode-container.md](https://github.com/ingle-lang/ingle-lang/blob/main/docs/design/bytecode-container.md)

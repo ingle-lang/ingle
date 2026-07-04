@@ -2,9 +2,9 @@
 # tests/run-db.sh — regression harness for the database stack (std/sqlite). These programs import
 # std/sqlite, whose extern "c" bindings only link in the database build (build/emberc-db), so they are
 # kept OUT of the dependency-free default suite (tests/run.sh). This runner is invoked by `make test-db`.
-# Each tests/db/*.em is run with --emit=run and its stdout compared to a sibling .out golden. The CRUD
+# Each tests/db/*.ig is run with --emit=run and its stdout compared to a sibling .out golden. The CRUD
 # and error cases use an in-memory database (":memory:") so they touch no files and stay deterministic;
-# persist.em uses a scratch file under the system temp dir and normalises its table, so it too is
+# persist.ig uses a scratch file under the system temp dir and normalises its table, so it too is
 # deterministic regardless of what a prior run left behind.
 #
 # Usage:
@@ -34,9 +34,9 @@ pass=0
 fail=0
 updated=0
 
-for src in "$ROOT"/tests/db/*.em; do
+for src in "$ROOT"/tests/db/*.ig; do
     [ -e "$src" ] || continue
-    golden="${src%.em}.out"
+    golden="${src%.ig}.out"
     actual=$("$BIN" --emit=run "$src" 2>/dev/null)
 
     if [ "$UPDATE" -eq 1 ]; then

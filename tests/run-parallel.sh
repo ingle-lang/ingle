@@ -8,7 +8,7 @@
 # to the closing brace before any spawned task is scheduled), so these cases CANNOT live in the
 # dependency-free, deterministic default suite (tests/run.sh, which uses the serial build).
 #
-# This runner is invoked by `make test-parallel`. Each tests/parallel/*.em is run under
+# This runner is invoked by `make test-parallel`. Each tests/parallel/*.ig is run under
 # build/emberc-par with a hard TIMEOUT and its stdout compared to a sibling .out golden. The
 # timeout is the point: if spawn-at-spawn-time ever regresses to fork-join, the poll loop hangs
 # and the case FAILS via timeout instead of wedging the suite. Programs must produce
@@ -48,9 +48,9 @@ pass=0
 fail=0
 updated=0
 
-for src in "$ROOT"/tests/parallel/*.em; do
+for src in "$ROOT"/tests/parallel/*.ig; do
     [ -e "$src" ] || continue
-    golden="${src%.em}.out"
+    golden="${src%.ig}.out"
     # stdout only (the channel-stat destructor and raylib/libcurl logs go to stderr); keep the
     # `=> N` return trailer — for these tests the returned value is the deterministic assertion.
     actual=$($TIMEOUT_CMD "$BIN" --emit=run "$src" 2>/dev/null)

@@ -7,14 +7,14 @@
 #include <string.h>
 
 #if EMBER_NET
-#include <curl/curl.h>   // opt-in HTTPS via libcurl (make net) — "execute C libraries from Ember"
+#include <curl/curl.h>   // opt-in HTTPS via libcurl (make net) — "execute C libraries from Ingle"
 #endif
 #if EMBER_SQLITE
 #include "sqlite3.h"     // opt-in embedded SQL via the vendored SQLite amalgamation (make db)
 #endif
 
 // Pointer-leaf helpers (§5h pointers). A 'P' (opaque Ptr) leaf carries a C pointer in the int64
-// slot; 'b' (buffer) and 'p' (const char*) leaves arrive as the Ember heap Value itself, which
+// slot; 'b' (buffer) and 'p' (const char*) leaves arrive as the Ingle heap Value itself, which
 // the wrapper dereferences. The boundary still owns no foreign memory: a buffer/string is
 // BORROWED for the call only, and a Ptr's lifetime is managed explicitly in C (e.g. fclose).
 #define PTR_VAL(p)  INT_VAL((int64_t)(intptr_t)(p))
@@ -25,11 +25,11 @@
 // a wrapper that reads its arguments from `in` (flattened scalar leaves) and writes its result
 // leaves to `out`. A wrapper that takes/returns a STRUCT reassembles a concrete C struct and
 // passes/returns it BY VALUE — the system C compiler then generates the platform's aggregate
-// calling convention (the C ABI), so Ember needs no hand-rolled marshalling.
+// calling convention (the C ABI), so Ingle needs no hand-rolled marshalling.
 
 typedef int (*CExternFn)(const Value *in, Value *out);
 
-// --- libm scalar functions (sqrt/pow/abs/floor/ceil/round are already Ember natives) ----------
+// --- libm scalar functions (sqrt/pow/abs/floor/ceil/round are already Ingle natives) ----------
 static int w_sin(const Value *a, Value *o)   { o[0] = FLOAT_VAL(sin(AS_FLOAT(a[0])));   return 1; }
 static int w_cos(const Value *a, Value *o)   { o[0] = FLOAT_VAL(cos(AS_FLOAT(a[0])));   return 1; }
 static int w_tan(const Value *a, Value *o)   { o[0] = FLOAT_VAL(tan(AS_FLOAT(a[0])));   return 1; }
@@ -90,8 +90,8 @@ static int w_cvec2_scale(const Value *a, Value *o) {
 // --- pointers, buffers & opaque handles: a slice of libc (§5h pointers) -----------------------
 // These prove the three pointer leaf kinds: 'p' (const char* from a borrowed string), 'b' (a
 // borrowed packed-array buffer, read or written in place), and 'P' (an opaque FILE* handle that
-// round-trips through Ember). Together they let a model bind real C: open a file, read/write its
-// bytes through an Ember [u8] buffer, and close it.
+// round-trips through Ingle). Together they let a model bind real C: open a file, read/write its
+// bytes through an Ingle [u8] buffer, and close it.
 static int w_strlen(const Value *a, Value *o) {
     o[0] = INT_VAL((int64_t)strlen((const char *)AS_CSTRING(a[0])));
     return 1;
@@ -144,11 +144,11 @@ static int w_fclose(const Value *a, Value *o) {
 
 
 #if EMBER_NET
-// HTTPS via libcurl (opt-in: `make net` links -lcurl). The boundary owns no Ember memory: the
+// HTTPS via libcurl (opt-in: `make net` links -lcurl). The boundary owns no Ingle memory: the
 // url/headers/body are BORROWED const char*; the response is a fresh malloc'd char* returned in
-// out[0] as a PTR_VAL — the FFI marshalling (ret_is_string) COPIES it into an Ember string and
-// frees it (the §5h / OFI-043 copy-on-return rule). This is the one C library Ember binds for the
-// Claude Desktop app; everything else stays in pure Ember.
+// out[0] as a PTR_VAL — the FFI marshalling (ret_is_string) COPIES it into an Ingle string and
+// frees it (the §5h / OFI-043 copy-on-return rule). This is the one C library Ingle binds for the
+// Claude Desktop app; everything else stays in pure Ingle.
 struct net_membuf {
     char  *data;
     size_t len;
@@ -181,7 +181,7 @@ static size_t net_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
 // http_post(url, headers, body) -> string. `headers` is one string of header lines separated by
 // '\n' (e.g. "x-api-key: …\nanthropic-version: 2023-06-01\ncontent-type: application/json"). The
 // returned string is the raw response body, or a small JSON object `{"_curl_error":"…"}` if the
-// transfer itself failed (so the Ember side always gets a string it can inspect).
+// transfer itself failed (so the Ingle side always gets a string it can inspect).
 static int w_http_post(const Value *a, Value *o) {
     const char *url     = (const char *)AS_CSTRING(a[0]);
     const char *headers = (const char *)AS_CSTRING(a[1]);
@@ -280,8 +280,8 @@ static int w_http_get(const Value *a, Value *o) {
 
 
 // ---- STREAMING HTTP (the std/http transport, design of record docs/http-design.md) -------------
-// A PULL stream behind an opaque Ptr handle, the fopen/fread/fclose leaf-FFI pattern (§5h): the Ember
-// worker fiber owns the channel and pumps http_next, so concurrency stays 100% Ember (fibers+channels)
+// A PULL stream behind an opaque Ptr handle, the fopen/fread/fclose leaf-FFI pattern (§5h): the Ingle
+// worker fiber owns the channel and pumps http_next, so concurrency stays 100% Ingle (fibers+channels)
 // and no runtime/channel mechanism leaks into C. curl_multi drives the transfer incrementally — chunks
 // are delivered as the network yields them, so SSE arrives token-by-token. http_open POSTs and returns
 // the handle; http_next blocks for the next body chunk ("" once the transfer ends); http_close frees it.
@@ -390,7 +390,7 @@ static int w_http_next(const Value *a, Value *o) {
         o[0] = PTR_VAL(strdup(""));                // EOF / no data this pull
         return 1;
     }
-    char *out = (char *)malloc(s->len + 1);        // copied into an Ember string + freed by the FFI
+    char *out = (char *)malloc(s->len + 1);        // copied into an Ingle string + freed by the FFI
     if (out != NULL) {
         memcpy(out, s->buf, s->len);
         out[s->len] = '\0';
@@ -439,13 +439,13 @@ static int w_http_close(const Value *a, Value *o) {
 
 #if EMBER_SQLITE
 // ---- Embedded SQL via the vendored SQLite amalgamation (the std/sqlite binding, `make db`) ------
-// SQLite is the one database that fits Ember's empty-dependency-tree rule: a single public-domain
+// SQLite is the one database that fits Ingle's empty-dependency-tree rule: a single public-domain
 // translation unit (third_party/sqlite/sqlite3.c), no server, no system package. These wrappers are
 // the leaf-FFI image of its C API — a connection (sqlite3*) and a prepared statement (sqlite3_stmt*)
-// each cross as an opaque 'P' handle, which makes them LINEAR on the Ember side: the compiler proves
+// each cross as an opaque 'P' handle, which makes them LINEAR on the Ingle side: the compiler proves
 // every open() is closed and every prepare() is finalized, on every path (OFI-049). Text crosses the
 // boundary copied-and-freed ('p' out, ret_is_string=1); a borrowed 'P' is never owned by C past the
-// call. The Result-returning, `?`-friendly Ember surface is std/sqlite.em layered on top.
+// call. The Result-returning, `?`-friendly Ingle surface is std/sqlite.ig layered on top.
 
 // sqlite_open(path) -> Ptr. Opens `path` (creating the file if absent) and returns the connection
 // handle. SQLite hands back a usable handle even when open fails, so sqlite_errmsg still works; only
@@ -474,7 +474,7 @@ static int w_sqlite_errcode(const Value *a, Value *o) {
 }
 
 // sqlite_errmsg(db) -> string. The English message for the most recent error on `db`, copied into
-// an Ember string (ret_is_string copies the buffer in and frees the strdup).
+// an Ingle string (ret_is_string copies the buffer in and frees the strdup).
 static int w_sqlite_errmsg(const Value *a, Value *o) {
     sqlite3     *db = (sqlite3 *)AS_CPTR(a[0]);
     const char  *m  = db != NULL ? sqlite3_errmsg(db) : "null database handle";
@@ -524,7 +524,7 @@ static int w_sqlite_bind_f64(const Value *a, Value *o) {
 }
 
 // sqlite_bind_text(stmt, idx, val) -> int. Binds a text value to parameter `idx` (1-based).
-// SQLITE_TRANSIENT tells SQLite to COPY the bytes, so the borrowed Ember string need not outlive the
+// SQLITE_TRANSIENT tells SQLite to COPY the bytes, so the borrowed Ingle string need not outlive the
 // call.
 static int w_sqlite_bind_text(const Value *a, Value *o) {
     o[0] = INT_VAL((int64_t)sqlite3_bind_text((sqlite3_stmt *)AS_CPTR(a[0]), (int)AS_INT(a[1]),
@@ -582,7 +582,7 @@ static int w_sqlite_column_f64(const Value *a, Value *o) {
 }
 
 // sqlite_column_text(stmt, col) -> string. Column `col` (0-based) of the current row as text, copied
-// into an Ember string. A NULL column comes back as "" (test sqlite_column_type for a true NULL).
+// into an Ingle string. A NULL column comes back as "" (test sqlite_column_type for a true NULL).
 static int w_sqlite_column_text(const Value *a, Value *o) {
     const unsigned char *t = sqlite3_column_text((sqlite3_stmt *)AS_CPTR(a[0]), (int)AS_INT(a[1]));
     o[0] = PTR_VAL(strdup(t != NULL ? (const char *)t : ""));
@@ -590,7 +590,7 @@ static int w_sqlite_column_text(const Value *a, Value *o) {
 }
 
 // sqlite_column_name(stmt, col) -> string. The name of result column `col` (0-based), copied into an
-// Ember string — the basis for a future Map<string, _> row helper.
+// Ingle string — the basis for a future Map<string, _> row helper.
 static int w_sqlite_column_name(const Value *a, Value *o) {
     const char *n = sqlite3_column_name((sqlite3_stmt *)AS_CPTR(a[0]), (int)AS_INT(a[1]));
     o[0] = PTR_VAL(strdup(n != NULL ? n : ""));

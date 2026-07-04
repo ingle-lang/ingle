@@ -1,6 +1,6 @@
-name = "Ember"
+name = "Ingle"
 grammar = "ember"
-path_suffixes = ["em"]
+path_suffixes = ["ig"]
 line_comments = ["// "]
 autoclose_before = ";:.,=}])>"
 tab_size = 4

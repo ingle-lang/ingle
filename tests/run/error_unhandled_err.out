@@ -1,5 +1,5 @@
 error[unhandled_error]: an Err returned by main was never handled
-  --> tests/run/error_unhandled_err.em (in main)
+  --> tests/run/error_unhandled_err.ig (in main)
   why:    a Result that reaches main must be handled (match its Err), not left to propagate out
   values: error = not a base-10 integer: 8x80
   hint:   match the Result and handle the Err arm (or have main do something with the error)

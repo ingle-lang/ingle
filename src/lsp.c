@@ -20,11 +20,11 @@
 #include <limits.h>
 #include <ctype.h>
 
-// The Ember language server (see lsp.h). Slice 1+2: JSON-RPC over stdio, the document lifecycle
+// The Ingle language server (see lsp.h). Slice 1+2: JSON-RPC over stdio, the document lifecycle
 // (initialize/shutdown, didOpen/didChange/didClose), and live diagnostics produced by running the
 // REAL front end (driver.h's compile_program) on the in-memory buffer and mapping collected
 // diagnostics (diag.h) to textDocument/publishDiagnostics. No second parser/checker — the editor
-// sees exactly what `emberc` sees. stdout carries the protocol; stderr is free for logging.
+// sees exactly what `inglec` sees. stdout carries the protocol; stderr is free for logging.
 
 
 
@@ -98,10 +98,10 @@ static void write_message(const char *body) {
 
 // ---- position encoding (LSP positionEncoding negotiation, LSP 3.17) ----------------------------
 // LSP positions are (line, character); the unit of "character" is the negotiated positionEncoding.
-// "utf-8" => byte offset, which is exactly what Ember's lexer tracks (Token.col/length are bytes).
+// "utf-8" => byte offset, which is exactly what Ingle's lexer tracks (Token.col/length are bytes).
 // "utf-16" (the protocol default) => UTF-16 code-unit offset. The whole compiler works in bytes, so
 // when a client only speaks utf-16 we translate columns at the wire. An ASCII line — almost all
-// Ember source — is identity in either encoding; only a line carrying a byte >= 0x80 (non-ASCII in
+// Ingle source — is identity in either encoding; only a line carrying a byte >= 0x80 (non-ASCII in
 // a comment or string literal) is walked. Lines are encoding-independent and never converted.
 
 static int g_pos_utf16 = 0;   // 1 once the client negotiated utf-16 (or sent no positionEncodings)
@@ -228,7 +228,7 @@ static int  g_doc_count;
 static int  g_doc_cap;
 
 // The workspace root, captured at `initialize` (rootUri / workspaceFolders). Project-wide
-// find-references and rename walk it for `.em` files. NULL until initialize, or when the client
+// find-references and rename walk it for `.ig` files. NULL until initialize, or when the client
 // opens a single file with no folder — callers then fall back to the active document's directory.
 static char *g_root_path;
 
@@ -1496,11 +1496,11 @@ static void handle_semantic_tokens(const JsonValue *id, const JsonValue *params)
 // Every recorded reference carries the (def_file, def_line, def_col) of its DEFINITION, so "all
 // references to a symbol" = "every occurrence sharing one definition identity". Find-references and
 // rename are the same query: resolve the symbol under the cursor to its definition (the anchor),
-// then sweep every project `.em` file's index for occurrences that point back to it. Rename is that
+// then sweep every project `.ig` file's index for occurrences that point back to it. Rename is that
 // set turned into a WorkspaceEdit. Re-indexing per request is fine at the current corpus size;
 // caching is the obvious later refinement (same note as hover/diagnostics).
 
-// is_ident reports whether `s` is a legal Ember identifier — rejected rename targets that would
+// is_ident reports whether `s` is a legal Ingle identifier — rejected rename targets that would
 // produce uncompilable source.
 static int is_ident(const char *s) {
     if (s == NULL || (!isalpha((unsigned char)s[0]) && s[0] != '_')) {
@@ -1581,7 +1581,7 @@ static char *file_text_for_path(const char *path) {
 
 
 
-// walk_em recursively collects `.em` file paths under `dir`, skipping hidden entries and common
+// walk_em recursively collects `.ig` file paths under `dir`, skipping hidden entries and common
 // build directories, bounded so a pathological tree can't run away.
 static void walk_em(const char *dir, char ***arr, int *n, int *cap) {
     if (*n >= 4000) {
@@ -1611,7 +1611,7 @@ static void walk_em(const char *dir, char ***arr, int *n, int *cap) {
             walk_em(path, arr, n, cap);
         } else {
             size_t l = strlen(nm);
-            if (l > 3 && strcmp(nm + l - 3, ".em") == 0) {
+            if (l > 3 && strcmp(nm + l - 3, ".ig") == 0) {
                 if (*n == *cap) {
                     *cap = *cap ? *cap * 2 : 64;
                     *arr = realloc(*arr, (size_t)*cap * sizeof(char *));
@@ -1985,7 +1985,7 @@ static void handle_rename(const JsonValue *id, const JsonValue *params) {
 
 
 // ---- inlay hints (inferred-type annotations on unannotated bindings) ----------------------------
-// Ember's draw is that code stays legible — to a person and to a model. An unannotated `let x = …`
+// Ingle's draw is that code stays legible — to a person and to a model. An unannotated `let x = …`
 // hides the inferred type; an inlay hint restores it inline (`let x: int = …`) without editing the
 // source. A binding is the token pattern `let`/`var` · IDENT · `=` (an annotated one has `:` there),
 // found lexically so it works mid-edit; the inferred type comes from any of the binding's USES in

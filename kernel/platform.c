@@ -1,7 +1,7 @@
 //
 // platform.c — the freestanding platform layer for the QEMU `virt` bare-metal target (kernel
 // milestone 2; see docs/design/kernel-freestanding.md). Implements the libc subset declared in
-// include/em_platform.h that the REAL Ember runtime (src/runtime.c, compiled -DEMBER_FREESTANDING)
+// include/em_platform.h that the REAL Ingle runtime (src/runtime.c, compiled -DEMBER_FREESTANDING)
 // is written against: a bump allocator over a fixed .bss arena, byte-wise mem/str, a minimal printf
 // family routed to the PL011 UART, and a panic-on-termination. No OS, no libc, no heap manager.
 //
@@ -10,7 +10,7 @@
 #define PL011_DR ((volatile uint32_t *)0x09000000u)   // PL011 UART data register (QEMU `virt`)
 
 
-// The one hardware primitive: emit a byte to the UART. Ember reaches it as a direct extern (OFI-167),
+// The one hardware primitive: emit a byte to the UART. Ingle reaches it as a direct extern (OFI-167),
 // and the platform's own output (fprintf/fwrite/panic messages) funnels through it too.
 void uart_putc(int32_t c) {
     *PL011_DR = (uint32_t)c;
@@ -60,7 +60,7 @@ void em_exception(uint64_t kind, uint64_t esr, uint64_t elr, uint64_t far) {
 }
 
 
-// A deliberate synchronous CPU exception (a BRK), for the fault-vector regression (kernel/faultdemo.em
+// A deliberate synchronous CPU exception (a BRK), for the fault-vector regression (kernel/faultdemo.ig
 // calls it as a direct extern). Proves the vector table catches a fault and reports it, rather than
 // the process hanging silently.
 void cpu_break(void) {
@@ -70,7 +70,7 @@ void cpu_break(void) {
 
 // ---- MMU: a minimal identity map so unaligned accesses work ----------------------------------------
 // With the MMU OFF (reset state), every data access is treated as Device memory, which faults on any
-// UNALIGNED access — and the Ember runtime is full of them (packed struct fields, 16-byte Value copies
+// UNALIGNED access — and the Ingle runtime is full of them (packed struct fields, 16-byte Value copies
 // via ldp/stp). So we install a flat identity map that marks RAM as Normal cacheable (unaligned OK,
 // and fast) and the low 1 GiB as Device (the UART lives there), then enable the MMU. A single level-1
 // table with 1 GiB block descriptors is all a first kernel needs. Called from boot.S before main.

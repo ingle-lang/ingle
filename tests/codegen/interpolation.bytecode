@@ -1,5 +1,5 @@
 == fn main (arity 0) ==
-0000    5  STRING   0  (= "Ember")
+0000    5  STRING   0  (= "Ingle")
 0002    6  CONST    0  (= 3)
 0004    |  CONST    1  (= 4)
 0006    7  CONST    2  (= 7)

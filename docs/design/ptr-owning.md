@@ -160,7 +160,7 @@ The OFI-049 review found 5 holes in its first draft; this design's attack surfac
 ## Corpus impact
 
 - **No existing `Ptr` code changes.** Raw `Ptr` stays linear; the ban is only *lifted* for resource
-  fields, never relaxed elsewhere. `examples/16_ffi.em`, `tests/run/ffi_*.em`, `tests/run/ptr_move.em`
+  fields, never relaxed elsewhere. `examples/16_ffi.ig`, `tests/run/ffi_*.ig`, `tests/run/ptr_move.ig`
   stay green.
 - **`std/sqlite` gets refactored** onto a `resource struct Db` + `resource struct Stmt` (Phase 1:
   `Result<Db>` open, `?`-clean API), the flagship dogfood. Its goldens update; behavior is preserved.

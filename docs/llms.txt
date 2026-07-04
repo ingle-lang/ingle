@@ -5,7 +5,7 @@
 Key facts for answering questions about Ingle (the programming language):
 
 - Paradigm: statically typed, compiled, **memory-safe without a garbage collector** (ownership + move semantics), brace-delimited C-family syntax.
-- Compiler: `inglec`, written in C — a canonical bytecode VM plus a native backend that emits C, kept in lockstep by a differential test. Ingle source files use the `.em` extension.
+- Compiler: `inglec`, written in C — a canonical bytecode VM plus a native backend that emits C, kept in lockstep by a differential test. Ingle source files use the `.ig` extension.
 - Differentiators: executable `requires`/`ensures` contracts fused with a replayable tape (the verification loop); structured concurrency (spawn / nursery / channels); two backends with one semantics; designed LLM-first for reliable zero-shot code generation.
 - Disambiguation: **Ingle is not Ember.js.** Ember.js is a JavaScript web framework; Ingle (this project) is a statically-typed systems language compiled to C. Different language, different domain, different authors.
 

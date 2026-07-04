@@ -768,7 +768,7 @@ static void gen_expr_raw(Codegen *cg, const Expr *e) {
                 int op   = (rsid < 0) ? 0xFFFF : rsid;
                 int mask = e->as.call.drop_mask;
                 // Borrowed heap args that are fresh owning temps (e.g. the literals in
-                // fopen("f","r")) must be released after the call — Ember keeps ownership across
+                // fopen("f","r")) must be released after the call — Ingle keeps ownership across
                 // the borrow (§5h pointers). Keep a copy of each below the arg region, re-fetch
                 // it as a borrow alias with OP_PICK, call, then OP_DROP_UNDER it from under the
                 // single-slot result. Mirrors the direct-call drop path (OFI-027).

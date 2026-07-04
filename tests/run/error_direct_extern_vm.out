@@ -1,1 +1,1 @@
-tests/run/error_direct_extern_vm.em: error: extern "c" function 'uart_putc' is not in the hosted FFI registry, so it has no bytecode-VM binding; build native with `inglec --emit=c` / `-o`
+tests/run/error_direct_extern_vm.ig: error: extern "c" function 'uart_putc' is not in the hosted FFI registry, so it has no bytecode-VM binding; build native with `inglec --emit=c` / `-o`

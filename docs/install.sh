@@ -358,7 +358,7 @@ build_compiler() {
 
 
 
-# Install layout: $PREFIX/bin/inglec + $PREFIX/std/*.em. inglec resolves the stdlib as
+# Install layout: $PREFIX/bin/inglec + $PREFIX/std/*.ig. inglec resolves the stdlib as
 # <dir-of-binary>/../std, so this layout needs no environment variables to work.
 install_files() {
     info "Installing to $INGLE_PREFIX..."
@@ -372,9 +372,9 @@ install_files() {
     chmod +x "$INGLE_PREFIX/bin/inglec"
     ln -sf inglec "$INGLE_PREFIX/bin/emberc"   # F3: emberc stays a compat alias for inglec
 
-    rm -f "$INGLE_PREFIX"/std/*.em 2>/dev/null || true
-    cp "$SRCDIR"/std/*.em "$INGLE_PREFIX/std/"
-    step "Installed inglec + $(ls -1 "$INGLE_PREFIX"/std/*.em | wc -l | tr -d ' ') stdlib modules."
+    rm -f "$INGLE_PREFIX"/std/*.ig 2>/dev/null || true
+    cp "$SRCDIR"/std/*.ig "$INGLE_PREFIX/std/"
+    step "Installed inglec + $(ls -1 "$INGLE_PREFIX"/std/*.ig | wc -l | tr -d ' ') stdlib modules."
 }
 
 
@@ -437,10 +437,10 @@ print_next_steps() {
     else
         printf 'Try it:\n\n'
     fi
-    printf '    inglec --emit=run hello.em        %s# compile and run on the VM%s\n' "$DIM" "$RST"
-    printf '    inglec -o hello hello.em && ./hello %s# native binary%s\n' "$DIM" "$RST"
+    printf '    inglec --emit=run hello.ig        %s# compile and run on the VM%s\n' "$DIM" "$RST"
+    printf '    inglec -o hello hello.ig && ./hello %s# native binary%s\n' "$DIM" "$RST"
     if [ "$INGLE_PROFILE" = "full" ]; then
-        printf '    ANTHROPIC_API_KEY=sk-ant-... inglec --emit=run app.em   %s# the desktop app%s\n' "$DIM" "$RST"
+        printf '    ANTHROPIC_API_KEY=sk-ant-... inglec --emit=run app.ig   %s# the desktop app%s\n' "$DIM" "$RST"
     fi
     printf '\nRun %singlec --doctor%s to health-check the toolchain, %singlec --help%s for usage.\n' \
         "$BOLD" "$RST" "$BOLD" "$RST"

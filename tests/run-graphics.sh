@@ -3,7 +3,7 @@
 #
 # Graphics programs need the raylib backend (build/emberc-gfx) and a display, so they
 # are kept OUT of the dependency-free default suite (tests/run.sh). This runner is
-# invoked by `make test-graphics`. Each tests/graphics/*.em is run with --emit=run and
+# invoked by `make test-graphics`. Each tests/graphics/*.ig is run with --emit=run and
 # its stdout (minus raylib's own logging and the `=> N` return trailer) is compared to
 # a sibling .out golden. The test programs inject input state rather than relying on a
 # real mouse, so their output is deterministic.
@@ -32,9 +32,9 @@ pass=0
 fail=0
 updated=0
 
-for src in "$ROOT"/tests/graphics/*.em; do
+for src in "$ROOT"/tests/graphics/*.ig; do
     [ -e "$src" ] || continue
-    golden="${src%.em}.out"
+    golden="${src%.ig}.out"
     # Drop raylib's INFO/WARNING lines and the harness `=> N` trailer; keep program output.
     # Normalize the UI tape's polled mouse position — it reflects the real hardware cursor
     # (wherever it physically is during the run), which is environmental, not deterministic.
@@ -86,11 +86,11 @@ if [ "$UPDATE" -eq 1 ]; then
     exit 0
 fi
 
-# Smoke: the graphics SHOWCASE examples (examples/*.em importing std/draw or std/ui)
+# Smoke: the graphics SHOWCASE examples (examples/*.ig importing std/draw or std/ui)
 # need the raylib natives, so the default suite (tests/run.sh) only lex+parses them.
 # Full-compile them here under emberc-gfx so they can't drift off the language unnoticed
 # (the graphics-example half of OFI-030).
-for em in "$ROOT"/examples/*.em; do
+for em in "$ROOT"/examples/*.ig; do
     [ -e "$em" ] || continue
     grep -qE '^[[:space:]]*import[[:space:]]+"std/(draw|ui)"' "$em" || continue
     rel=${em#"$ROOT"/}

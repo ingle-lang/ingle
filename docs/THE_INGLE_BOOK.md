@@ -67,10 +67,10 @@ A few conventions:
 
 ## Running Ingle at all
 
-Ingle programs end in `.em`. You compile and run one with the `inglec` compiler:
+Ingle programs end in `.ig`. You compile and run one with the `inglec` compiler:
 
 ```
-inglec --emit=run hello.em
+inglec --emit=run hello.ig
 ```
 
 That compiles the program *and* executes it, printing any output, then a final line showing
@@ -133,7 +133,7 @@ below, grouped by why you'd reach for it.
 
 | Target | Produces | Notes |
 |--------|----------|-------|
-| `make asan` | `build/inglec-asan` | AddressSanitizer build — running a `.em` program flags use-after-free / overflow with a stack trace. |
+| `make asan` | `build/inglec-asan` | AddressSanitizer build — running a `.ig` program flags use-after-free / overflow with a stack trace. |
 | `make asan-par` | `build/inglec-asan-par` | The same, exercising the cross-thread (parallel) paths. |
 | `make asan-trace` | `build/inglec-trace` | ASan plus the double-drop detector — the "memory tape" of [Chapter 19](#chapter-19--the-tape-and-errors-as-data). |
 
@@ -250,7 +250,7 @@ fn main() {
 Run it:
 
 ```
-inglec --emit=run hello.em
+inglec --emit=run hello.ig
 ```
 
 and Ingle says:
@@ -651,7 +651,7 @@ not  252
 Two details that keep shifts honest. The shift *amount* must land in `[0, width)` — shifting a
 `u8` by 8 or more is a runtime trap, not a quiet zero — and `>>` is **arithmetic** (sign-preserving)
 on signed types but **logical** (zero-filling) on unsigned ones, so a negative `i32 >> 1` stays
-negative while a `u32 >> 1` always pulls in zeros. The shipped `examples/12_bits.em` puts all this
+negative while a `u32 >> 1` always pulls in zeros. The shipped `examples/12_bits.ig` puts all this
 to work twice over: a complete xorshift PRNG built from nothing but `<<`, `>>`, and `^`, and a set
 of Unix-style permission flags packed into a single byte and toggled with masks.
 
@@ -669,7 +669,7 @@ of Unix-style permission flags packed into a single byte and toggled with masks.
 > dangerous-looking operation is available, but you have to *name* it, so nobody — and no model —
 > reaches for silent wraparound by accident. With it, a real FNV-1a hash is a six-line loop in pure
 > Ingle; without it you'd be back in C. (Shift-and-xor designs like xorshift never overflow at all,
-> so they need none of this — `examples/12_bits.em` stays library-free.)
+> so they need none of this — `examples/12_bits.ig` stays library-free.)
 
 ### The precedence table, once, so you never wonder
 
@@ -1182,7 +1182,7 @@ A `[Shape]` holds a `Circle` and a `Rect` side by side, and `s.area()` calls the
 each. The moment you put a `Circle` where a `Shape` is expected, Ingle **upcasts** it: the value
 becomes a small box pairing the receiver with a table of its methods. A call then looks the
 method up in that table at run time. One `fn report(s: Shape)` serves every implementer you'll
-ever write, with no shared base class in sight. The shipped `examples/13_interfaces.em` does
+ever write, with no shared base class in sight. The shipped `examples/13_interfaces.ig` does
 exactly this with three shapes and a `report` function.
 
 There's **one rule** on which interfaces can be used this way, and it's a sensible one: the
@@ -2077,7 +2077,7 @@ draining.
 
 Because channels are shareable handles, you can `spawn` several workers all pulling from one
 jobs channel, and the work fans out across whichever worker is free — a worker pool, in a few
-lines. (The shipped example `examples/05_concurrency.em` does exactly this: one dispatcher, four
+lines. (The shipped example `examples/05_concurrency.ig` does exactly this: one dispatcher, four
 workers counting error lines, a results channel summed at the end. It runs today.)
 
 ### One source, three speeds
@@ -2122,13 +2122,13 @@ As a program grows past one file, you split it into **modules**. In Ingle, *a fi
 module*, and you pull one into another with `import`:
 
 ```ember
-// geom.em
+// geom.ig
 struct Point { x: int  y: int }
 fn sum(p: Point) -> int { return p.x + p.y }
 ```
 
 ```ember
-// main.em
+// main.ig
 import "geom" as geom
 
 fn main() -> int {
@@ -2152,7 +2152,7 @@ is private to its own module; everything else is exported. It's not a mere conve
 enforced:
 
 ```ember
-// in geom.em:  fn _secret() -> int { return 99 }
+// in geom.ig:  fn _secret() -> int { return 99 }
 import "geom" as geom
 fn main() -> int { return geom._secret() }
 ```
@@ -2229,8 +2229,8 @@ like any other generic. There's no `Copy` requirement on the key, and this is ne
 the surrounding prose: a built-in key (a scalar or a string) copies cheaply, and a move-type
 *struct* key is **deep-cloned on store**, so the map owns its copy and you keep yours — value-semantic
 keys with no `clone()` ceremony. A key type need only be `Hash + Eq`. The shipped
-`examples/15_wordcount.em` is a real little tool built on this — tally the words in its command-line
-arguments — and `examples/06_calculator.em` leans on it too.
+`examples/15_wordcount.ig` is a real little tool built on this — tally the words in its command-line
+arguments — and `examples/06_calculator.ig` leans on it too.
 
 > **Fireside trivia.** `std/map` is itself written in Ingle — a generic struct over an array of
 > `Option<MapEntry<K, V>>` buckets, bounded `Map<K: Hash + Eq, V>`, with open-addressing and
@@ -2420,7 +2420,7 @@ it for you, you wrap it in a **`resource struct`** — the very next section. Th
 easy: `fclose(NULL)` is a safe no-op, so the idiom is open → use under a null-check → one
 unconditional close.) Borrowing calls (`fread`/`fwrite`) leave the `Ptr` plain, so
 you can keep using it. Put the four together and you can drive libc directly.
-Here's the heart of the shipped `examples/16_ffi.em`, which writes a file and reads it straight back:
+Here's the heart of the shipped `examples/16_ffi.ig`, which writes a file and reads it straight back:
 
 ```ember
 extern "c" {
@@ -2564,7 +2564,7 @@ inglec: runtime error: precondition failed in 'pos' (requires, line 1)
 A contract is just a `bool` expression, so the full language is available — including calling
 your own predicate functions. You can write `requires is_sorted(xs)` and define `is_sorted`
 normally. (Contracts should *read* their inputs, not change them.) Here's the shipped
-`examples/07_contracts.em`, which specifies Euclid's GCD precisely — the result is positive and
+`examples/07_contracts.ig`, which specifies Euclid's GCD precisely — the result is positive and
 divides both inputs:
 
 ```ember
@@ -2602,8 +2602,8 @@ entirely*: zero runtime cost. So you get correctness-checking while you develop 
 when you ship. Watch the same broken contract simply vanish under `--release`:
 
 ```
-inglec --emit=run           bad.em     # precondition failed in 'pos' ...
-inglec --emit=run --release bad.em     # => 6   (the check is gone)
+inglec --emit=run           bad.ig     # precondition failed in 'pos' ...
+inglec --emit=run --release bad.ig     # => 6   (the check is gone)
 ```
 
 This is the proven `debug_assert` model: the safety net is up the whole time you're working, and
@@ -2635,7 +2635,7 @@ concrete counterexample.
 Point it at the (correct) contracts example and everything passes:
 
 ```
-inglec --emit=check examples/07_contracts.em
+inglec --emit=check examples/07_contracts.ig
 ```
 ```
 check gcd: ok (300 cases)
@@ -2654,7 +2654,7 @@ fn dbl(x: int) -> int
 }
 ```
 ```
-inglec --emit=check bad.em
+inglec --emit=check bad.ig
 ```
 ```
 check dbl: FAILED
@@ -2685,7 +2685,7 @@ fn add_nonneg(a: int, b: int) -> int
 }
 ```
 ```
-inglec --emit=prove add_nonneg.em
+inglec --emit=prove add_nonneg.ig
 ```
 ```
 prove add_nonneg: ensures @line 5 — PROVED
@@ -2713,7 +2713,7 @@ exactly. `--emit=replay` runs your program twice (once recording, once replaying
 two runs are byte-for-byte identical:
 
 ```
-inglec --emit=replay program.em
+inglec --emit=replay program.ig
 ```
 ```
 replay: deterministic — 5 nondeterministic event(s) recorded (5 random, 0 clock, 0 read_line, 0 read_file, 0 ffi); both runs identical
@@ -2752,7 +2752,7 @@ per executed instruction, in order, recording the function, the instruction offs
 the *source line*, and a snapshot of the value stack at that moment.
 
 ```
-inglec --tape program.em
+inglec --tape program.ig
 ```
 ```
 {"fn":"main","ip":0,"op":"CONST","line":6,"stack":[]}
@@ -2774,10 +2774,10 @@ own terms, with a fix suggestion — you've seen plenty in this book. But add `-
 and every error comes out as a JSON object instead:
 
 ```
-inglec --emit=run --diagnostics=json prog.em
+inglec --emit=run --diagnostics=json prog.ig
 ```
 ```
-{"severity":"error","file":"prog.em","line":5,"col":16,"message":"use of 'a' after it was moved","near":null,"help":"a move transfers ownership; pass it without `move` to borrow it instead, or make a copy before the move","note":{"line":4,"col":21,"message":"value moved here"}}
+{"severity":"error","file":"prog.ig","line":5,"col":16,"message":"use of 'a' after it was moved","near":null,"help":"a move transfers ownership; pass it without `move` to borrow it instead, or make a copy before the move","note":{"line":4,"col":21,"message":"value moved here"}}
 ```
 
 Same information as the friendly text version — file, line, column, message, a `help` fix, and a
@@ -2804,7 +2804,7 @@ fn main() -> Result<int, IoErr> {
 ```
 ```
 error[unhandled_error]: an Err returned by main was never handled
-  --> prog.em (in main)
+  --> prog.ig (in main)
   why:    a Result that reaches main must be handled (match its Err), not left to propagate out
   values: error = IoErr { code: 5, path: "/etc/data" }
   hint:   match the Result and handle the Err arm (or have main do something with the error)
@@ -2834,7 +2834,7 @@ a machine or a human can close on its own.
 [Chapter 18](#chapter-18--the-verification-loop) showed you a machine that hunts for a *logic*
 bug: `--emit=check` invents inputs to a function until one of its contracts turns false. Crucible
 is the twin of that idea, pointed at *memory*. Instead of inputs to one function it invents whole
-**programs** — entire `.em` files — and runs each one through a battery of detectors that watch
+**programs** — entire `.ig` files — and runs each one through a battery of detectors that watch
 what the runtime does with memory: whether a value is freed twice, leaks, is read after it has
 been freed, or quietly comes back *wrong*. Logic correctness and memory correctness are different
 problems, so Ingle hunts them with two different tools.
@@ -2922,7 +2922,7 @@ silently dropped, duplicated, or read back wrong, the number changes — which i
 catches *wrong answers*, not merely crashes. Run the seed-1 program straight through the VM:
 
 ```
-inglec --emit=run seed1.em
+inglec --emit=run seed1.ig
 ```
 ```
 3722=> 0
@@ -3025,7 +3025,7 @@ fn main() -> int {
 Third, it prints one line per distinct finding — the signature, the seed, and the repro path:
 
 ```
-── [NEW]   [diff:VM-ne-native]  seed=3  → tools/crucible-finds/find2_diff_VM_ne_native.em  (minimal: 1 op)
+── [NEW]   [diff:VM-ne-native]  seed=3  → tools/crucible-finds/find2_diff_VM_ne_native.ig  (minimal: 1 op)
 ```
 
 When the oracle that fired was the double-drop detector, the underlying evidence — written by the
@@ -3055,21 +3055,21 @@ fixed on both backends, and Crucible is green.
 
 When `make crucible` hands you a `NEW` finding, the loop is short:
 
-1. **Open the minimal repro** under `tools/crucible-finds/`. It is a real `.em` file, already as
+1. **Open the minimal repro** under `tools/crucible-finds/`. It is a real `.ig` file, already as
    small as the tool could make it.
 2. **Reproduce it by hand under the oracle that fired**, so you can watch it happen. For a memory
    fault, reach for the tape — build the ASan + drop-trace compiler and run the repro under it:
 
    ```
    make asan-trace
-   ASAN_OPTIONS=detect_leaks=0 build/inglec-trace --emit=run tools/crucible-finds/find2_diff_VM_ne_native.em
+   ASAN_OPTIONS=detect_leaks=0 build/inglec-trace --emit=run tools/crucible-finds/find2_diff_VM_ne_native.ig
    ```
 
    For a `diff:VM-ne-native`, run both backends and compare the answers directly:
 
    ```
-   inglec --emit=run repro.em                  # the reference answer (the VM)
-   inglec -o /tmp/repro repro.em && /tmp/repro # the native answer
+   inglec --emit=run repro.ig                  # the reference answer (the VM)
+   inglec -o /tmp/repro repro.ig && /tmp/repro # the native answer
    ```
 3. **Fix the bug, then add a regression test** under `tests/` so it stays fixed — a fix without a
    test that exercises it isn't finished.
@@ -3093,22 +3093,22 @@ cannot describe: what the runtime does with your memory.
 ## Chapter 21 — The Whole Toolbox
 
 Everything `inglec` can do to a program, in one place. The general shape is
-`inglec [flags] <file.em>`.
+`inglec [flags] <file.ig>`.
 
 | Command | What it does |
 |---------|--------------|
-| `inglec --emit=run file.em` | **Compile and execute.** The one you'll use most. Prints output, then `=> <value>`. |
-| `inglec --emit=tokens file.em` | Show the token stream (what the lexer saw). |
-| `inglec --emit=ast file.em` | Show the parsed syntax tree. |
-| `inglec --emit=bytecode file.em` | Show the compiled bytecode, annotated with source lines. |
-| `inglec --emit=trace file.em` | Execute and emit the execution **tape** (JSON Lines). |
-| `inglec --tape file.em` | Alias for `--emit=trace`. |
-| `inglec --emit=check file.em` | **Property-fuzz** every checkable contract; report counterexamples. |
-| `inglec --emit=prove file.em` | **Statically prove** the contracts in the decidable (linear-integer) fragment. |
-| `inglec --emit=replay file.em` | Record-and-**replay** the run; verify it's deterministic. |
-| `inglec --emit=docs file.em` | Render `///` doc comments to a Markdown reference page. |
-| `inglec --emit=c file.em` | **Lower to C.** Print the standalone C translation unit the native backend produces. |
-| `inglec -o <bin> file.em` | **Compile to a native binary.** Emit that C and link it against the runtime into a standalone executable — no VM. |
+| `inglec --emit=run file.ig` | **Compile and execute.** The one you'll use most. Prints output, then `=> <value>`. |
+| `inglec --emit=tokens file.ig` | Show the token stream (what the lexer saw). |
+| `inglec --emit=ast file.ig` | Show the parsed syntax tree. |
+| `inglec --emit=bytecode file.ig` | Show the compiled bytecode, annotated with source lines. |
+| `inglec --emit=trace file.ig` | Execute and emit the execution **tape** (JSON Lines). |
+| `inglec --tape file.ig` | Alias for `--emit=trace`. |
+| `inglec --emit=check file.ig` | **Property-fuzz** every checkable contract; report counterexamples. |
+| `inglec --emit=prove file.ig` | **Statically prove** the contracts in the decidable (linear-integer) fragment. |
+| `inglec --emit=replay file.ig` | Record-and-**replay** the run; verify it's deterministic. |
+| `inglec --emit=docs file.ig` | Render `///` doc comments to a Markdown reference page. |
+| `inglec --emit=c file.ig` | **Lower to C.** Print the standalone C translation unit the native backend produces. |
+| `inglec -o <bin> file.ig` | **Compile to a native binary.** Emit that C and link it against the runtime into a standalone executable — no VM. |
 
 The last two are the native backend, and they get their own chapter:
 [Chapter 22: Compiling to Native](#chapter-22--compiling-to-native).
@@ -3127,7 +3127,7 @@ has an error (lexical, syntax, type, or runtime) · `66` the source file couldn'
 
 ## Chapter 22 — Compiling to Native
 
-Every program in this book so far has run the same way: the compiler turns your `.em` file into
+Every program in this book so far has run the same way: the compiler turns your `.ig` file into
 bytecode, and a small virtual machine executes it. That VM is the beating heart of Ingle — it is
 where contracts are checked, where the tape is recorded, where `--emit=prove`, `--emit=check` and
 `--emit=replay` live. It is the language's **reference semantics**: the definition of what an Ingle
@@ -3143,7 +3143,7 @@ surface.
 The one you'll reach for is `-o`:
 
 ```
-inglec -o hello hello.em
+inglec -o hello hello.ig
 ./hello
 ```
 ```
@@ -3158,10 +3158,10 @@ nothing else. Run it, ship it, drop it in a container without packing an interpr
 If you're curious what Ingle handed the C compiler, ask to see it:
 
 ```
-inglec --emit=c hello.em
+inglec --emit=c hello.ig
 ```
 ```c
-// Generated by `inglec --emit=c` from hello.em. Do not edit.
+// Generated by `inglec --emit=c` from hello.ig. Do not edit.
 // The bytecode VM is the reference semantics; tests/native diffs the two.
 #include "ember_rt.h"
 
@@ -3232,7 +3232,7 @@ fn main() -> int {
 Run it on the VM and the contract fires before `main` ever reaches the `println`:
 
 ```
-inglec --emit=run bad.em
+inglec --emit=run bad.ig
 ```
 ```
 inglec: runtime error: postcondition failed in 'bad' (ensures, line 2)
@@ -3242,7 +3242,7 @@ Compile the very same program to native, and it runs straight through — the sp
 anymore:
 
 ```
-inglec -o bad bad.em && ./bad
+inglec -o bad bad.ig && ./bad
 ```
 ```
 y=5
@@ -3489,7 +3489,7 @@ fn clamp(x: int, lo: int, hi: int) -> int
 assert(cond, "message")           // inline check; elided in --release
 
 // inglec --emit=run | check | prove | replay | trace(--tape) | docs | c   [--release]
-// inglec -o <bin> file.em     // compile to a standalone native binary (Chapter 22)
+// inglec -o <bin> file.ig     // compile to a standalone native binary (Chapter 22)
 ```
 
 ---
@@ -3523,7 +3523,7 @@ and interactive.
 
 ### The shape of a Flare program
 
-Here's a whole one — a window with a toolbar and a counter. It's `examples/graphics/17_flare.em`,
+Here's a whole one — a window with a toolbar and a counter. It's `examples/graphics/17_flare.ig`,
 shipped with the compiler:
 
 ```ember
@@ -3566,7 +3566,7 @@ fn main() -> int {
 Build the graphics compiler and run it:
 
 ```
-make graphics && INGLE_STD=./std build/inglec-gfx --emit=run examples/graphics/17_flare.em
+make graphics && INGLE_STD=./std build/inglec-gfx --emit=run examples/graphics/17_flare.ig
 ```
 
 Four things in that loop are the entire model. The next four sections take them one at a time.
@@ -3692,7 +3692,7 @@ f.end()                                        // close the body row
 
 Motion rides the **same keyed state** as everything else, and it steps on a **fixed timestep**, so an
 animation is a pure function of the frame count — deterministic, replayable, golden-testable, never
-tied to the wall clock. There are three pieces, and `examples/graphics/18_flare_anim.em` runs all of
+tied to the wall clock. There are three pieces, and `examples/graphics/18_flare_anim.ig` runs all of
 them.
 
 **A spring** eases a named value toward a target, one fixed step per frame. `f.spring("panel_w",
@@ -3738,7 +3738,7 @@ loop {
 
 Add or remove a row at the top and the rows below *slide* to their new places instead of jumping. The
 determinism is the quietly useful part: because motion is a function of frame count, the animation
-goldens (`tests/graphics/flare_spring.em`, `flare_flip.em`) reproduce frame-for-frame.
+goldens (`tests/graphics/flare_spring.ig`, `flare_flip.ig`) reproduce frame-for-frame.
 
 ### Appearing and disappearing
 

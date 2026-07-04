@@ -47,7 +47,7 @@ After (human render, the default):
 
 ```
 error[index_out_of_bounds]: array index out of bounds
-  --> app.em:4 (in get)
+  --> app.ig:4 (in get)
   why:    indexing requires 0 <= index < len
   values: index = 5, len = 3
   route:  get (line 4) <- main (line 9)
@@ -57,7 +57,7 @@ error[index_out_of_bounds]: array index out of bounds
 After (agent render, `--faults=agent`, one line):
 
 ```json
-{"severity":"error","category":"runtime","code":"index_out_of_bounds","message":"array index out of bounds","file":"app.em","line":4,"fn":"get","why":"indexing requires 0 <= index < len","values":[{"name":"index","value":"5"},{"name":"len","value":"3"}],"route":[{"fn":"get","line":4},{"fn":"main","line":9}],"hint":"valid indices are 0..len-1; guard with `if i < arr.len()`, or use `arr.get(i)` which returns an Option"}
+{"severity":"error","category":"runtime","code":"index_out_of_bounds","message":"array index out of bounds","file":"app.ig","line":4,"fn":"get","why":"indexing requires 0 <= index < len","values":[{"name":"index","value":"5"},{"name":"len","value":"3"}],"route":[{"fn":"get","line":4},{"fn":"main","line":9}],"hint":"valid indices are 0..len-1; guard with `if i < arr.len()`, or use `arr.get(i)` which returns an Option"}
 ```
 
 The operand values (`index = 5`, `len = 3`) are read from the **live C locals at the trap**,
@@ -109,8 +109,8 @@ they have no meaningful operands to project.
 ## CLI
 
 ```
-inglec --emit=run app.em                 # human render (default)
-inglec --faults=agent --emit=run app.em  # agent render (JSON Lines on stderr)
+inglec --emit=run app.ig                 # human render (default)
+inglec --faults=agent --emit=run app.ig  # agent render (JSON Lines on stderr)
 ```
 
 `--faults=human|agent` selects the runtime render. It is independent of

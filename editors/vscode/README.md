@@ -1,28 +1,28 @@
-# Ember — VS Code extension (source)
+# Ingle — VS Code extension (source)
 
-This directory is the **canonical source** for the Ember VS Code extension. It is small,
+This directory is the **canonical source** for the Ingle VS Code extension. It is small,
 intentional editor *glue* — the actual language intelligence lives in the compiler
-(`emberc --lsp`, in `src/lsp.c`), not here.
+(`inglec --lsp`, in `src/lsp.c`), not here.
 
 | File | Role |
 |------|------|
-| `extension.js` | Thin launcher: starts `emberc --lsp` over stdio and brokers JSON-RPC via `vscode-languageclient`. |
-| `package.json` | Manifest: declares the `ember` language (`.em`), the TextMate grammar, and the `emberLsp.*` settings. |
+| `extension.js` | Thin launcher: starts `inglec --lsp` over stdio and brokers JSON-RPC via `vscode-languageclient`. |
+| `package.json` | Manifest: declares the `ember` language (`.ig`), the TextMate grammar, and the `emberLsp.*` settings. |
 | `language-configuration.json` | Brackets, comments (`//`), auto-closing/surrounding pairs. |
 | `syntaxes/ember.tmLanguage.json` | TextMate grammar — **syntax highlighting** (keywords, types, strings + interpolation, contracts, builtins, numbers, operators). **Generated — do not edit by hand** (see below). |
 
 ## Two independent mechanisms
 
 - **Syntax highlighting** comes purely from the TextMate grammar above. It works with no
-  server running and colours `.em` files offline.
+  server running and colours `.ig` files offline.
 - **Diagnostics / hover / go-to-definition / completion / document symbols** come from the
-  LSP (`emberc --lsp`). Coloring and the LSP are separate — one can work while the other
+  LSP (`inglec --lsp`). Coloring and the LSP are separate — one can work while the other
   doesn't.
 
 ## Stuck? Run the doctor first
 
 ```
-make doctor        # or: emberc --doctor — checks emberc, the stdlib, and the shared frontend
+make doctor        # or: inglec --doctor — checks inglec, the stdlib, and the shared frontend
 ```
 It prints `[ok]`/`[!!]` for each piece of the setup with the exact fix. Start here.
 
@@ -35,7 +35,7 @@ make install-vscode
 ```
 
 then **reload the VS Code window** (Cmd-Shift-P → "Developer: Reload Window"). The deployed
-copy is global — it activates for any `.em` file anywhere on the machine.
+copy is global — it activates for any `.ig` file anywhere on the machine.
 
 After changing the grammar, re-run `make install-vscode` and reload.
 

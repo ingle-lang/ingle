@@ -102,7 +102,7 @@ fn main() -> int {
 ```
 
 A full app built on Flare — a switchable conversation list, a scrollable transcript, a composer, and a
-settings **modal** of **segmented** controls — is [`public/claude-desktop/flare_chat.em`](https://github.com/ingle-lang/ingle-lang/blob/main/public/claude-desktop/flare_chat.em).
+settings **modal** of **segmented** controls — is [`public/claude-desktop/flare_chat.ig`](https://github.com/ingle-lang/ingle-lang/blob/main/public/claude-desktop/flare_chat.ig).
 
 ## A bigger example — a settings dialog
 
@@ -110,7 +110,7 @@ The honest answer to "how does an immediate-mode UI hold a *tree* of mutable sta
 hooks or reducers — the tree is just plain `var`s the loop owns, mutated directly. Here a `modal` (a centred
 panel over a dimmed scrim) of `segmented` controls drives appearance, model, and token settings; a `dirty`
 flag is the app's own "unsaved" signal. Full runnable file:
-[`examples/graphics/20_settings.em`](https://github.com/ingle-lang/ingle-lang/blob/main/examples/graphics/20_settings.em); the core:
+[`examples/graphics/20_settings.ig`](https://github.com/ingle-lang/ingle-lang/blob/main/examples/graphics/20_settings.ig); the core:
 
 ```rust
 var dark = false        // the whole "state tree" is just plain vars the loop owns
@@ -255,7 +255,7 @@ is `remove_at(from)` then rebuild); the chips **FLIP-animate** to their new slot
 drag) is keyed by tab **index**, so duplicate labels still target the right chip; the FLIP *animation* is keyed
 by label (it follows a tab across a reorder), so **unique labels give the cleanest reorder motion** — if your
 labels can repeat (e.g. conversation titles), de-duplicate them for display. A `TabResult` is `{active, closed,
-moved_from, moved_to}`. Runnable demo: `examples/graphics/25_flare_tabs.em`.
+moved_from, moved_to}`. Runnable demo: `examples/graphics/25_flare_tabs.ig`.
 
 Right-click + tooltips: `right_click() -> bool` reports the **right mouse button's down-edge** this frame
 (built on the `mouse_right_down()` graphics native), and `right_clicked() -> bool` scopes that to the
@@ -264,7 +264,7 @@ cursor: `if f.right_clicked() { menu_x = mouse_x(); menu_y = mouse_y(); open = t
 `popover_begin(key, menu_x, menu_y)` of `menu_item`s there. `tooltip(text)` shows a small hint near the cursor
 once the most-recently-drawn widget has been hovered for a short dwell (~0.4s) — call it right after the
 widget: `if f.ghost_button("Copy") {…}  f.tooltip("Copy to clipboard")`. Both rest on the same floating card /
-layer machinery as the popover and never gate the UI. Runnable demo: `examples/graphics/26_flare_context.em`.
+layer machinery as the popover and never gate the UI. Runnable demo: `examples/graphics/26_flare_context.ig`.
 Widgets: `button(txt) -> bool` (secondary), `primary(txt) -> bool` (the headline action, clay accent),
 `danger(txt) -> bool` (a **destructive** action — the theme's red fill, for Delete/Remove/Discard; same shape
 as `primary`, so the colour is the only signal — reach for it only when the action is hard to undo),
@@ -388,8 +388,8 @@ golden-testable, never coupled to the wall clock.
   a subtree that dims, disables, or sits behind a scrim as one. A no-op at full opacity, so un-faded
   goldens stay byte-identical.
 
-Runnable showcase: [`examples/graphics/18_flare_anim.em`](https://github.com/ingle-lang/ingle-lang/blob/main/examples/graphics/18_flare_anim.em) (a spring-driven
-width + a FLIP add/remove list). Goldens: `tests/graphics/flare_spring.em`, `tests/graphics/flare_flip.em`.
+Runnable showcase: [`examples/graphics/18_flare_anim.ig`](https://github.com/ingle-lang/ingle-lang/blob/main/examples/graphics/18_flare_anim.ig) (a spring-driven
+width + a FLIP add/remove list). Goldens: `tests/graphics/flare_spring.ig`, `tests/graphics/flare_flip.ig`.
 
 ## Notes & limits
 
@@ -401,7 +401,7 @@ width + a FLIP add/remove list). Goldens: `tests/graphics/flare_spring.em`, `tes
 - Layout is a real flexbox now (`std/layout`): `row`/`column` with `justify`/`align`, `*_grow` to fill,
   `spacer`/`strut`, painted `panel_begin`, a scrollable `scroll_begin`/`scroll_end`, and a **floating
   node** (`open_float`, the basis for `modal_begin`/`modal_end`: declared anywhere, solved centred on the
-  window). The full Claude-desktop app (`public/claude-desktop/flare_chat.em`) is built on it: fixed
+  window). The full Claude-desktop app (`public/claude-desktop/flare_chat.ig`) is built on it: fixed
   sidebar | growing main | bottom-pinned composer, full-width cards, a wrapped + scrollable transcript,
   rich markdown, the live STREAMING API, and a **settings dialog** (a `modal` of `segmented` controls).
   Remaining: a max transcript column width.
@@ -538,8 +538,8 @@ the others *slide* to fill the space. During an active divider drag the panes **
 resize feels direct rather than rubber-banding behind the cursor. The animation state is keyed under
 each panel's id, so `f.forget(id)` disposes it along with the panel's state.
 
-See **`examples/graphics/19_dock.em`** for a live interactive workspace (drag a title bar to re-dock or
-group as tabs, drag the dividers, click ✕, `R` resets), and **`public/claude-desktop/flare_chat.em`** — the
+See **`examples/graphics/19_dock.ig`** for a live interactive workspace (drag a title bar to re-dock or
+group as tabs, drag the dividers, click ✕, `R` resets), and **`public/claude-desktop/flare_chat.ig`** — the
 Claude app's whole body is a dock: Conversations | Chat | Inspector, with Chat pinned and the side panels
 closeable, re-dockable, **tabbable**, and freely **rearrangeable by dragging their title bars**.
 

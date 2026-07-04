@@ -28,7 +28,7 @@
 #endif
 
 // The program's command-line arguments (everything after the source file), set by the
-// `run` driver before execution and exposed to Ember via the `args()` builtin. Read-only
+// `run` driver before execution and exposed to Ingle via the `args()` builtin. Read-only
 // after startup, so it is safe to share across parallel workers. Part of the fixed
 // invocation context (like env), so record-replay does not treat it as nondeterminism.
 static int          g_prog_argc = 0;
@@ -782,7 +782,7 @@ static void box_pack(VM *vm, int sid, unsigned char *base) {
 
 
 // pack_from_buf packs a struct's leaves from a forward Value buffer (`buf[*idx]` in field/leaf
-// order), recursing through inline nested fields — used to reassemble an Ember struct from a C
+// order), recursing through inline nested fields — used to reassemble an Ingle struct from a C
 // wrapper's flattened result leaves (FFI structs-by-value, 3b.6).
 static void pack_from_buf(VM *vm, int sid, unsigned char *base, const Value *buf, int *idx) {
     const StructType *st = &vm->heap->prog->structs[sid];
@@ -1262,7 +1262,7 @@ static Value call_native(VM *vm, int native_id, Value *args, int argc) {
         case NATIVE_FROM_BYTES: {
             // from_bytes(bytes) -> a string whose raw buffer is EXACTLY the [u8] array's bytes. The inverse
             // of .bytes(): no UTF-8 re-encoding (unlike from_char_code), so it can build ANY byte sequence
-            // — the primitive an Ember-side binary serializer needs (docs/design/bytecode-container.md).
+            // — the primitive an Ingle-side binary serializer needs (docs/design/bytecode-container.md).
             // A [u8] array packs one byte per element (AEK_U8), copied directly; any other integer packing
             // is read element-by-element and masked to a byte, so the builtin is representation-robust.
             ObjArray *a = argc >= 1 ? AS_ARRAY(args[0]) : NULL;
@@ -1281,7 +1281,7 @@ static Value call_native(VM *vm, int native_id, Value *args, int argc) {
         }
         case NATIVE_FLOAT_BITS: {
             // float_bits(f) -> the f64's raw IEEE-754 bits reinterpreted as an i64 (bit-for-bit, no
-            // numeric conversion) — lets an Ember serializer write a float constant's 8 bytes.
+            // numeric conversion) — lets an Ingle serializer write a float constant's 8 bytes.
             double  d = argc >= 1 ? AS_FLOAT(args[0]) : 0.0;
             int64_t bits;
             memcpy(&bits, &d, sizeof bits);
@@ -3262,7 +3262,7 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 int64_t func_index = AS_INT(pop(vm));
                 if (func_index >= WITNESS_NATIVE_BASE) {
                     // A built-in key type's Hash/Eq witness: call the native shim
-                    // instead of entering an Ember frame (no such function exists).
+                    // instead of entering an Ingle frame (no such function exists).
                     int nid = (int)(func_index - WITNESS_NATIVE_BASE);
                     Value result = call_native(vm, nid, vm->sp - argc, argc);
                     vm->sp -= argc;
@@ -3411,7 +3411,7 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 // Foreign (C) call (FFI, §5h / 3b.6): the arguments sit on the stack already
                 // FLATTENED to their scalar leaves; pass them to the registry wrapper, which
                 // reassembles any concrete C struct and returns its result leaves. The 16-bit
-                // operand is the return struct id (0xFFFF = scalar): reassemble a boxed Ember
+                // operand is the return struct id (0xFFFF = scalar): reassemble a boxed Ingle
                 // struct from the result leaves, or push the single scalar.
                 size_t index  = operand_read(&frame->ip, OPK_IDX);
                 int    retsid = (int)operand_read(&frame->ip, OPK_IDX);
@@ -3437,7 +3437,7 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 }
                 if (cextern_sig(index)->ret_is_string) {
                     // A C-owned returned string (FFI copy-on-return, §5h / OFI-043): out[0] is a
-                    // malloc'd char* — copy its bytes into an owned Ember string, then free the C
+                    // malloc'd char* — copy its bytes into an owned Ingle string, then free the C
                     // buffer. (In replay there is no live pointer, so yield an empty string —
                     // string-returning FFI is not replay-safe, like a mut buffer; OFI-044.)
                     ObjString *s;
@@ -4304,7 +4304,7 @@ void vm_route(const VM *vm, FaultHop *route, int *count) {
 }
 
 
-// vm_invoke_drop runs an Ember function by table index RE-ENTRANTLY from inside the VM — it is the
+// vm_invoke_drop runs an Ingle function by table index RE-ENTRANTLY from inside the VM — it is the
 // `EmberRt.invoke` the runtime's drop_value calls to run a `resource`'s user `drop(self)` during
 // teardown (OFI-122). It pushes a fresh frame for `fn_index` (a `drop` takes exactly `self`) on TOP of
 // the live call stack, sets `reentry_floor` so the interpreter returns when THAT frame returns (not the

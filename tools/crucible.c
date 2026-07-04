@@ -1,5 +1,5 @@
-// crucible.c — the GENERATOR half of Crucible, Ember's memory-ownership fuzzer (a build-time dev
-// tool, not shipped in emberc). Given a seed it prints ONE valid Ember program to stdout that
+// crucible.c — the GENERATOR half of Crucible, Ingle's memory-ownership fuzzer (a build-time dev
+// tool, not shipped in inglec). Given a seed it prints ONE valid Ingle program to stdout that
 // stresses the danger zone where our memory bugs keep living: value-structs (all-scalar, with a
 // heap string field, and nested), placed into erased-generic aggregates ([T], Map<string,T>,
 // Option<T>, and nested combinations), passed by move and by borrow, returned, read back, mutated

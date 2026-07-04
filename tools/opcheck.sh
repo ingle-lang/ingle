@@ -11,7 +11,7 @@
 
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-export EMBER_STD="$ROOT/std"
+export INGLE_STD="$ROOT/std"
 TMP="${TMPDIR:-/tmp}/opcheck.$$"
 mkdir -p "$TMP"
 trap 'rm -rf "$TMP"' EXIT
@@ -26,7 +26,7 @@ cc -std=c17 -Wall -Wextra -Werror -Iinclude -O1 \
 
 # 2) the OPCHECK VM: each handler asserts ip advanced by exactly the spec's operand width.
 say "opcheck: building the OPCHECK VM…"
-OC="$ROOT/build/emberc-opcheck"
+OC="$ROOT/build/inglec-opcheck"
 mkdir -p "$ROOT/build"
 cc -std=c17 -Iinclude -D_DEFAULT_SOURCE -O1 -g -DEMBER_OPCHECK=1 "$ROOT"/src/*.c -lm -o "$OC" 2>"$TMP/blog" \
    || { say "opcheck: OPCHECK VM failed to build"; tail -20 "$TMP/blog"; exit 1; }
@@ -46,7 +46,7 @@ run_one() {
     ran=$((ran + 1))
 }
 for d in tests/run tests/native examples; do
-    for em in "$ROOT/$d"/*.em; do
+    for em in "$ROOT/$d"/*.ig; do
         [ -e "$em" ] || continue
         run_one "$em"
     done
@@ -57,8 +57,8 @@ done
 { echo "fn main() -> int {"; echo "  var a = 0"
   i=0; while [ "$i" -lt 300 ]; do echo "  a = a + $((1000 + i))"; i=$((i + 1)); done
   i=0; while [ "$i" -lt 300 ]; do echo "  a = a + \"s$i=\".len()"; i=$((i + 1)); done
-  echo '  print("{a}")'; echo "  return 0"; echo "}"; } > "$TMP/long.em"
-run_one "$TMP/long.em"
+  echo '  print("{a}")'; echo "  return 0"; echo "}"; } > "$TMP/long.ig"
+run_one "$TMP/long.ig"
 
 say ""
 if [ "$violations" -gt 0 ]; then

@@ -1,8 +1,8 @@
-// src/runtime.c — the Ember object runtime (M2a).
+// src/runtime.c — the Ingle object runtime (M2a).
 //
 // Extracted from src/vm.c so ONE implementation of allocation, reference counting,
-// and ownership-driven drop serves both backends: the bytecode VM (Ember's reference
-// semantics) and the native C backend (`emberc -o`). The VM embeds an EmberRt and
+// and ownership-driven drop serves both backends: the bytecode VM (Ingle's reference
+// semantics) and the native C backend (`inglec -o`). The VM embeds an EmberRt and
 // passes `&vm->rt`; a compiled program declares a global EmberRt and passes `&g_em`.
 //
 // Nothing here touches dispatch state, the CompiledProgram, or the verification
@@ -2418,7 +2418,7 @@ Value em_native(EmberRt *ctx, int nid, int argc, const Value *args) {
         case NATIVE_FROM_BYTES: {
             // from_bytes(bytes) -> a string whose raw buffer is EXACTLY the [u8] array's bytes. The inverse
             // of .bytes(): no UTF-8 re-encoding (unlike from_char_code), so it can build ANY byte sequence
-            // — the primitive an Ember-side binary serializer needs (docs/design/bytecode-container.md).
+            // — the primitive an Ingle-side binary serializer needs (docs/design/bytecode-container.md).
             // A [u8] array packs one byte per element (AEK_U8), copied directly; any other integer packing
             // is read element-by-element and masked to a byte, so the builtin is representation-robust.
             ObjArray *a = argc >= 1 ? AS_ARRAY(args[0]) : NULL;
@@ -2437,7 +2437,7 @@ Value em_native(EmberRt *ctx, int nid, int argc, const Value *args) {
         }
         case NATIVE_FLOAT_BITS: {
             // float_bits(f) -> the f64's raw IEEE-754 bits reinterpreted as an i64 (bit-for-bit, no
-            // numeric conversion) — lets an Ember serializer write a float constant's 8 bytes.
+            // numeric conversion) — lets an Ingle serializer write a float constant's 8 bytes.
             double  d = argc >= 1 ? AS_FLOAT(args[0]) : 0.0;
             int64_t bits;
             memcpy(&bits, &d, sizeof bits);
@@ -2542,7 +2542,7 @@ Value em_ffi(EmberRt *ctx, int idx, int rsid, int argc, const Value *args) {
     int got = cextern_call(idx, in, out);
     if (cextern_sig(idx)->ret_is_string) {
         // A C-owned returned string (FFI copy-on-return, §5h / OFI-043): out[0] is a malloc'd
-        // char* — copy it into an owned Ember string, then free the C buffer.
+        // char* — copy it into an owned Ingle string, then free the C buffer.
         char *p = (got > 0) ? (char *)(intptr_t)AS_INT(out[0]) : NULL;
         size_t len = (p != NULL) ? strlen(p) : 0;
         ObjString *s = make_string(ctx, len);

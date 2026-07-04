@@ -98,6 +98,48 @@ phase_docs() {
     echo "         index.html hero, what-is-ingle.html ('not Ember.js' positioning), llms.txt intro."
 }
 
+phase_ext_code() {
+    local EXT="${EXT:-ig}"
+    echo "rebrand: ext-code — source ext .em→.$EXT (+ bytecode container .emb→.${EXT}b) at the CODE/config"
+    echo "         sites (NOT the file renames — that's ext-mv). Because .$EXT is 3 chars like .em, every"
+    echo "         buffer size and strcmp offset stays correct: only the string CONTENT changes."
+    # The code/harness/config surface. The .em SOURCE files themselves are renamed by ext-mv; only
+    # selfhost/*.em carry .em/.emb string LITERALS that must move in lockstep with the C sites (or the
+    # self-hosted compiler can't resolve its own imports — the fixed-point coupling). \.em\b cannot match
+    # ".emb" (the trailing b blocks the word boundary), so the two substitutions are independent.
+    # NOTE: this script is EXCLUDED from its own fileset — its perl patterns literally contain ".em"/
+    # ".emb", and rewriting them mid-run once turned them into no-ops. Never let ext-code touch itself.
+    local files=(
+        src/main.c src/lsp.c src/bytecode_io.c
+        selfhost/emberc.em selfhost/codegen_dump.em selfhost/cgen_c_dump.em selfhost/serialize_dump.em
+        selfhost/lex_dump.em selfhost/parse_dump.em selfhost/check_dump.em selfhost/serialize.em
+        Makefile
+    )
+    local f
+    for f in tests/*.sh tools/*.sh public/claude-desktop/*.sh \
+             editors/vscode/package.json editors/vscode/extension.js editors/zed/languages/*/config.toml; do
+        [ "$f" = "tools/rebrand.sh" ] && continue     # never rewrite our own .em/.emb patterns
+        [ -e "$f" ] && files+=("$f")
+    done
+    perl -i -pe '
+        s/\.emb\b/.'"$EXT"'b/g;                                # bytecode container:  .emb -> .igb
+        s/\.em\b/.'"$EXT"'/g;                                  # source extension:    .em  -> .ig
+        s/path_suffixes = \["em"\]/path_suffixes = ["'"$EXT"'"]/g;   # Zed dot-less suffix (no \.em\b match)
+    ' "${files[@]}"
+    echo "rebrand: ext-code done on ${#files[@]} files. Next: ext-mv (git mv the source files)."
+}
+
+phase_ext_mv() {
+    local EXT="${EXT:-ig}"
+    echo "rebrand: ext-mv — git mv every tracked *.em -> *.$EXT"
+    local n=0 src
+    while IFS= read -r src; do
+        git mv "$src" "${src%.em}.$EXT"
+        n=$((n + 1))
+    done < <(git ls-files '*.em')
+    echo "rebrand: ext-mv done — renamed $n files."
+}
+
 phase_verify() {
     echo "rebrand: verify — scanning for leftover user-facing Ember naming"
     local bad=0
@@ -124,8 +166,10 @@ phase_verify() {
 }
 
 case "${1:-}" in
-    strings) phase_strings ;;
-    docs)    phase_docs ;;
-    verify)  phase_verify ;;
-    *) echo "usage: tools/rebrand.sh {strings|docs|verify}" >&2; exit 2 ;;
+    strings)  phase_strings ;;
+    docs)     phase_docs ;;
+    ext-code) phase_ext_code ;;
+    ext-mv)   phase_ext_mv ;;
+    verify)   phase_verify ;;
+    *) echo "usage: tools/rebrand.sh {strings|docs|ext-code|ext-mv|verify}" >&2; exit 2 ;;
 esac
