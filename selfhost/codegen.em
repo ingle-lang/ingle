@@ -4096,6 +4096,23 @@ struct Chunk {
 
     // gen_struct_fields pushes a struct literal's field values in DECLARATION order (reordering the
     // literal), each via gen_consume so a refcounted (string) field value that reads a local is INCREF'd.
+    // multislot_local_slot returns the base slot of `e` if it reads a MULTI-SLOT (exploded, non-boxed) struct
+    // local — a plain-borrow all-scalar struct param/let — else -1.
+    fn multislot_local_slot(self, e: ps.Expr) -> int {
+        match e {
+            case EIdent(name) {
+                let slot = self.resolve_slot(name)
+                if slot >= 0 && slot < self.slot_struct.len() && self.slot_struct[slot] >= 0 && self.slot_boxed[slot] == false {
+                    return slot
+                }
+            }
+            case _ {
+            }
+        }
+        return 0 - 1
+    }
+
+
     fn gen_struct_fields(mut self, sid: int, fields: [ps.SLitField], line: int, targs: [ps.Ty]) {
         let n = self.struct_field_count(sid)
         var fi = 0
@@ -4141,15 +4158,35 @@ struct Chunk {
                             self.emit(self.field_arr_kind(sid, fname))
                         }
                     } else {
-                        let rk = self.expr_ret_kind(fv)
-                        if rk >= 0 {
-                            self.gen_expr(fv, fline)
-                            if self.struct_all_scalar(rk) {
-                                self.emit(OP_BOX_STRUCT)
-                                self.emit_idx(rk)
+                        let mslot = self.multislot_local_slot(fv)
+                        if mslot >= 0 {
+                            // a MULTI-SLOT struct LOCAL field value (`style: style`, style a plain-borrow
+                            // all-scalar param): spread its leaf slots + BOX_STRUCT into the field's one boxed slot.
+                            self.cur_line = fline
+                            let msid = self.slot_struct[mslot]
+                            let vspan = self.struct_field_count(msid)
+                            var vs = 0
+                            loop {
+                                if vs >= vspan {
+                                    break
+                                }
+                                self.emit(OP_GET_LOCAL)
+                                self.emit_idx(mslot + vs)
+                                vs = vs + 1
                             }
+                            self.emit(OP_BOX_STRUCT)
+                            self.emit_idx(msid)
                         } else {
-                            self.gen_consume(fv, fline)
+                            let rk = self.expr_ret_kind(fv)
+                            if rk >= 0 {
+                                self.gen_expr(fv, fline)
+                                if self.struct_all_scalar(rk) {
+                                    self.emit(OP_BOX_STRUCT)
+                                    self.emit_idx(rk)
+                                }
+                            } else {
+                                self.gen_consume(fv, fline)
+                            }
                         }
                     }
                     break
@@ -5374,6 +5411,15 @@ struct Chunk {
                 self.emit(OP_UNBOX_STRUCT)
                 self.emit_idx(bsid)
                 return self.struct_field_count(bsid)
+            }
+        }
+        if no_incref == false && is_call_expr(e) {
+            // A struct-returning CALL whose all-scalar return is MULTI-SLOT (RETURN_STRUCT spreads N leaf slots
+            // on the stack — `themed(dark())`): the call result IS the arg's slots, so count the field span, not 1.
+            let crk = self.expr_ret_kind(e)
+            if crk >= 0 && crk < self.st_names.len() && self.struct_all_scalar(crk) {
+                self.gen_expr(e, line)
+                return self.struct_field_count(crk)
             }
         }
         if no_incref == false && self.arg_needs_incref(e) {
