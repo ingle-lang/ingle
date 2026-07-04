@@ -1822,6 +1822,14 @@ struct WitInfo {
 }
 
 
+// MaskPlan records which call args are owning-temp values passed to an erased BORROW param — kept below the
+// call + PICK'd as borrow aliases + DROP_UNDER'd from under the result (stage-0's keep discipline).
+struct MaskPlan {
+    masked: [bool]
+    keep: int
+}
+
+
 // param_erasure_flag returns "1" if a method param's type is a bare erased type-parameter of its struct
 // (`key: K` where the struct is declared `<K, V>`), else "0" — one char of a method's mpe_flags string.
 fn param_erasure_flag(p: ps.Param, generics: [ps.GenericParam]) -> string {
@@ -4863,12 +4871,24 @@ struct Chunk {
                 let erase = self.method_param_erasure(self.st_names[sid], mname)
                 self.cur_line = line
                 if self.slot_boxed[slot] {
-                    self.emit(OP_GET_LOCAL)
-                    self.emit_idx(slot)
-                    let n = self.gen_call_args_e(args, line, erase)
-                    self.emit(OP_CALL)
-                    self.emit_idx(midx)
-                    self.emit_idx(1 + n)
+                    let plan = self.plan_erased_mask(args, erase)
+                    if plan.keep == 0 {
+                        self.emit(OP_GET_LOCAL)
+                        self.emit_idx(slot)
+                        let n = self.gen_call_args_e(args, line, erase)
+                        self.emit(OP_CALL)
+                        self.emit_idx(midx)
+                        self.emit_idx(1 + n)
+                    } else {
+                        self.push_mask_temps(args, line, plan)   // owning-temp args pushed BELOW the receiver
+                        self.emit(OP_GET_LOCAL)
+                        self.emit_idx(slot)
+                        let n = self.push_masked_args(args, line, erase, plan)
+                        self.emit(OP_CALL)
+                        self.emit_idx(midx)
+                        self.emit_idx(1 + n)
+                        self.emit_drop_unders(plan.keep)         // drop each kept temp from under the result
+                    }
                 } else {
                     let span = self.struct_field_count(sid)
                     var s = 0
@@ -4957,6 +4977,111 @@ struct Chunk {
                 }
             }
         }
+    }
+
+
+    // arg_is_owning_temp_string reports whether a call arg is an OWNING-TEMP string (a literal/interpolation or
+    // a string-returning call) — a fresh reference the caller holds. Passed to an erased BORROW param it must be
+    // kept + PICK'd + DROP_UNDER'd (stage-0's mask), not consumed (which would leak the temp). A place-read
+    // (local/field/element) is NOT an owning temp: it borrows an existing owner (handled by the no-incref path).
+    fn arg_is_owning_temp_string(self, e: ps.Expr) -> bool {
+        match e {
+            case EStr(parts) {
+                return true
+            }
+            case ECall(callee, args) {
+                if self.is_enum_ctor(e) {
+                    return false
+                }
+                return self.expr_ret_kind(e) == 0 - 3
+            }
+            case _ {
+                return false
+            }
+        }
+    }
+
+
+    // plan_erased_mask marks each call arg that is an OWNING-TEMP refcounted value passed to an erased BORROW
+    // param (`erase[i]=='1'`) — the args to keep + PICK + DROP_UNDER around the call. keep = how many.
+    fn plan_erased_mask(self, args: [ps.Expr], erase: string) -> MaskPlan {
+        let em = erase.bytes()
+        var masked: [bool] = []
+        var keep = 0
+        var i = 0
+        loop {
+            if i >= args.len() {
+                break
+            }
+            var m = false
+            if i < em.len() && int(em[i]) == 49 && self.arg_is_owning_temp_string(args[i]) {
+                m = true
+            }
+            masked.append(m)
+            if m {
+                keep = keep + 1
+            }
+            i = i + 1
+        }
+        return MaskPlan { masked: masked, keep: keep }
+    }
+
+
+    // push_mask_temps pushes each masked owning-temp arg (in arg order) so they sit BELOW the receiver + args.
+    fn push_mask_temps(mut self, args: [ps.Expr], line: int, plan: MaskPlan) {
+        var k = 0
+        loop {
+            if k >= args.len() {
+                break
+            }
+            if plan.masked[k] {
+                self.gen_expr(args[k], line)
+            }
+            k = k + 1
+        }
+    }
+
+
+    // emit_drop_unders emits `n` DROP_UNDER — each drops one kept temp from under the single call result.
+    fn emit_drop_unders(mut self, n: int) {
+        var d = 0
+        loop {
+            if d >= n {
+                break
+            }
+            self.emit(OP_DROP_UNDER)
+            d = d + 1
+        }
+    }
+
+
+    // push_masked_args pushes the call args AFTER the kept temps + receiver are on the stack: a masked arg is a
+    // PICK alias of its kept temp (offset accounts for the temps + receiver + already-built slots); an unmasked
+    // arg goes through gen_one_arg_e (no incref for an erased param). Returns the total arg slot count.
+    fn push_masked_args(mut self, args: [ps.Expr], line: int, erase: string, plan: MaskPlan) -> int {
+        let em = erase.bytes()
+        var argc = 0
+        var t_seen = 0
+        var b = 0
+        loop {
+            if b >= args.len() {
+                break
+            }
+            if plan.masked[b] {
+                self.emit(OP_PICK)
+                self.emit_idx(plan.keep + argc - t_seen)   // depth of temp_{t_seen} below TOS
+                t_seen = t_seen + 1
+                argc = argc + 1
+            } else {
+                var ni = false
+                if b < em.len() && int(em[b]) == 49 {
+                    ni = true
+                }
+                argc = argc + self.gen_one_arg_e(args[b], line, ni)
+            }
+            b = b + 1
+        }
+        return argc
     }
 
 
