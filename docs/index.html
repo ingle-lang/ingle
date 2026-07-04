@@ -4,10 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Ingle — A systems programming language</title>
-  <meta name="description" content="Ingle is a statically-typed systems language — memory-safe without a GC, fast to compile, and built for humans and language models. Open source under MIT.">
+  <meta name="description" content="Ingle is a statically-typed systems language — memory-safe without a GC, compiled to standalone native binaries via C, and built for humans and language models. Open source under MIT. Formerly known as Ember.">
   <link rel="canonical" href="https://www.ingle-lang.org/">
   <meta property="og:title" content="Ingle — A systems programming language">
-  <meta property="og:description" content="Rust-grade safety. Go-grade ergonomics. Verification built in. Now open source.">
+  <meta property="og:description" content="Rust-grade safety. Go-grade ergonomics. Verification built in. Compiles to native binaries. Open source under MIT.">
   <meta property="og:url" content="https://www.ingle-lang.org/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Ingle">
@@ -32,10 +32,10 @@
     "@type": "SoftwareApplication",
     "@id": "https://www.ingle-lang.org/#ingle",
     "name": "Ingle",
-    "alternateName": ["Ingle programming language", "Ingle language", "Ingle systems language"],
+    "alternateName": ["Ingle programming language", "Ingle language", "Ingle systems language", "Ember programming language (former name)"],
     "applicationCategory": "DeveloperApplication",
     "operatingSystem": "macOS, Linux",
-    "description": "Ingle is a statically-typed, brace-delimited systems programming language — memory-safe without a garbage collector, compiled to C by the inglec reference compiler. An unrelated, distinct project from Ember.js, the JavaScript web framework.",
+    "description": "Ingle is a statically-typed, brace-delimited systems programming language — memory-safe without a garbage collector, compiled to standalone native binaries via C by the inglec reference compiler. Formerly named Ember; an unrelated, distinct project from Ember.js, the JavaScript web framework.",
     "url": "https://www.ingle-lang.org/",
     "sameAs": ["https://github.com/ingle-lang/ingle"],
     "license": "https://github.com/ingle-lang/ingle/blob/main/LICENSE",
@@ -449,6 +449,44 @@
       margin-bottom: 1.75rem;
     }
 
+    .section-sub {
+      font-size: 0.9375rem;
+      color: var(--muted);
+      max-width: 40rem;
+      margin: -1.25rem 0 1.75rem;
+    }
+
+    /* Proof strip — verifiable claims as content cards (no animation) */
+    .proof {
+      display: grid;
+      gap: 1.25rem;
+      margin-bottom: 4.5rem;
+    }
+
+    @media (min-width: 640px) {
+      .proof { grid-template-columns: repeat(2, 1fr); }
+    }
+
+    /* A single command line inside a feature card ("From script to metal") */
+    .feature .cmd {
+      display: block;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.75rem;
+      color: var(--accent);
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.5rem 0.75rem;
+      margin-bottom: 0.75rem;
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+
+    .footer-note {
+      width: 100%;
+      font-size: 0.75rem;
+    }
+
     .features {
       display: grid;
       gap: 1.25rem;
@@ -700,7 +738,7 @@
     <main id="main-content">
       <section class="hero wrap">
         <div class="badges">
-          <span class="badge badge-new">Now open source</span>
+          <span class="badge badge-new">Native binaries</span>
           <span class="badge">Pre-1.0</span>
           <span class="badge">MIT · Zero deps</span>
         </div>
@@ -709,13 +747,14 @@
 
         <p class="lead">
           Ingle is a statically-typed, brace-delimited language in the lineage of C, C#, and Rust.
-          Memory-safe without a garbage collector. Fast to compile. Unusually predictable for
-          both humans and language models.
+          Memory-safe without a garbage collector. Runs instantly on its VM — or compiles to a
+          standalone native binary. Unusually predictable for both humans and language models.
         </p>
 
         <p class="thesis">
-          Rust proved the destination is right. Ingle shortens the road — with structured
-          concurrency, no function coloring, and verification built into the language.
+          Executable contracts, a replayable execution tape, structured concurrency with no
+          function coloring — and a compiler that already rebuilds itself byte-for-byte.
+          Systems code that proves itself.
         </p>
 
         <div class="actions">
@@ -805,6 +844,35 @@
         </div>
       </section>
 
+      <section class="wrap-wide" id="targets">
+        <h2 class="section-head">From script to metal</h2>
+        <p class="section-sub">
+          One language, one semantics, three distances from the hardware — the same program, the
+          same contracts, the same tape at every stop.
+        </p>
+        <div class="features">
+          <div class="feature">
+            <h3>Run it now</h3>
+            <code class="cmd">inglec --emit=run app.ig</code>
+            <p>The bytecode VM is the canonical semantics and the instant dev loop — no build
+            step, contracts checked, tape on demand.</p>
+          </div>
+          <div class="feature">
+            <h3>Ship a binary</h3>
+            <code class="cmd">inglec -o app app.ig</code>
+            <p>Emits C, compiles, links: a standalone native executable — the whole language, not
+            a subset. The flagship GUI + HTTPS demo app compiles to a single 1.2&nbsp;MB binary.</p>
+          </div>
+          <div class="feature">
+            <h3>Boot bare metal <em style="color:var(--muted);font-weight:400">(early)</em></h3>
+            <code class="cmd">inglec --emit=c --freestanding</code>
+            <p>The runtime compiles freestanding — no libc, no OS. A tiny Ingle kernel boots on
+            QEMU (aarch64) with UART output, exception vectors, and timer interrupts. A proof of
+            reach, not an OS.</p>
+          </div>
+        </div>
+      </section>
+
       <section class="wrap-wide" id="features">
         <h2 class="section-head">Why Ingle</h2>
         <div class="features">
@@ -818,7 +886,7 @@
           </div>
           <div class="feature">
             <h3>Structured concurrency</h3>
-            <p><code>nursery</code>/<code>spawn</code> with typed channels and an M:N scheduler. No function coloring — real stack traces, safe cancellation.</p>
+            <p><code>nursery</code>/<code>spawn</code> with typed channels, running across every core. No function coloring — real stack traces, safe cancellation.</p>
           </div>
           <div class="feature">
             <h3>Verification built in</h3>
@@ -835,6 +903,40 @@
           <div class="feature">
             <h3>First-class editor support</h3>
             <p><code>inglec --lsp</code> with hover, completion, rename, semantic tokens, inlay hints, signature help, and prover verdicts.</p>
+          </div>
+          <div class="feature">
+            <h3>The compiler compiles itself</h3>
+            <p>The full pipeline — lexer, parser, checker, codegen — is also written in Ingle and compiles itself; a self-built native compiler regenerates a byte-identical copy of itself. The C stage-0 compiler stays the reference.</p>
+          </div>
+          <div class="feature">
+            <h3>LLM-first by design</h3>
+            <p>Structured JSON diagnostics, a deterministic replayable tape, and the whole language in one file for a model's context: <a href="/llms-full.txt" style="text-decoration:underline;text-underline-offset:2px"><code>llms-full.txt</code></a>.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="wrap-wide" id="proof">
+        <h2 class="section-head">Proof, not promises</h2>
+        <p class="section-sub">
+          A language that sells verification should be able to show its own. Every claim below is
+          a gate that runs in CI — not a benchmark, not an aspiration.
+        </p>
+        <div class="proof">
+          <div class="feature">
+            <h3>1,800+ automated checks, green on every commit</h3>
+            <p>Golden tests, VM↔native differentials, doctor and LSP regressions — 431 in the core suite, 1,347 in the self-hosting gate alone.</p>
+          </div>
+          <div class="feature">
+            <h3>VM ≡ native, byte for byte</h3>
+            <p>Every test program runs on both backends — the bytecode VM and the compiled C — and their outputs must match exactly. Drift fails the build.</p>
+          </div>
+          <div class="feature">
+            <h3>A byte-identical fixed point</h3>
+            <p>The Ingle-written compiler, compiled to native by itself, regenerates its own C output byte-for-byte (N1 → N2). Self-hosting as a regression test, not a slogan.</p>
+          </div>
+          <div class="feature">
+            <h3>Sanitizers and purpose-built fuzzers</h3>
+            <p>ASan and TSan clean, plus three in-house fuzzers that attack memory ownership, operand-width limits, and resource linearity. CI on macOS and Linux, arm64 and x86_64.</p>
           </div>
         </div>
       </section>
@@ -933,6 +1035,12 @@
               <span>Sample <code style="font-family:inherit">.ig</code> programs</span>
             </a>
           </li>
+          <li>
+            <a href="/llms-full.txt">
+              llms-full.txt
+              <span>Working with an LLM? The entire book in one file, sized for a model's context</span>
+            </a>
+          </li>
         </ul>
       </section>
     </main>
@@ -941,6 +1049,7 @@
       <div class="wrap-wide footer-inner">
         <p>Ingle is open source under the <a href="https://github.com/ingle-lang/ingle/blob/main/LICENSE">MIT License</a>.</p>
         <p><a href="https://github.com/ingle-lang/ingle">github.com/ingle-lang/ingle</a></p>
+        <p class="footer-note">Ingle was previously named <strong>Ember</strong> (renamed July 2026) — and is unrelated to <a href="/what-is-ingle">Ember.js</a>.</p>
       </div>
     </footer>
   </div>
