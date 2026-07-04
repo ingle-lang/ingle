@@ -352,7 +352,8 @@ struct StructTable {
     f_string: [bool]           // ...is the field a string (refcounted)?
     f_array: [bool]            // ...is the field an array `[T]`?
     f_struct: [int]            // ...struct id of the field's type if it is a struct, else -1
-    f_elem: [int]              // ...for an array field: its element type code (struct sid / -3 str / -4 enum / -1)
+    f_elem: [int]              // ...for an array field: its element type code (struct sid / -3 str / -4 enum / -2 array / -1)
+    f_elem2: [int]             // ...for a nested-array field `[[T]]`: T's element code (`self.dk_tabs[i][j]`), else -99
     f_arrkind: [int]           // ...for an array field: its NEW_ARRAY element kind byte (AEK_*), else -1
     f_enum: [bool]             // ...is the field a known enum (a refcounted single Value — inline-packable)?
     f_kind: [int]              // ...for a scalar field: its num/render kind (int=0, sized 1..7, f32=8, f64=9, bool=10)
@@ -400,6 +401,7 @@ fn build_structs(decls: [ps.Decl]) -> StructTable {
     var far: [bool] = []
     var fsd: [int] = []
     var fel: [int] = []
+    var fel2: [int] = []
     var fak: [int] = []
     var fen: [bool] = []
     var fkind: [int] = []
@@ -436,11 +438,20 @@ fn build_structs(decls: [ps.Decl]) -> StructTable {
                     fetpidx.append(array_elem_tparam_index(fty, generics))
                     ftargs.append(ty_args_key(fty))
                     if ty_is_array(fty) {
-                        fel.append(elem_type_code(elem_ty_of(fty), names, enames))
-                        fak.append(array_elem_kind_from_ty(elem_ty_of(fty)))
+                        let ety = elem_ty_of(fty)
+                        fel.append(elem_type_code(ety, names, enames))
+                        fak.append(array_elem_kind_from_ty(ety))
+                        // 2nd-level element for a nested-array field (`dk_tabs: [[string]]`) so `self.dk_tabs[i][j]`
+                        // types its element (string INCREFs); -99 when the field is not an array-of-arrays.
+                        if ty_is_array(ety) {
+                            fel2.append(elem_type_code(elem_ty_of(ety), names, enames))
+                        } else {
+                            fel2.append(0 - 99)
+                        }
                     } else {
                         fel.append(0 - 1)
                         fak.append(0 - 1)
+                        fel2.append(0 - 99)
                     }
                     fi = fi + 1
                 }
@@ -466,6 +477,7 @@ fn build_structs(decls: [ps.Decl]) -> StructTable {
                         fen.append(true)           // a witness is a Some(method-ref) enum (refcounted single Value)
                         fkind.append(0)
                         fel.append(0 - 1)
+                        fel2.append(0 - 99)
                         fak.append(0 - 1)
                         ftp.append("")
                         fep.append(0 - 1)
@@ -483,7 +495,7 @@ fn build_structs(decls: [ps.Decl]) -> StructTable {
         }
         i = i + 1
     }
-    return StructTable { names: names, f_owner: fo, f_name: fn_, f_scalar: fsc, f_string: fst, f_array: far, f_struct: fsd, f_elem: fel, f_arrkind: fak, f_enum: fen, f_kind: fkind, f_tpname: ftp, f_elem_payload: fep, f_elem_payload_tp: fept, f_elem_tpidx: fetpidx, f_targs: ftargs }
+    return StructTable { names: names, f_owner: fo, f_name: fn_, f_scalar: fsc, f_string: fst, f_array: far, f_struct: fsd, f_elem: fel, f_elem2: fel2, f_arrkind: fak, f_enum: fen, f_kind: fkind, f_tpname: ftp, f_elem_payload: fep, f_elem_payload_tp: fept, f_elem_tpidx: fetpidx, f_targs: ftargs }
 }
 
 
@@ -3167,7 +3179,8 @@ struct Chunk {
     st_fstring: [bool]          // ...field string (refcounted)?
     st_farray: [bool]           // ...field array `[T]`?
     st_fstruct: [int]           // ...field's struct id (else -1)
-    st_felem: [int]             // ...for an array field: its element type code (struct sid / -3 / -4 / -1)
+    st_felem: [int]             // ...for an array field: its element type code (struct sid / -3 / -4 / -2 / -1)
+    st_felem2: [int]            // ...for a nested-array field `[[T]]`: T's element code, else -99
     st_farrkind: [int]          // ...for an array field: its NEW_ARRAY element kind byte (AEK_*), else -1
     st_fenum: [bool]            // ...is the field a known enum (a refcounted single Value)?
     st_fkind: [int]             // ...for a scalar field: its num/render kind (int=0, sized 1..7, f32=8, f64=9, bool=10)
@@ -3350,6 +3363,23 @@ struct Chunk {
             i = i + 1
         }
         return 0 - 1
+    }
+
+
+    // field_elem2_code returns the 2nd-level element code of a nested-array field `[[T]]` (`self.dk_tabs[i][j]`
+    // -> T's code), or -99 when the field is not an array-of-arrays.
+    fn field_elem2_code(self, id: int, fname: string) -> int {
+        var i = 0
+        loop {
+            if i >= self.st_fowner.len() {
+                break
+            }
+            if self.st_fowner[i] == id && self.st_fname[i] == fname {
+                return self.st_felem2[i]
+            }
+            i = i + 1
+        }
+        return 0 - 99
     }
 
 
@@ -6161,6 +6191,20 @@ struct Chunk {
                         let osid = self.expr_type_kind(inner.value)
                         if osid >= 0 {
                             return self.field_elem_code(osid, fname)
+                        }
+                    }
+                    case EIndex(inner2, idx2) {
+                        // `obj.field[i][j]` — a 2nd-level index of a nested-array field (`self.dk_tabs[i][j]`).
+                        // The element is the field's 2nd-level element code (string INCREFs on consume).
+                        match inner2.value {
+                            case EGet(recv, fname) {
+                                let osid = self.expr_type_kind(recv.value)
+                                if osid >= 0 {
+                                    return self.field_elem2_code(osid, fname)
+                                }
+                            }
+                            case _ {
+                            }
                         }
                     }
                     case _ {
@@ -9792,7 +9836,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_module: [int], cur_module: in
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_module: clone_ints(fn_module), cur_module: cur_module, fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), fn_ret_ok: clone_ints(fn_rets.ok), fn_ret_err: clone_ints(fn_rets.err), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_elem_targs: [], slot_kind: skind, slot_iface: [], cur_return_span: 0, ret_box_struct: false, self_is_generic: false, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), st_felem_payload: clone_ints(structs.f_elem_payload), st_felem_payload_tp: clone_strs(structs.f_elem_payload_tp), st_felem_tpidx: clone_ints(structs.f_elem_tpidx), st_ftargs: clone_strs(structs.f_targs), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), gc_line: clone_ints(globals.line), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), ifm_ret_str: clone_bools(wit.ifm_ret_str), ifm_ret_kind: clone_ints(wit.ifm_ret_kind), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), mpe_key: clone_strs(wit.mpe_key), mpe_flags: clone_strs(wit.mpe_flags), mrp_key: clone_strs(wit.mrp_key), mrp_tpidx: clone_ints(wit.mrp_tpidx), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], cur_self_args: "", copy_tparams: [], at_base_generic: false, mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [], aei_name: [], aei_iface: [] }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_module: clone_ints(fn_module), cur_module: cur_module, fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), fn_ret_ok: clone_ints(fn_rets.ok), fn_ret_err: clone_ints(fn_rets.err), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_elem_targs: [], slot_kind: skind, slot_iface: [], cur_return_span: 0, ret_box_struct: false, self_is_generic: false, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_felem2: clone_ints(structs.f_elem2), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), st_felem_payload: clone_ints(structs.f_elem_payload), st_felem_payload_tp: clone_strs(structs.f_elem_payload_tp), st_felem_tpidx: clone_ints(structs.f_elem_tpidx), st_ftargs: clone_strs(structs.f_targs), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), gc_line: clone_ints(globals.line), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), ifm_ret_str: clone_bools(wit.ifm_ret_str), ifm_ret_kind: clone_ints(wit.ifm_ret_kind), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), mpe_key: clone_strs(wit.mpe_key), mpe_flags: clone_strs(wit.mpe_flags), mrp_key: clone_strs(wit.mrp_key), mrp_tpidx: clone_ints(wit.mrp_tpidx), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], cur_tp_names: [], cur_tp_types: [], cur_self_args: "", copy_tparams: [], at_base_generic: false, mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [], aei_name: [], aei_iface: [] }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     // A method of a GENERIC struct (Box<T>, SlotMap<V>) uses the erased BOXED-struct convention: an all-scalar
     // struct RETURN boxes (NEW_STRUCT + RETURN) not multi-slots (RETURN_STRUCT), and an all-scalar struct PARAM
