@@ -23,15 +23,15 @@ reference compiler is written in C with no third-party dependencies, and builds 
 - [For LLMs](/for-llms) — the priors cheat-sheet; paste it into a model before asking it to write Ingle.
 - [Flare](/flare) — the declarative UI layer.
 - [Architecture](/architecture) — compiler & toolchain decisions.
-- [Manifesto](https://github.com/ingle-lang/ingle-lang/blob/main/MANIFESTO.md) — the design philosophy and the decisions behind the language.
+- [Manifesto](https://github.com/ingle-lang/ingle/blob/main/MANIFESTO.md) — the design philosophy and the decisions behind the language.
 
 ## Get it
 
 The source, build instructions, and examples are on GitHub:
-**[github.com/ingle-lang/ingle-lang](https://github.com/ingle-lang/ingle-lang)**
+**[github.com/ingle-lang/ingle](https://github.com/ingle-lang/ingle)**
 
 ```sh
-git clone https://github.com/ingle-lang/ingle-lang
+git clone https://github.com/ingle-lang/ingle
 cd ingle-lang
 make            # builds the compiler
 make test       # runs the test suite
@@ -45,4 +45,4 @@ fn main() -> int {
 }
 ```
 
-Ingle is released under the [MIT License](https://github.com/ingle-lang/ingle-lang/blob/main/LICENSE).
+Ingle is released under the [MIT License](https://github.com/ingle-lang/ingle/blob/main/LICENSE).

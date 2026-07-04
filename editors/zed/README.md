@@ -11,11 +11,11 @@ lives in the compiler (`inglec --lsp`, in `src/lsp.c`), not here.
 | `extension.toml` | Manifest: registers the tree-sitter grammar and the language server. |
 | `languages/ember/config.toml` | Declares the `Ingle` language for `.ig`, comments (`//`), brackets. |
 | `languages/ember/highlights.scm` | tree-sitter highlight queries — **syntax highlighting**. |
-| `tree-sitter-ember/` | The tree-sitter grammar (its own git repo; Zed builds it from `src/parser.c`). |
+| `tree-sitter-ingle/` | The tree-sitter grammar (its own git repo; Zed builds it from `src/parser.c`). |
 
 ## Two independent mechanisms
 
-- **Syntax highlighting + outline** come from the tree-sitter grammar (`tree-sitter-ember`) and
+- **Syntax highlighting + outline** come from the tree-sitter grammar (`tree-sitter-ingle`) and
   `highlights.scm`. The grammar is **lexical-depth only** — it tokenizes; it does not re-parse
   Ingle's semantics. (A full grammar would be a second parser of Ingle syntax, the "two frontends"
   trap; the C compiler stays the one frontend — see `docs/architecture.md`.)
@@ -56,24 +56,24 @@ same menu (or `make build-zed` then reinstall).
 ## The grammar is a local git repo (dev) — regenerate after editing it
 
 Zed loads a tree-sitter grammar from a git `repository` + `rev`. For development, `extension.toml`
-points `repository` at `tree-sitter-ember/` via a `file://` URL and pins `rev` to a commit SHA. The
+points `repository` at `tree-sitter-ingle/` via a `file://` URL and pins `rev` to a commit SHA. The
 generated `src/parser.c` is committed (Zed compiles that — it does not run `tree-sitter generate`).
 
-After editing `tree-sitter-ember/grammar.js`:
+After editing `tree-sitter-ingle/grammar.js`:
 ```
-cd tree-sitter-ember
+cd tree-sitter-ingle
 npx tree-sitter-cli generate          # regenerate src/parser.c
 git add -A && git commit -m "..."     # new commit
 git rev-parse HEAD                     # copy this SHA...
 ```
 …then update `rev` in `extension.toml` to the new SHA and reinstall the dev extension.
 
-To **publish** the extension later, push `tree-sitter-ember` to a hosted git remote and replace the
+To **publish** the extension later, push `tree-sitter-ingle` to a hosted git remote and replace the
 `file://` `repository` with that URL.
 
 ## Keeping highlight vocabulary in sync (planned)
 
-The keyword / type / builtin lists in `tree-sitter-ember/grammar.js` mirror `include/vocab.def` —
+The keyword / type / builtin lists in `tree-sitter-ingle/grammar.js` mirror `include/vocab.def` —
 the single source of truth the lexer and LSP also compile from. Auto-emitting `highlights.scm`'s
 keyword lists from `vocab.def` (extending `tools/gen_editor_assets.c`, the way the VS Code TextMate
 grammar already is) is the planned next step so a vocabulary change can't drift the Zed colours.

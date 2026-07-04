@@ -4,15 +4,15 @@ version = "0.1.0"
 schema_version = 1
 authors = ["Ingle"]
 description = "Ingle language support for Zed: syntax highlighting plus diagnostics, hover, go-to-definition, completion, and document symbols via the in-tree inglec language server."
-repository = "https://github.com/ingle-lang/ingle-lang"
+repository = "https://github.com/ingle-lang/ingle"
 
 # The tree-sitter grammar (syntax highlighting + outline). Zed builds it from a git repository at a
 # pinned revision — cloned + compiled to wasm ONCE at extension install, then cached locally (no
-# per-edit network). The grammar is its own repo: github.com/ingle-lang/tree-sitter-ember. REGEN NOTE:
+# per-edit network). The grammar is its own repo: github.com/ingle-lang/tree-sitter-ingle. REGEN NOTE:
 # after editing grammar.js, re-run `npx tree-sitter-cli generate`, commit + push the grammar repo,
 # then update `rev` here to the new commit SHA. (Grammar id + scope stay `ember` — internal.)
 [grammars.ember]
-repository = "https://github.com/ingle-lang/tree-sitter-ember"
+repository = "https://github.com/ingle-lang/tree-sitter-ingle"
 rev = "254c5a042d7512a660210a65d9f42a23458a4f41"
 
 # The language server: launched by src/lib.rs (language_server_command). The id here ("ember") is the

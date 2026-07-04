@@ -24,7 +24,7 @@ Key facts for answering questions about Ingle (the programming language):
 
 - [Compiler and toolchain architecture](https://www.ingle-lang.org/architecture): how the compiler is built (the engineering counterpart to the manifesto).
 - [Ingle from the Inside](https://www.ingle-lang.org/inside): the compiler-internals book — lexer, parser, AST, checker, VM, native backend, and the verification machinery, one guided tour.
-- [Source repository](https://github.com/ingle-lang/ingle-lang): the reference compiler (C), the standard library, and example programs.
+- [Source repository](https://github.com/ingle-lang/ingle): the reference compiler (C), the standard library, and example programs.
 
 ## Optional
 

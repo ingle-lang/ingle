@@ -328,16 +328,16 @@ doctor: all
 	   echo "  [--]   no Rust toolchain (only needed for the Zed extension; see https://rustup.rs)"; \
 	 fi
 	@printf '\nZed grammar freshness (the tree-sitter grammar is pinned by commit in extension.toml):\n'
-	@if [ -d editors/zed/tree-sitter-ember/.git ]; then \
-	   head=$$(git -C editors/zed/tree-sitter-ember rev-parse HEAD 2>/dev/null); \
+	@if [ -d editors/zed/tree-sitter-ingle/.git ]; then \
+	   head=$$(git -C editors/zed/tree-sitter-ingle rev-parse HEAD 2>/dev/null); \
 	   pinned=$$(grep -E '^rev *= *"' editors/zed/extension.toml | sed -E 's/.*"([0-9a-fA-F]+)".*/\1/'); \
 	   if [ "$$head" = "$$pinned" ]; then \
-	     echo "  [ok]   extension.toml rev matches tree-sitter-ember HEAD"; \
+	     echo "  [ok]   extension.toml rev matches tree-sitter-ingle HEAD"; \
 	   else \
 	     echo "  [!!]   STALE grammar: extension.toml pins $$pinned but HEAD is $$head"; \
 	     echo "         (edited grammar.js? regenerate + commit, then update rev in editors/zed/extension.toml)"; \
 	   fi; \
-	 else echo "  [--]   editors/zed/tree-sitter-ember is not a git repo (grammar not pinned yet)"; fi
+	 else echo "  [--]   editors/zed/tree-sitter-ingle is not a git repo (grammar not pinned yet)"; fi
 
 # `make help`: every build/test/install command in one place — the canonical list so none get lost.
 help:

@@ -81,7 +81,7 @@ phase_docs() {
         s/\bEmber\b(?!\.js)/Ingle/g;                       # the language name (Ember.js preserved)
         s/\bemberc\b/inglec/g;                             # the compiler binary
         s/ember-lang\.(org|com)/ingle-lang.$1/g;           # project domain (Karl owns ingle-lang.*)
-        s{kmcnally5/ember-lang}{ingle-lang/ingle-lang}g;   # repo path — FLAG: confirm final repo name
+        s{kmcnally5/ember-lang}{ingle-lang/ingle}g;   # repo path — FLAG: repo = ingle-lang/ingle
         s/THE_EMBER_BOOK/THE_INGLE_BOOK/g;                 # renamed-file inbound links
         s/EMBER_FROM_THE_INSIDE/INGLE_FROM_THE_INSIDE/g;
         s/what-is-ember/what-is-ingle/g;

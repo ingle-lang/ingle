@@ -1,7 +1,7 @@
 // Ingle Zed extension. A thin launcher, mirroring editors/vscode/extension.js: it tells Zed how to
 // start `inglec --lsp` (the in-tree C language server) and nothing more. All the intelligence lives
 // in the compiler; this wasm module only wires the process up. Syntax highlighting comes from the
-// bundled tree-sitter-ember grammar + languages/ember/highlights.scm, not from here.
+// bundled tree-sitter-ingle grammar + languages/ember/highlights.scm, not from here.
 
 use zed_extension_api::{self as zed, Command, LanguageServerId, Result};
 

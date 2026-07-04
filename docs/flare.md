@@ -102,7 +102,7 @@ fn main() -> int {
 ```
 
 A full app built on Flare — a switchable conversation list, a scrollable transcript, a composer, and a
-settings **modal** of **segmented** controls — is [`public/claude-desktop/flare_chat.ig`](https://github.com/ingle-lang/ingle-lang/blob/main/public/claude-desktop/flare_chat.ig).
+settings **modal** of **segmented** controls — is [`public/claude-desktop/flare_chat.ig`](https://github.com/ingle-lang/ingle/blob/main/public/claude-desktop/flare_chat.ig).
 
 ## A bigger example — a settings dialog
 
@@ -110,7 +110,7 @@ The honest answer to "how does an immediate-mode UI hold a *tree* of mutable sta
 hooks or reducers — the tree is just plain `var`s the loop owns, mutated directly. Here a `modal` (a centred
 panel over a dimmed scrim) of `segmented` controls drives appearance, model, and token settings; a `dirty`
 flag is the app's own "unsaved" signal. Full runnable file:
-[`examples/graphics/20_settings.ig`](https://github.com/ingle-lang/ingle-lang/blob/main/examples/graphics/20_settings.ig); the core:
+[`examples/graphics/20_settings.ig`](https://github.com/ingle-lang/ingle/blob/main/examples/graphics/20_settings.ig); the core:
 
 ```rust
 var dark = false        // the whole "state tree" is just plain vars the loop owns
@@ -388,7 +388,7 @@ golden-testable, never coupled to the wall clock.
   a subtree that dims, disables, or sits behind a scrim as one. A no-op at full opacity, so un-faded
   goldens stay byte-identical.
 
-Runnable showcase: [`examples/graphics/18_flare_anim.ig`](https://github.com/ingle-lang/ingle-lang/blob/main/examples/graphics/18_flare_anim.ig) (a spring-driven
+Runnable showcase: [`examples/graphics/18_flare_anim.ig`](https://github.com/ingle-lang/ingle/blob/main/examples/graphics/18_flare_anim.ig) (a spring-driven
 width + a FLIP add/remove list). Goldens: `tests/graphics/flare_spring.ig`, `tests/graphics/flare_flip.ig`.
 
 ## Notes & limits

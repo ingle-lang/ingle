@@ -1,4 +1,4 @@
-; Ingle syntax highlighting for Zed (tree-sitter). The grammar (tree-sitter-ember) is intentionally
+; Ingle syntax highlighting for Zed (tree-sitter). The grammar (tree-sitter-ingle) is intentionally
 ; lexical-depth only — it tokenizes; it does not re-parse Ingle's semantics (the C compiler is the
 ; one frontend). So this query colours tokens, and recovers `fn name` / `struct Name` heads from
 ; adjacent-sibling patterns. Zed applies LATER patterns with higher precedence, so the general

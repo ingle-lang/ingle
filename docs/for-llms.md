@@ -19,7 +19,7 @@ the fragments above it are extracted from programs that do.
 
 > Do not feed a model `grammar.ebnf`. A formal grammar makes a model emit *derivations*
 > (`IFStatement: IF Expression …`) instead of *programs*. Use this page and the
-> [examples](https://github.com/ingle-lang/ingle-lang/tree/main/examples) instead — concrete code is
+> [examples](https://github.com/ingle-lang/ingle/tree/main/examples) instead — concrete code is
 > what models generalise from.
 
 ## The cheat table
@@ -191,4 +191,4 @@ fn main() {
 
 For the full language, read the [language reference](/language) and [The Ingle Book](/guide/);
 for the design philosophy, the
-[manifesto](https://github.com/ingle-lang/ingle-lang/blob/main/MANIFESTO.md).
+[manifesto](https://github.com/ingle-lang/ingle/blob/main/MANIFESTO.md).

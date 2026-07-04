@@ -22,7 +22,7 @@
 
 set -eu
 
-INGLE_REPO="${INGLE_REPO:-https://github.com/ingle-lang/ingle-lang}"
+INGLE_REPO="${INGLE_REPO:-https://github.com/ingle-lang/ingle}"
 INGLE_REF="${INGLE_REF:-main}"
 INGLE_PREFIX="${INGLE_PREFIX:-$HOME/.ingle}"
 INGLE_PROFILE="${INGLE_PROFILE:-full}"
@@ -120,7 +120,7 @@ detect_platform() {
         Linux)  PLATFORM="linux"; info "Linux detected ($arch)." ;;
         *)
             err "Ingle installs on macOS and Linux (detected: $os)."
-            die "Build from source instead: git clone $INGLE_REPO && cd ingle-lang && make install"
+            die "Build from source instead: git clone $INGLE_REPO && cd ingle && make install"
             ;;
     esac
 }
@@ -323,9 +323,9 @@ fetch_source() {
         || die "Download failed: $url"
     tar -xzf "$WORKDIR/src.tar.gz" -C "$WORKDIR" \
         || die "Could not unpack the source archive."
-    SRCDIR=$(find "$WORKDIR" -maxdepth 1 -type d -name 'ingle-lang-*' | head -n1)
+    SRCDIR=$(find "$WORKDIR" -maxdepth 1 -type d -name 'ingle-*' | head -n1)
     [ -n "$SRCDIR" ] && [ -d "$SRCDIR" ] \
-        || die "Unexpected archive layout (no ingle-lang-* directory)."
+        || die "Unexpected archive layout (no ingle-* directory)."
 }
 
 

@@ -44,7 +44,7 @@ back_to_top_text: "Back to top"
 # Top-right link out to the source.
 aux_links:
   "Ingle on GitHub":
-    - "https://github.com/ingle-lang/ingle-lang"
+    - "https://github.com/ingle-lang/ingle"
 aux_links_new_tab: true
 
 # Default to large-image social cards, with the branded 1200x630 card as the default Open Graph

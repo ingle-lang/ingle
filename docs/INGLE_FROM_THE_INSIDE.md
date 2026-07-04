@@ -27,8 +27,8 @@ what happens to what you wrote.*
 >   outputs under `tests/` that `make test` compares against on every run. If a golden in this book
 >   ever drifts from the compiler, the test suite fails before the book does.
 > - Every **Ingle sample** is copied from a file in
->   [`tests/`](https://github.com/ingle-lang/ingle-lang/blob/main/tests) or
->   [`examples/`](https://github.com/ingle-lang/ingle-lang/blob/main/examples) that the suite
+>   [`tests/`](https://github.com/ingle-lang/ingle/blob/main/tests) or
+>   [`examples/`](https://github.com/ingle-lang/ingle/blob/main/examples) that the suite
 >   compiles. This book invents no samples of its own.
 >
 > Ingle moves quickly, so treat this as a photograph with a date on the back. The live ledger of
@@ -119,7 +119,7 @@ A few conventions:
 
 Every programming language is an argument. Before a single line of the compiler existed, Ingle's
 argument was written down in a document called the
-[manifesto](https://github.com/ingle-lang/ingle-lang/blob/main/MANIFESTO.md), and the project holds
+[manifesto](https://github.com/ingle-lang/ingle/blob/main/MANIFESTO.md), and the project holds
 itself to an unusual rule: **every language-design decision must trace back to a principle in that
 document.** If a decision can't, either the decision is wrong or the manifesto gets amended — out
 loud, deliberately, in writing. So the honest way to explain why Ingle exists is to walk the
@@ -152,7 +152,7 @@ one without learning lifetime theory. Ingle keeps ownership — values move, bor
 default, mutation is opt-in — but there are no lifetime annotations to write, no `&`/`&mut`
 sigils, and the common tree-shaped patterns need zero ceremony. Where data is genuinely
 graph-shaped, the sanctioned tools are a generational
-[`std/slotmap`](https://github.com/ingle-lang/ingle-lang/blob/main/std/slotmap.ig) and a
+[`std/slotmap`](https://github.com/ingle-lang/ingle/blob/main/std/slotmap.ig) and a
 deeply-immutable `rc struct`, rather than an escalating fight with a borrow checker. The dangerous
 direction — a move — is the one you must type.
 
@@ -185,7 +185,7 @@ The repository is home to two things the project is adamant about keeping separa
 language** — grammar, semantics, the type system, the thing the manifesto governs — and **the
 Ingle compiler**, `inglec`, a batch program written in C that implements it. A change to one is
 not automatically a change to the other, and each has its own constitution: the language answers
-to the [manifesto](https://github.com/ingle-lang/ingle-lang/blob/main/MANIFESTO.md), the compiler
+to the [manifesto](https://github.com/ingle-lang/ingle/blob/main/MANIFESTO.md), the compiler
 and toolchain answer to [architecture.md](architecture.md), a living document of engineering
 decisions, each recorded as a rule plus the reasoning. When you wonder "why is it like this?"
 about anything in this book, one of those two documents almost always has a written answer — and
@@ -266,7 +266,7 @@ with the file that owns each arrow:
 ```
 
 The pleasant thing about `inglec` is that the pipeline is not sealed: nearly every stage has a
-window you can open. The driver ([src/main.c](https://github.com/ingle-lang/ingle-lang/blob/main/src/main.c))
+window you can open. The driver ([src/main.c](https://github.com/ingle-lang/ingle/blob/main/src/main.c))
 documents them in its own `--help` text, which is worth quoting as it appears in the source:
 
 ```c
@@ -292,7 +292,7 @@ compiler wrong, **65** the source had an error (lexing, parsing, type-checking, 
 fault), **66** the file couldn't be read, **0** all was well.
 
 Every journey needs a traveller. Here is ours — seven lines from the test suite,
-[`tests/codegen/functions.ig`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/codegen/functions.ig),
+[`tests/codegen/functions.ig`](https://github.com/ingle-lang/ingle/blob/main/tests/codegen/functions.ig),
 chosen because the suite locks its output at two different stages, so you will see it again in
 Chapter 9 compiled to bytecode, instruction by instruction:
 
@@ -325,12 +325,12 @@ Before a compiler can think about your program it has to read it, and it reads t
 taught to: letters into words. The lexer (or *scanner* — Ingle's source uses both) turns a stream
 of bytes into a stream of **tokens**: `let` is a token, `x` is a token, `=` and `42` are tokens.
 No meaning yet, no grammar — just spelling. The whole thing is
-[`src/lexer.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/lexer.c), 504 lines of
+[`src/lexer.c`](https://github.com/ingle-lang/ingle/blob/main/src/lexer.c), 504 lines of
 hand-written C: no regular expressions, no generated tables, a `switch` on the current character
 and some look-ahead.
 
 Here is what a token actually is, from
-[`include/token.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/token.h):
+[`include/token.h`](https://github.com/ingle-lang/ingle/blob/main/include/token.h):
 
 ```c
 // A Token is a zero-copy view into the source buffer: `start` points into the
@@ -368,7 +368,7 @@ slashes, mind: `//` is an ordinary comment and `////` is decoration, and the lex
 How does the lexer know `let` is a keyword and `lettuce` is not? In most compilers the keyword
 list lives wherever the lexer is, and a *second* copy lives in the editor's syntax highlighter,
 and a *third* in the completion engine, and they rot apart quietly. Ingle's answer is a single
-file, [`include/vocab.def`](https://github.com/ingle-lang/ingle-lang/blob/main/include/vocab.def),
+file, [`include/vocab.def`](https://github.com/ingle-lang/ingle/blob/main/include/vocab.def),
 which opens by stating its own job:
 
 ```c
@@ -392,7 +392,7 @@ EMBER_KEYWORD(TOK_FN,         "fn",         "declaration", "`fn` — declare a f
 Note the fourth column: every keyword carries its own one-line documentation, *in the vocabulary
 file*, and that gloss is what your editor shows when you hover the keyword. The lexer consumes the
 same table by defining `EMBER_KEYWORD` to build a lookup array — this is
-[`src/lexer.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/lexer.c), in full:
+[`src/lexer.c`](https://github.com/ingle-lang/ingle/blob/main/src/lexer.c), in full:
 
 ```c
 // keyword_type returns the reserved-word token for a lexeme, or TOK_IDENT if the
@@ -439,7 +439,7 @@ without ceremony. You write ordinary line-broken code; the lexer does the punctu
 ### What the suite sees
 
 The lexer's regression test,
-[`tests/lexer/literals.ig`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/lexer/literals.ig),
+[`tests/lexer/literals.ig`](https://github.com/ingle-lang/ingle/blob/main/tests/lexer/literals.ig),
 starts with two unremarkable lines:
 
 ```ember
@@ -494,7 +494,7 @@ in the book: **recursive descent**. One C function per grammatical construct; `p
 `parse_expression` which may call `parse_unary` which may find a parenthesis and call all the way
 back down. The grammar lives in the *shape of the call graph*, and the tree under construction
 mirrors the call stack discovering it. No parser generator, no grammar tables: 1,999 lines of
-plain C in [`src/parser.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/parser.c) you
+plain C in [`src/parser.c`](https://github.com/ingle-lang/ingle/blob/main/src/parser.c) you
 can single-step through.
 
 The parser's entire mutable state fits in one struct:
@@ -587,7 +587,7 @@ inner call parses `2`, sees `*`, which does bind tighter, so `2 * 3` is built in
 recursion and returned as a finished sub-tree, which becomes `+`'s right child. Twenty-two lines,
 every precedence level Ingle has, and associativity falls out of the `+ 1`. The parser's
 regression suite locks the result — from
-[`tests/parser/expressions.ig`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/parser/expressions.ig):
+[`tests/parser/expressions.ig`](https://github.com/ingle-lang/ingle/blob/main/tests/parser/expressions.ig):
 
 ```ember
 let a = 1 + 2 * 3 - 4 / 2 % 2
@@ -665,7 +665,7 @@ and language models alike.
 The AST is the compiler's central data structure — the thing the parser builds, the checker
 annotates, and both backends consume — so it is worth pausing on what a node actually looks like
 and where it lives. Both answers are in
-[`include/ast.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/ast.h), and both are
+[`include/ast.h`](https://github.com/ingle-lang/ingle/blob/main/include/ast.h), and both are
 deliberately boring in the best C tradition.
 
 A node is a **tagged union**: a `kind` field saying which construct this is, position fields, and
@@ -707,7 +707,7 @@ is a big part of why a second backend (Chapter 11) was affordable at all — and
 disagree about what a call means, only about how to say it.
 
 One deliberate absence: the tree printer
-([`src/ast_print.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/ast_print.c), the
+([`src/ast_print.c`](https://github.com/ingle-lang/ingle/blob/main/src/ast_print.c), the
 `--emit=ast` output you saw in Chapter 5) prints **no source positions**. That output is locked by
 golden files, and a dump that included line numbers would make every golden churn each time a
 comment shifted a test file's code down a line. Stability is a feature you design for, even in
@@ -716,7 +716,7 @@ debug output.
 ### Wholesale memory
 
 Now, where do ten thousand nodes live? The answer is 94 lines long —
-[`src/arena.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/arena.c), the smallest file
+[`src/arena.c`](https://github.com/ingle-lang/ingle/blob/main/src/arena.c), the smallest file
 in the compiler and the foundation under everything. An arena is memory rented **wholesale**: big
 blocks are allocated, a cursor walks forward through the current block handing out slices, and
 nothing is ever freed individually — when the compilation is done, the whole arena is released in
@@ -774,7 +774,7 @@ rediscovers it the hard way.
 
 ## Chapter 7 — Meaning: The Checker
 
-[`src/check.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/check.c) is 8,981 lines —
+[`src/check.c`](https://github.com/ingle-lang/ingle/blob/main/src/check.c) is 8,981 lines —
 between a quarter and a third of the entire compiler, and more than twice the size of anything
 else in it. That ratio *is* Ingle's design philosophy, stated in code volume: the language's
 promises — ownership without lifetime annotations, generics checked at the definition, contracts,
@@ -849,7 +849,7 @@ definition**, against declared interface bounds — not re-checked per use, whic
 answer to C++'s template-error experience. Generic dispatch happens through **witness records**
 (dictionary passing): a small table of the concrete type's method indices, built where the
 concrete type is known, threaded to where it isn't — from
-[`include/ast.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/ast.h):
+[`include/ast.h`](https://github.com/ingle-lang/ingle/blob/main/include/ast.h):
 
 ```c
 // A witness: a concrete type's method fn-indices for one bound interface, in the
@@ -894,7 +894,7 @@ then *renders* that record for whoever is reading. This is one design applied tw
 places a program can fail.
 
 **Compile-time.** Every diagnostic in the frontend funnels through one function, `diag_error` in
-[`src/diag.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/diag.c) — 209 lines, one of
+[`src/diag.c`](https://github.com/ingle-lang/ingle/blob/main/src/diag.c) — 209 lines, one of
 those files whose smallness is the point. A diagnostic carries file, line, column, message, the
 nearby source text, an optional `help` (a concrete suggested fix), and an optional secondary
 location ("the value moved here"). In human mode it prints immediately, in the familiar
@@ -904,7 +904,7 @@ machine-parseable, made for a tool or a model that intends to *fix* the program 
 about it.
 
 **Run-time.** The richer sibling is the **Fault** — Ingle's single structured failure artifact,
-defined in [`include/fault.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/fault.h)
+defined in [`include/fault.h`](https://github.com/ingle-lang/ingle/blob/main/include/fault.h)
 and documented in [faults.md](faults.md). The taxonomy first:
 
 ```c
@@ -974,7 +974,7 @@ which is this project's way.
 ## Chapter 9 — Lowering: Bytecode
 
 The checked, annotated tree now becomes something executable.
-[`src/codegen.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/codegen.c) walks the AST
+[`src/codegen.c`](https://github.com/ingle-lang/ingle/blob/main/src/codegen.c) walks the AST
 and emits **stack bytecode**: flat arrays of instructions for a machine with no registers, just a
 stack of values. There is deliberately no optimizing intermediate representation between tree and
 bytecode — the recorded reasoning is that an IR is "more surface to keep in sync," and Ingle's
@@ -993,7 +993,7 @@ fn main() -> int {
 ```
 
 and what the suite locks for `--emit=bytecode`, the golden file
-[`tests/codegen/functions.bytecode`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/codegen/functions.bytecode),
+[`tests/codegen/functions.bytecode`](https://github.com/ingle-lang/ingle/blob/main/tests/codegen/functions.bytecode),
 in full:
 
 ```
@@ -1027,7 +1027,7 @@ two bytes is a cheap price for never wondering.
 ### One table to rule the instruction set
 
 The instruction set itself lives in
-[`include/opcode.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/opcode.h) as
+[`include/opcode.h`](https://github.com/ingle-lang/ingle/blob/main/include/opcode.h) as
 another X-macro table, and its header comment explains exactly why with the candour this codebase
 makes a habit of:
 
@@ -1094,7 +1094,7 @@ a clean "too many" error. A limit is acceptable. A silent wrap never is.
 
 ## Chapter 10 — The Machine: The VM
 
-[`src/vm.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/vm.c) is the second-largest
+[`src/vm.c`](https://github.com/ingle-lang/ingle/blob/main/src/vm.c) is the second-largest
 file in the compiler (5,003 lines) and the place where Ingle's promises stop being analysis and
 start being behaviour. It is a classic stack interpreter: a value stack, a stack of call frames
 (function + instruction pointer + where its locals begin), and a dispatch loop that reads an
@@ -1104,7 +1104,7 @@ canonical one, and everything else (the native backend, the self-hosted port) is
 it.
 
 A running value is sixteen bytes — from
-[`include/value.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/value.h):
+[`include/value.h`](https://github.com/ingle-lang/ingle/blob/main/include/value.h):
 
 ```c
 typedef struct {
@@ -1214,10 +1214,10 @@ spends casually.
 ## Chapter 11 — The Second Road: Native Code
 
 For most of its life an Ingle program runs on the VM. When it graduates — `inglec -o app app.ig` —
-it takes the second road: [`src/cgen_c.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/cgen_c.c)
+it takes the second road: [`src/cgen_c.c`](https://github.com/ingle-lang/ingle/blob/main/src/cgen_c.c)
 walks the *same checked, annotated AST* and emits a self-contained **C translation unit**, which
 the system C compiler builds and links against a small runtime
-([`src/runtime.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/runtime.c)) into a
+([`src/runtime.c`](https://github.com/ingle-lang/ingle/blob/main/src/runtime.c)) into a
 standalone binary. No interpreter inside, no VM — and no LLVM either: the only build dependency is
 the C compiler the machine already has, which keeps the empty-dependency-tree promise intact.
 
@@ -1231,7 +1231,7 @@ The manifesto had said "one backend," and the amendment that welcomed this secon
 nice piece of intellectual honesty — the rule that mattered was never "one backend," it was **one
 frontend and one reference semantics**. The lexer, parser, and checker are shared; the VM remains
 canonical; and the native backend is held to it by a **differential test suite**
-([`tests/native/`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/native)): every program
+([`tests/native/`](https://github.com/ingle-lang/ingle/blob/main/tests/native)): every program
 runs on both, and their outputs must match bit for bit. Two independent implementations that must
 agree — the project likes to point out this is its verification thesis, applied to itself.
 
@@ -1285,7 +1285,7 @@ Most languages let you attach a debugger. Ingle's ambition — stated in the man
 the VM was young — is different: **execution itself should be observable as data**, designed in
 as a seam rather than bolted on later. (The bolt-on version was tried in Ingle's ancestor and
 found wanting: added late, it could only see the few checkpoints that already existed.) The seam
-is [`include/trace.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/trace.h), and it
+is [`include/trace.h`](https://github.com/ingle-lang/ingle/blob/main/include/trace.h), and it
 is small enough to show almost whole:
 
 ```c
@@ -1365,7 +1365,7 @@ vague comment?'"*
 
 What makes contracts more than assertions is the tooling stacked on them, and the test suite
 demonstrates the first layer with a deliberately buggy function. From
-[`tests/check/contract_fuzz.ig`](https://github.com/ingle-lang/ingle-lang/blob/main/tests/check/contract_fuzz.ig):
+[`tests/check/contract_fuzz.ig`](https://github.com/ingle-lang/ingle/blob/main/tests/check/contract_fuzz.ig):
 
 ```ember
 fn abs_val(x: int) -> int
@@ -1405,7 +1405,7 @@ inputs are not bugs; that is what a precondition means.
 ### The prover
 
 Above the fuzzer sits something rarer for a language this young: a static prover.
-[`src/prove.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/prove.c) — 465 lines,
+[`src/prove.c`](https://github.com/ingle-lang/ingle/blob/main/src/prove.c) — 465 lines,
 dependency-free like everything else — attempts to *discharge* contracts outright, and its
 self-description sets the tone:
 
@@ -1552,7 +1552,7 @@ weren't retrofits for the editor; they were already requirements of the LLM loop
 the LSP could exist at all.
 
 The bridge between "the checker knows everything" and "the editor can ask" is the **semantic
-index** ([`include/semindex.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/semindex.h)):
+index** ([`include/semindex.h`](https://github.com/ingle-lang/ingle/blob/main/include/semindex.h)):
 a position-keyed table the checker fills *as it resolves*, recording for each identifier
 occurrence what it resolved to, its rendered type, its documentation, and where it was defined.
 The entry an editor's question lands on:
@@ -1639,10 +1639,10 @@ real C function is the one place Ingle's guarantees stop, and the language makes
 is greppable.
 
 Behind the door, dispatch goes through an in-tree **registry** of typed wrappers
-([`src/cextern.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/cextern.c)) — no
+([`src/cextern.c`](https://github.com/ingle-lang/ingle/blob/main/src/cextern.c)) — no
 `libffi`, no `dlopen`, the empty-dependency-tree principle holding even here. The interesting
 problem is marshalling, and the header's own comment states the solution better than a paraphrase
-could — from [`include/cextern.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/cextern.h):
+could — from [`include/cextern.h`](https://github.com/ingle-lang/ingle/blob/main/include/cextern.h):
 
 ```c
 // The boundary is defined by the **leaf scalar sequence**: a struct argument is flattened to its
@@ -1705,7 +1705,7 @@ is real by making it carry serious weight. One rewrites the compiler in Ingle. T
 Ingle on bare metal.
 
 **Self-hosting** lives in
-[`selfhost/`](https://github.com/ingle-lang/ingle-lang/blob/main/selfhost) and proceeds stage by
+[`selfhost/`](https://github.com/ingle-lang/ingle/blob/main/selfhost) and proceeds stage by
 stage — lexer, parser, checker, codegen, and now the native C emitter, each a fresh Ingle program
 (`lexer.ig`, `parser.ig`, `checker.ig`, `codegen.ig`, `cgen_c.ig`) ported from its C counterpart.
 The discipline is the same differential religion as everywhere else: the C compiler — frozen and
@@ -1726,7 +1726,7 @@ offset (OFI-165), and the gcc-vs-clang operand-evaluation-order divergence (OFI-
 Chapter 11's trivia box. Dogfooding at this intensity is a search strategy.
 
 **Bare metal** lives in
-[`kernel/`](https://github.com/ingle-lang/ingle-lang/blob/main/kernel), and milestone 1 shipped
+[`kernel/`](https://github.com/ingle-lang/ingle/blob/main/kernel), and milestone 1 shipped
 the day this book is dated: a heap-free Ingle `main`, compiled with `--emit=c --freestanding`,
 linked against a boot stub (`boot.S`), a linker script, and a tiny runtime shim — booting on
 QEMU's aarch64 `virt` machine and writing `Hello from Ingle!` to the UART. `make test-kernel`
@@ -1832,7 +1832,7 @@ as measured on 1 July 2026 — they will drift, but the *proportions* are the le
 
 (Plus the small change: `token.c`, `opcode.c`, `trace.c`, `typefmt.c`, `builtin.c`, `program.c`,
 `jsonw.c` — all under a hundred lines each, all exactly what their names say.) Headers live in
-[`include/`](https://github.com/ingle-lang/ingle-lang/blob/main/include), and several are
+[`include/`](https://github.com/ingle-lang/ingle/blob/main/include), and several are
 first-class reading: `ast.h` (610 lines — the language's whole shape), `opcode.h` (208 — the
 instruction set and its X-macro), `vocab.def` (135 — the vocabulary), `value.h`, `fault.h`,
 `trace.h`, `semindex.h`.
@@ -1847,11 +1847,11 @@ one campaign's code with the log entry beside it, which is how the file was writ
 place.
 
 **The proof of every claim** is under
-[`tests/`](https://github.com/ingle-lang/ingle-lang/blob/main/tests): `run/` (execution goldens),
+[`tests/`](https://github.com/ingle-lang/ingle/blob/main/tests): `run/` (execution goldens),
 `lexer/`, `parser/`, `codegen/` (stage goldens — this book's exhibits), `native/` (the VM↔native
 differential), `check/`, `fault/`, `trace/`, `replay/`, `parallel/`, `selfhost/`, and the
 runners beside them. The examples in
-[`examples/`](https://github.com/ingle-lang/ingle-lang/blob/main/examples) are documentation that
+[`examples/`](https://github.com/ingle-lang/ingle/blob/main/examples) are documentation that
 must also compile — the suite enforces that (a lesson recorded as OFI-030, after two showcase
 files silently rotted).
 

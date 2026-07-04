@@ -7,7 +7,7 @@ description: The binding design of record for Ingle's std/http — the blocking 
 # Ingle `std/http` — Design of Record
 
 *Decided 2026-06-19. This is a binding design: the API and the transport model below are the plan; the
-modules are built against it. Decisions trace to [MANIFESTO.md](https://github.com/ingle-lang/ingle-lang/blob/main/MANIFESTO.md). Supersedes the
+modules are built against it. Decisions trace to [MANIFESTO.md](https://github.com/ingle-lang/ingle/blob/main/MANIFESTO.md). Supersedes the
 ad-hoc `extern http_post` the desktop apps use today.*
 
 ## Thesis

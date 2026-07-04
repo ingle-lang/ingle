@@ -17,11 +17,11 @@ build/
 editors/vscode/node_modules/
 
 # Zed grammar. The grammar source is its OWN published repo
-# (github.com/kmcnally5/tree-sitter-ember), which Zed clones at the pinned rev in
-# editors/zed/extension.toml. `tree-sitter-ember/` here is the local working clone
+# (github.com/ingle-lang/tree-sitter-ingle), which Zed clones at the pinned rev in
+# editors/zed/extension.toml. `tree-sitter-ingle/` here is the local working clone
 # of that repo and `grammars/ember/` is Zed's derived fetch-cache — neither belongs
 # in this repo (decision: separate published grammar repo; see docs/architecture.md).
-editors/zed/tree-sitter-ember/
+editors/zed/tree-sitter-ingle/
 editors/zed/grammars/ember/
 
 # Compiled Zed extension wasm + the prebuilt grammar wasm cache — built on install.

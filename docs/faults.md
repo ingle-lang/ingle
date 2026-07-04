@@ -67,7 +67,7 @@ costs **nothing** on the hot path: only the body of the already-taken failure br
 
 ## The schema
 
-Defined in [`include/fault.h`](https://github.com/ingle-lang/ingle-lang/blob/main/include/fault.h). A `Fault` carries:
+Defined in [`include/fault.h`](https://github.com/ingle-lang/ingle/blob/main/include/fault.h). A `Fault` carries:
 
 | field        | meaning |
 |--------------|---------|
@@ -82,8 +82,8 @@ Defined in [`include/fault.h`](https://github.com/ingle-lang/ingle-lang/blob/mai
 | `hint`       | a concrete fix in user terms |
 
 Two renderers (`fault_render_human`, `fault_render_agent`) in
-[`src/fault.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/fault.c) consume one `Fault`. Both escape every string through the
-single shared `json_write_string` ([`src/jsonw.c`](https://github.com/ingle-lang/ingle-lang/blob/main/src/jsonw.c)), so no control/ANSI byte
+[`src/fault.c`](https://github.com/ingle-lang/ingle/blob/main/src/fault.c) consume one `Fault`. Both escape every string through the
+single shared `json_write_string` ([`src/jsonw.c`](https://github.com/ingle-lang/ingle/blob/main/src/jsonw.c)), so no control/ANSI byte
 can leak into the agent channel. Empty fields are **omitted** from the agent JSON, not
 emitted as `null` — noise hurts a model.
 

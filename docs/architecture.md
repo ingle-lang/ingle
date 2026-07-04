@@ -6,12 +6,12 @@ description: Engineering decisions behind the Ingle compiler and toolchain (ingl
 
 # Ingle — Compiler & Toolchain Architecture
 
-*Engineering decisions for the **compiler and toolchain**. The counterpart to [MANIFESTO.md](https://github.com/ingle-lang/ingle-lang/blob/main/MANIFESTO.md). Started June 2026.*
+*Engineering decisions for the **compiler and toolchain**. The counterpart to [MANIFESTO.md](https://github.com/ingle-lang/ingle/blob/main/MANIFESTO.md). Started June 2026.*
 
 The manifesto records why the **language** is the way it is. This document records why the
 **compiler, toolchain, and repository** are the way they are — the engineering decisions that
 future work must respect but that say nothing about Ingle-the-language. The project insists on
-keeping these two apart (see [CLAUDE.md](https://github.com/ingle-lang/ingle-lang/blob/main/CLAUDE.md): *"don't conflate"* the language and the
+keeping these two apart (see [CLAUDE.md](https://github.com/ingle-lang/ingle/blob/main/CLAUDE.md): *"don't conflate"* the language and the
 compiler); this is where the compiler half lives.
 
 It is a **living** document, not an append-only log: each entry states the rule that is true
@@ -66,7 +66,7 @@ copies are **derived** — never hand-maintained in parallel. Where the consumer
 an eventual bug. A generator that nobody is *forced* to run drifts just as badly — so the value is
 in the **enforced diff**, not merely in having a generator. First instance: the lexical vocabulary
 (keywords, builtins, primitives) lived in four hand-copied places; it now lives in
-[`include/vocab.def`](https://github.com/ingle-lang/ingle-lang/blob/main/include/vocab.def) (X-macros), `#include`d by the lexer and the LSP, with
+[`include/vocab.def`](https://github.com/ingle-lang/ingle/blob/main/include/vocab.def) (X-macros), `#include`d by the lexer and the LSP, with
 the TextMate grammar generated from it and gated by `make check-editor-sync` (OFI-033).
 
 ---
@@ -138,7 +138,7 @@ editor gets a *thin glue package* under `editors/<editor>/` whose only jobs are 
 `inglec --lsp` and (2) supply that editor's syntax-highlighting asset in its native format. VS Code
 (`editors/vscode/`) is a JS launcher + a **TextMate** grammar generated from `vocab.def`. Zed
 (`editors/zed/`) is a Rust→wasm extension implementing `zed::Extension::language_server_command` +
-a **tree-sitter** grammar (`tree-sitter-ember`) and `highlights.scm`. Adding editor #3/#4 means a new
+a **tree-sitter** grammar (`tree-sitter-ingle`) and `highlights.scm`. Adding editor #3/#4 means a new
 `editors/<editor>/` package, not server changes.
 
 **Why.** The intelligence lives once, in the shared frontend (see "the language server is C"); only
@@ -1379,7 +1379,7 @@ backend change, ~12 lines. VM==native verified; regression `tests/run/spawn_qual
 
 ## Decision: `Ptr` linearity (must-close) is a checker-only AND-merge dataflow, not a destructor
 
-*Decided 2026-06-19. Full design + adversarial review: [docs/design/ptr-linearity.md](https://github.com/ingle-lang/ingle-lang/blob/main/docs/design/ptr-linearity.md). Closes OFI-049's leak half.*
+*Decided 2026-06-19. Full design + adversarial review: [docs/design/ptr-linearity.md](https://github.com/ingle-lang/ingle/blob/main/docs/design/ptr-linearity.md). Closes OFI-049's leak half.*
 
 The double-close half of OFI-049 (2026-06-18) made `Ptr` **move-only** (affine — used at most once) and
 deliberately gave it **no scope-exit destructor** (Ingle can't know whether an arbitrary C handle is
@@ -1591,14 +1591,14 @@ Two repo/toolchain decisions made while preparing the first public push:
   registrar (GitHub Pages allows one custom domain per repo).
 
 - **Zed grammar** — the tree-sitter grammar is published as its **own GitHub repo**
-  (`github.com/kmcnally5/tree-sitter-ember`) and referenced from `editors/zed/extension.toml` by
+  (`github.com/ingle-lang/tree-sitter-ingle`) and referenced from `editors/zed/extension.toml` by
   `https` URL + pinned `rev`. This is exactly how Zed loads grammars: at extension *install* it clones
   the grammar repo at that rev and compiles `parser.c` to wasm locally, once, then caches it — no
   per-edit network and no dependency on a clone of the compiler repo. Chosen over a submodule (Zed
   fetches the grammar repo itself regardless, so a submodule adds friction for no functional gain) and
   over vendoring into the main repo (Zed's published-extension loader expects a grammar `repository`,
   so a path-only vendor isn't the supported path and loses cross-editor reuse). The grammar's
-  working clone (`editors/zed/tree-sitter-ember/`) and Zed's fetch-cache (`editors/zed/grammars/`)
+  working clone (`editors/zed/tree-sitter-ingle/`) and Zed's fetch-cache (`editors/zed/grammars/`)
   stay gitignored. Rev-bump flow: edit `grammar.js` → `tree-sitter generate` → commit + push the
   grammar repo → update `rev` in `extension.toml`.
 
@@ -1652,7 +1652,7 @@ where the distro lacks it (OFI-142). The language, its concurrency, the native b
 
 ## Decision: stage 0 is a frozen, reproducible-from-zero bootstrap reference (`stage0-v0.3.42`)
 
-The self-hosting bootstrap ([docs/design/self-hosting.md](https://github.com/ingle-lang/ingle-lang/blob/main/docs/design/self-hosting.md)) ports the compiler
+The self-hosting bootstrap ([docs/design/self-hosting.md](https://github.com/ingle-lang/ingle/blob/main/docs/design/self-hosting.md)) ports the compiler
 into Ingle one differential-green stage at a time. That only works if the C reference compiler —
 **stage 0** — is pinned and reproducible, because it is the oracle every ported stage is measured
 against. The decisions:
@@ -1727,7 +1727,7 @@ So the registry stays the canonical, VM-runnable, fully-marshalled path for host
 `std/*` FFI bindings, libcurl, SQLite); direct-extern is the narrow, native-only, scalar/Ptr path for
 bare-metal and any freestanding C. MMIO **intrinsics** (volatile load/store, no C shim at all) remain the
 eventual endgame that retires even the direct-extern shim for hardware access. First used by kernel
-milestone 1 (`make test-kernel`); see [docs/design/kernel-freestanding.md](https://github.com/ingle-lang/ingle-lang/blob/main/docs/design/kernel-freestanding.md).
+milestone 1 (`make test-kernel`); see [docs/design/kernel-freestanding.md](https://github.com/ingle-lang/ingle/blob/main/docs/design/kernel-freestanding.md).
 
 
 ## Decision: `--freestanding` is an emit-mode flag on `--emit=c`, not a separate backend
@@ -1793,7 +1793,7 @@ The mechanism — a compile define `EMBER_FREESTANDING` and a thin platform laye
   Device) before `main`. This is the counterpart to the FP/SIMD-enable decision (kernel M1): the runtime's
   representation choices (16-byte SIMD-copied `Value`, packed layouts) dictate specific CPU bring-up.
 
-See [docs/design/kernel-freestanding.md](https://github.com/ingle-lang/ingle-lang/blob/main/docs/design/kernel-freestanding.md) for the milestone log.
+See [docs/design/kernel-freestanding.md](https://github.com/ingle-lang/ingle/blob/main/docs/design/kernel-freestanding.md) for the milestone log.
 
 
 ## Decision: self-hosting is carried to a standalone toolchain — the Ingle compiler becomes the development surface, stage 0 becomes the frozen seed
@@ -1823,8 +1823,8 @@ seed (the Rust-drops-OCaml / Go-retires-its-C-compiler end state).
   serializable `CompiledProgram` container + a C VM loader (`--run-bytecode`), then `codegen.ig` to
   full-corpus coverage, then unify with the checker. Native C-emit parity comes second and folds into the
   kernel campaign, where the AST→C path's unique value (bare-metal codegen, libC/3rd-party linking) lives.
-  See [docs/design/bytecode-container.md](https://github.com/ingle-lang/ingle-lang/blob/main/docs/design/bytecode-container.md)
-  for the Phase 1 format design and [docs/design/self-hosting.md](https://github.com/ingle-lang/ingle-lang/blob/main/docs/design/self-hosting.md)
+  See [docs/design/bytecode-container.md](https://github.com/ingle-lang/ingle/blob/main/docs/design/bytecode-container.md)
+  for the Phase 1 format design and [docs/design/self-hosting.md](https://github.com/ingle-lang/ingle/blob/main/docs/design/self-hosting.md)
   for the phased plan.
 
 - **This refines "stage 0 is a frozen, reproducible-from-zero bootstrap reference" (above), it does not

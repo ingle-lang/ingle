@@ -78,7 +78,7 @@ build/inglec -o hello hello.ig        # compile a native binary
 
 Extensions live under [editors/](editors/) — VS Code (`editors/vscode`) and Zed (`editors/zed`).
 Both drive the same `inglec --lsp` server. The Zed syntax grammar is published separately as
-[tree-sitter-ember](https://github.com/kmcnally5/tree-sitter-ember).
+[tree-sitter-ingle](https://github.com/ingle-lang/tree-sitter-ingle).
 
 ## License
 

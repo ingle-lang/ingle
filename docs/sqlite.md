@@ -25,7 +25,7 @@ build/inglec-db --emit=run myprogram.ig      # the database build (make db)
 ## Why vendored, not linked
 
 SQLite is the one engine designed to be embedded as source. The whole library is two checked-in files
-in [`third_party/sqlite/`](https://github.com/ingle-lang/ingle-lang/tree/main/third_party/sqlite)
+in [`third_party/sqlite/`](https://github.com/ingle-lang/ingle/tree/main/third_party/sqlite)
 (`sqlite3.c` + `sqlite3.h`), compiled once into the compiler. So `make db` works on any machine — macOS
 or Linux — with **no install step at all**, which upholds Ingle's "zero install-time dependencies /
 deterministic build" value *better* than curl or raylib can (those must be system libraries; SQLite
@@ -63,7 +63,7 @@ fn main() -> int {
 }
 ```
 
-This is the payoff of [`resource` types](https://github.com/ingle-lang/ingle-lang/blob/main/docs/design/ptr-owning.md): the handle manages itself. There is no
+This is the payoff of [`resource` types](https://github.com/ingle-lang/ingle/blob/main/docs/design/ptr-owning.md): the handle manages itself. There is no
 `close()`, `finalize()`, or `ok()` to call, and no owner-borrows-worker dance — `?` "just works",
 because an owned `Db`/`Stmt` drops on the early-return path the same as on the normal one.
 
@@ -98,7 +98,7 @@ them (closing the connection / finalizing the statement) for you, on every path.
 ## What this is, and what is planned
 
 This is the **resource-based binding** — the complete, sound foundation. The owning-handle ergonomics
-([`resource` types](https://github.com/ingle-lang/ingle-lang/blob/main/docs/design/ptr-owning.md), OFI-122) are here: `Db`/`Stmt` close themselves, so the API
+([`resource` types](https://github.com/ingle-lang/ingle/blob/main/docs/design/ptr-owning.md), OFI-122) are here: `Db`/`Stmt` close themselves, so the API
 is `?`-clean with no `close`/`finalize`. Two layers are still planned on top:
 
 - **Ergonomic row helpers** — `query(db, sql, params) -> Result<[Row], string>` and a parametrised
