@@ -149,7 +149,7 @@ fn emit_program(decls: [ps.Decl], mod_of: [int]) {
     let fn_names = cg.build_fn_names(decls)
     let structs = cg.build_structs(decls)
     let enums = cg.build_enums(decls, structs)
-    let fn_rets = cg.build_fn_rets(decls, structs, enums.e_names)
+    let fn_rets = cg.build_fn_rets(decls, structs, enums.e_names, mod_of)
     let globals = cg.build_globals(decls)
     let instances = cg.build_struct_instances(decls, structs.names)
     cg.disassemble_program(decls, mod_of, fn_names, fn_rets, structs, enums, globals, instances)

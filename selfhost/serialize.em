@@ -573,7 +573,7 @@ fn serialize_program(decls: [ps.Decl], mod_of: [int], sources: [string], out_pat
     let fn_mods = cg.build_fn_modules(decls, mod_of)
     let structs = cg.build_structs(decls)
     let enums = cg.build_enums(decls, structs)
-    let fn_rets = cg.build_fn_rets(decls, structs, enums.e_names)
+    let fn_rets = cg.build_fn_rets(decls, structs, enums.e_names, mod_of)
     let globals = cg.build_globals(decls)
     let instances = cg.build_struct_instances(decls, structs.names)
 

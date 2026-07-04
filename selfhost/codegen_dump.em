@@ -133,7 +133,7 @@ fn main() -> int {
     let fn_names = cg.build_fn_names(lm.decls)
     let structs = cg.build_structs(lm.decls)
     let enums = cg.build_enums(lm.decls, structs)
-    let fn_rets = cg.build_fn_rets(lm.decls, structs, enums.e_names)
+    let fn_rets = cg.build_fn_rets(lm.decls, structs, enums.e_names, lm.mod_of)
     let globals = cg.build_globals(lm.decls)
     let instances = cg.build_struct_instances(lm.decls, structs.names)
     cg.disassemble_program(lm.decls, lm.mod_of, fn_names, fn_rets, structs, enums, globals, instances)

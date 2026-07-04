@@ -742,6 +742,51 @@ fn elem_type_code(elem_ty: ps.Ty, struct_names: [string], enum_names: [string]) 
 }
 
 
+// elem_type_code_mod is the MODULE-SCOPED elem_type_code: when a type NAME is both a struct AND an enum
+// (co-imported `Span` — highlight's struct + markdown's enum), it resolves by the CONTEXT module `ctx_mod`
+// (a return type is resolved in its own function's module), so `md.inline() -> [Span]` picks markdown's ENUM
+// while `hl.spans() -> [Span]` picks highlight's STRUCT (OFI-179). Falls back to struct-first (elem_type_code's
+// order) when there is no collision, ctx_mod is unknown (-1), or neither definition is in ctx_mod.
+fn elem_type_code_mod(elem_ty: ps.Ty, struct_names: [string], enum_names: [string], st_mod: [int], et_mod: [int], ctx_mod: int) -> int {
+    let sid = ty_struct_id_g(elem_ty, struct_names)
+    let eid = ty_enum_id(elem_ty, enum_names)
+    if sid >= 0 && eid >= 0 && ctx_mod >= 0 {
+        if sid < st_mod.len() && st_mod[sid] == ctx_mod {
+            return sid
+        }
+        if eid < et_mod.len() && et_mod[eid] == ctx_mod {
+            return 0 - 4
+        }
+    }
+    if sid >= 0 {
+        return sid
+    }
+    if ty_is_array(elem_ty) {
+        return 0 - 2
+    }
+    if ty_is_string(elem_ty) {
+        return 0 - 3
+    }
+    if eid >= 0 {
+        return 0 - 4
+    }
+    return 0 - 1
+}
+
+
+// ret_elem_mod returns the module-scoped element code of a function's ARRAY return type (`[Span]`), or -1 for
+// a non-array return — the module-aware counterpart of ret_info.elem, used by build_fn_rets.
+fn ret_elem_mod(ret: [ps.Ty], struct_names: [string], enum_names: [string], st_mod: [int], et_mod: [int], ctx_mod: int) -> int {
+    if ret.len() == 0 {
+        return 0 - 1
+    }
+    if ty_is_array(ret[0]) {
+        return elem_type_code_mod(elem_ty_of(ret[0]), struct_names, enum_names, st_mod, et_mod, ctx_mod)
+    }
+    return 0 - 1
+}
+
+
 // EnumTable holds every enum's variants so codegen can resolve a variant name to (enum_id, tag, arity) for
 // NEW_ENUM construction and match dispatch. User enums are numbered in declaration order (0..U-1, matching
 // the checker), then the prelude Option (id U) and Result (id U+1) are appended — the self-hosted parser
@@ -9043,7 +9088,7 @@ fn ret_scalar_kind(ret: [ps.Ty]) -> int {
 }
 
 
-fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string]) -> FnRets {
+fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string], mod_of: [int]) -> FnRets {
     var rs: [bool] = []
     var ra: [bool] = []
     var rsid: [int] = []
@@ -9055,6 +9100,30 @@ fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string]) -
     var exq: [string] = []
     var rok: [int] = []
     var rerr: [int] = []
+    // Per-type defining module (parallel to struct sids / enum ids), so an ARRAY-return element type name that
+    // collides across modules resolves in the RETURNING function's own module (OFI-179). Prelude Option/Result
+    // (appended to enum_names by build_enums) get a sentinel module -1.
+    var st_mod: [int] = []
+    var et_mod: [int] = []
+    var mi2 = 0
+    loop {
+        if mi2 >= decls.len() {
+            break
+        }
+        match decls[mi2] {
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                st_mod.append(mod_at(mod_of, mi2))
+            }
+            case DEnum(name, generics, impls, variants) {
+                et_mod.append(mod_at(mod_of, mi2))
+            }
+            case _ {
+            }
+        }
+        mi2 = mi2 + 1
+    }
+    et_mod.append(0 - 1)
+    et_mod.append(0 - 1)
     var i = 0
     loop {
         if i >= decls.len() {
@@ -9072,7 +9141,7 @@ fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string]) -
                     ra.append(r.arr)
                     rsid.append(r.sid)
                     ren.append(r.enm)
-                    rel.append(r.elem)
+                    rel.append(ret_elem_mod(methods[mi].ret, structs.names, enum_names, st_mod, et_mod, mod_at(mod_of, i)))
                     rk.append(ret_scalar_kind(methods[mi].ret))
                     rok.append(result_ok_code(methods[mi].ret, structs, enum_names))
                     rerr.append(result_err_code(methods[mi].ret, structs, enum_names))
@@ -9085,7 +9154,7 @@ fn build_fn_rets(decls: [ps.Decl], structs: StructTable, enum_names: [string]) -
                 ra.append(r.arr)
                 rsid.append(r.sid)
                 ren.append(r.enm)
-                rel.append(r.elem)
+                rel.append(ret_elem_mod(f.ret, structs.names, enum_names, st_mod, et_mod, mod_at(mod_of, i)))
                 rk.append(ret_scalar_kind(f.ret))
                 rok.append(result_ok_code(f.ret, structs, enum_names))
                 rerr.append(result_err_code(f.ret, structs, enum_names))
