@@ -1,0 +1,696 @@
+// ide.ig — Inglenook: an IDE for coding with LLMs, written in Ingle on std/flare. The dockable
+// workspace is Conversations | Chat | (Editor 1 over Editor 2) | Inspector: chat with the agent
+// on the left of centre, watch it act on the project in the editors, keep the receipts on the
+// right. Phase 1 is the shell — the full flare_chat agent (streaming, tools, both providers)
+// plus a live project tree (the list_dir builtin) and syntax-highlighted viewer panes; the
+// verify loop (compile/contract verdicts in the chat) arrives with std/proc in Phase 3.
+//
+// Build + run from the repo root:
+//
+//   ANTHROPIC_API_KEY=sk-ant-... ./public/inglenook/run.sh
+//   # or: make net-graphics && ANTHROPIC_API_KEY=… build/inglec-net-gfx --emit=run public/inglenook/ide.ig
+//
+// It needs inglec-net-gfx (libcurl transport + the parallel runtime), like flare_chat. Without
+// ANTHROPIC_API_KEY it still runs; sending just prints a reminder (or pick Ollama in Settings).
+import "std/draw" as draw
+import "std/flare" as flare
+import "std/json" as json
+import "../claude-desktop/anthropic" as api
+import "../claude-desktop/ollama" as oll
+import "chat" as chat
+import "editor" as editor
+import "files" as files
+
+// Keyboard shortcuts (raylib keycodes): ⌘/Ctrl with +/- to zoom, N new chat, K palette,
+// comma settings, Q quit; Esc stops a streaming reply.
+let KEY_SUPER_L = 343
+let KEY_SUPER_R = 347
+let KEY_CTRL_L  = 341
+let KEY_EQUAL   = 61
+let KEY_MINUS   = 45
+let KEY_N       = 78
+let KEY_K       = 75
+let KEY_COMMA   = 44
+let KEY_Q       = 81
+let KEY_ESCAPE  = 256
+
+
+// build_workspace lays out the default dock: Conversations | Chat | (Editor 1 / Editor 2) |
+// Inspector. Chat is the pinned anchor; every ratio is child A's fraction of its split.
+fn build_workspace() -> flare.DockTree {
+    var d = flare.dock_new()
+    let chat_leaf = d.add_root("Chat")
+    let _c = d.split_before(chat_leaf, "Conversations", true, 0.16)
+    let e1 = d.split(chat_leaf, "Editor 1", true, 0.44)
+    let _i = d.split(e1, "Inspector", true, 0.76)
+    let _e2 = d.split(e1, "Editor 2", false, 0.55)
+    return d
+}
+
+
+// redock_* re-open a closed panel beside its usual neighbour (menu / palette / toolbar actions).
+fn redock_conv(mut d: flare.DockTree) {
+    if d.leaf_of("Conversations") < 0 {
+        let _ = d.split_before(d.leaf_of("Chat"), "Conversations", true, 0.16)
+    }
+}
+
+
+fn redock_insp(mut d: flare.DockTree) {
+    if d.leaf_of("Inspector") < 0 {
+        var beside = d.leaf_of("Editor 1")
+        if beside < 0 {
+            beside = d.leaf_of("Editor 2")
+        }
+        if beside < 0 {
+            beside = d.leaf_of("Chat")
+        }
+        let _ = d.split(beside, "Inspector", true, 0.76)
+    }
+}
+
+
+fn redock_editor(mut d: flare.DockTree, which: int) {
+    var id = "Editor 1"
+    var other = "Editor 2"
+    if which == 1 {
+        id = "Editor 2"
+        other = "Editor 1"
+    }
+    if d.leaf_of(id) >= 0 {
+        return
+    }
+    let ol = d.leaf_of(other)
+    if ol >= 0 {
+        if which == 0 {
+            let _ = d.split_before(ol, id, false, 0.55)
+        } else {
+            let _ = d.split(ol, id, false, 0.55)
+        }
+    } else {
+        let _ = d.split(d.leaf_of("Chat"), id, true, 0.44)
+    }
+}
+
+
+// panel_cw returns docked panel `id`'s inner content width, clamped to [floor, cap], so a
+// panel's content wraps to its CURRENT width as the user resizes it.
+fn panel_cw(mut f: flare.Flare, id: string, floor: int, cap: int) -> int {
+    var w = floor
+    match f.ds.get(id) {
+        case Some(r) { w = r.w - f.ui.style.pad * 2 }
+        case None {}
+    }
+    if w > cap { w = cap }
+    if w < floor { w = floor }
+    return w
+}
+
+
+// store_path is where the workspace persists: $INGLENOOK_STORE if set, else a dotfile in $HOME.
+fn store_path() -> string {
+    let custom = env("INGLENOOK_STORE")
+    if custom.len() > 0 {
+        return custom
+    }
+    return env("HOME") + "/.inglenook-workspace.json"
+}
+
+
+// save_store writes the whole workspace as versioned JSON: the chat fragment (conversations +
+// chat settings), the dock layout, the editors' open tabs, the tree's expansions, and the
+// app-level looks (theme / zoom / sidebar tab).
+fn save_store(ch: chat.Chat, dock: flare.DockTree, panes: editor.Panes, expanded: [string], dark: bool, zoom: int, side: int) {
+    var ej: [json.Json] = []
+    var i = 0
+    loop {
+        if i == expanded.len() {
+            break
+        }
+        ej.append(json.str(expanded[i]))
+        i = i + 1
+    }
+    let root = json.obj([
+        json.member("v", json.num(1)),
+        json.member("dark", json.boolean(dark)),
+        json.member("zoom", json.num(zoom)),
+        json.member("side", json.num(side)),
+        json.member("dock", dock.to_json()),
+        json.member("chat", ch.to_json()),
+        json.member("editors", panes.to_json()),
+        json.member("tree", json.arr(ej))
+    ])
+    write_file(store_path(), json.stringify(root))
+}
+
+
+// project_label names the workspace in the Files header: the launch directory's basename.
+fn project_label() -> string {
+    let pwd = env("PWD")
+    if pwd.len() == 0 {
+        return "Project"
+    }
+    let parts = pwd.split("/")
+    if parts.len() > 0 && parts[parts.len() - 1].len() > 0 {
+        return parts[parts.len() - 1]
+    }
+    return "Project"
+}
+
+
+fn main() -> int {
+    draw.window(1460, 880, "Inglenook")
+    var f = flare.new()
+    f.set_realtime(true)
+
+    // Opt-in UI tape (trust the tape): EMBER_TAPE=/path records one JSON line per frame.
+    let tape_path = env("EMBER_TAPE")
+    if tape_path.len() > 0 {
+        draw.tape_on(tape_path)
+    }
+
+    // Workspace state — defaults, then the saved store overrides.
+    var ch = chat.new_chat()
+    var panes = editor.new_panes()
+    var tree = files.new_tree()
+    var dock = build_workspace()
+    var dark = true
+    var zoom = 80
+    var side = 0                              // sidebar tab: 0 = Chats, 1 = Files
+    let saved = read_file(store_path())
+    if saved.len() > 0 {
+        match json.parse(saved) {
+            case Ok(root) {
+                ch = chat.load(json.get(root, "chat"))
+                panes = editor.load(json.get(root, "editors"))
+                let tj = json.get(root, "tree")
+                if !json.is_null(tj) {
+                    var ti = 0
+                    loop {
+                        if ti == json.length(tj) {
+                            break
+                        }
+                        tree.expanded.append(json.as_str(json.at(tj, ti)))
+                        ti = ti + 1
+                    }
+                }
+                if !json.is_null(json.get(root, "dark")) {
+                    dark = json.as_bool(json.get(root, "dark"))
+                }
+                if !json.is_null(json.get(root, "zoom")) {
+                    zoom = json.as_int(json.get(root, "zoom"))
+                }
+                if !json.is_null(json.get(root, "side")) {
+                    side = json.as_int(json.get(root, "side"))
+                }
+                let dockj = json.get(root, "dock")
+                if !json.is_null(dockj) {
+                    let saved_dock = flare.dock_from_json(dockj)
+                    if saved_dock.leaf_of("Chat") >= 0 {   // only if the pinned anchor survived
+                        dock = saved_dock
+                    }
+                }
+            }
+            case Err(e) {}
+        }
+    }
+    if zoom < 60 || zoom > 220 {
+        zoom = 80
+    }
+    if side != 0 && side != 1 {
+        side = 0
+    }
+    if dark {
+        f.use_dark()
+    } else {
+        f.use_light()
+    }
+    f.set_zoom(zoom)
+
+    let project = project_label()
+    var settings_open = false
+    var palette_open = false
+    var tick = 0
+
+    // Async transport: worker fibers pump the HTTPS streams; the render loop drains resp_ch with
+    // non-blocking try_recv so drawing never stalls — the flare_chat shape, verbatim.
+    let req_ch: Channel<string> = channel(2)
+    let oll_req_ch: Channel<string> = channel(2)
+    let resp_ch: Channel<string> = channel(64)
+    let stop_ch: Channel<bool> = channel(2)
+    let disco_base_ch: Channel<string> = channel(2)
+    let disco_resp_ch: Channel<string> = channel(2)
+    let api_key = env("ANTHROPIC_API_KEY")
+    let ollama_base = oll.default_base()
+    nursery {
+    spawn api.stream_worker(api_key, req_ch, resp_ch, stop_ch)
+    spawn oll.stream_worker(ollama_base, oll_req_ch, resp_ch, stop_ch)
+    spawn oll.disco_worker(disco_base_ch, disco_resp_ch)
+    if ch.provider == 1 {
+        send(disco_base_ch, ollama_base)
+        ch.discovering = true
+    }
+    var prev_down = false
+    var ws_snap = ""                          // last-persisted workspace snapshot (dock+tabs+tree)
+    var coast = 12
+    loop {
+        if draw.closing() {
+            break
+        }
+        tick = tick + 1
+        ch.begin_frame()
+        ch.drain(resp_ch, req_ch, oll_req_ch)
+        ch.drain_disco(disco_resp_ch)
+        var quit = false
+        var want_disco = false
+
+        // Keyboard shortcuts.
+        let cmd = key_down(KEY_SUPER_L) || key_down(KEY_SUPER_R) || key_down(KEY_CTRL_L)
+        if cmd && key_pressed(KEY_EQUAL) {
+            f.zoom_by(10)
+            ch.dirty = true
+        }
+        if cmd && key_pressed(KEY_MINUS) {
+            f.zoom_by(0 - 10)
+            ch.dirty = true
+        }
+        if cmd && key_pressed(KEY_N) && !ch.pending {
+            ch.new_chat = true
+        }
+        if cmd && key_pressed(KEY_COMMA) {
+            settings_open = true
+        }
+        if cmd && key_pressed(KEY_K) {
+            palette_open = true
+        }
+        if cmd && key_pressed(KEY_Q) {
+            quit = true
+        }
+        if key_pressed(KEY_ESCAPE) && ch.pending {
+            send(stop_ch, true)
+        }
+
+        draw.begin(f.bg())
+        f.begin()
+
+        // File drag-drop → staged attachment chips (read every frame or raylib discards them).
+        let dropped = dropped_files()
+        if dropped.len() > 0 {
+            let dpaths = dropped.split("\n")
+            var dpi = 0
+            loop {
+                if dpi == dpaths.len() {
+                    break
+                }
+                if dpaths[dpi].len() > 0 {
+                    ch.attachments.append(dpaths[dpi])
+                }
+                dpi = dpi + 1
+            }
+        }
+
+        // ---- menu bar — every item drives the SAME state as the shortcuts/palette. ----
+        let bar_h = f.menubar_height()
+        f.menubar_begin()
+        if f.menu("File") {
+            if f.menu_item_accel("New chat", "⌘N") && !ch.pending {
+                ch.new_chat = true
+            }
+            f.menu_sep()
+            if f.submenu("Export") {
+                if f.menu_item("Copy as Markdown") {
+                    clipboard_set(chat.transcript_export(ch.turns, true))
+                    f.toast("Conversation copied as Markdown")
+                }
+                if f.menu_item("Copy as Plain text") {
+                    clipboard_set(chat.transcript_export(ch.turns, false))
+                    f.toast("Conversation copied as text")
+                }
+                f.submenu_end()
+            }
+            f.menu_sep()
+            if f.menu_item_accel("Settings…", "⌘,") {
+                settings_open = true
+            }
+            f.menu_sep()
+            if f.menu_item_accel("Quit", "⌘Q") {
+                quit = true
+            }
+            f.menu_end()
+        }
+        if f.menu("View") {
+            if f.menu_item_accel("Zoom In", "⌘+") {
+                f.zoom_by(10)
+                ch.dirty = true
+            }
+            if f.menu_item_accel("Zoom Out", "⌘−") {
+                f.zoom_by(0 - 10)
+                ch.dirty = true
+            }
+            if f.menu_item("Toggle Theme") {
+                dark = !dark
+                if dark {
+                    f.use_dark()
+                } else {
+                    f.use_light()
+                }
+                ch.dirty = true
+            }
+            f.menu_sep()
+            if dock.leaf_of("Conversations") < 0 {
+                if f.menu_item("Show Conversations") {
+                    redock_conv(dock)
+                }
+            }
+            if dock.leaf_of("Editor 1") < 0 {
+                if f.menu_item("Show Editor 1") {
+                    redock_editor(dock, 0)
+                }
+            }
+            if dock.leaf_of("Editor 2") < 0 {
+                if f.menu_item("Show Editor 2") {
+                    redock_editor(dock, 1)
+                }
+            }
+            if dock.leaf_of("Inspector") < 0 {
+                if f.menu_item("Show Inspector") {
+                    redock_insp(dock)
+                }
+            }
+            if f.menu_item("Reset Layout") {
+                dock = build_workspace()
+            }
+            f.menu_end()
+        }
+        if f.menu("Help") {
+            if f.menu_item("About Inglenook") {
+                f.toast("Inglenook — an IDE for coding with LLMs, written in Ingle + Flare")
+            }
+            f.menu_end()
+        }
+        f.menubar_end()
+
+        // ---- the dockable workspace ----
+        f.dock_pin("Chat")
+        let dm = 12
+        let dhit = f.dock_begin(dock, dm, dm + bar_h, screen_width() - 2 * dm, screen_height() - 2 * dm - bar_h)
+        if dhit >= 0 {
+            let pid = dock.close_tab(dhit)
+            f.forget(pid)
+        }
+        let conv_closed = dock.leaf_of("Conversations") < 0
+        let insp_closed = dock.leaf_of("Inspector") < 0
+
+        // --- Conversations: the sidebar — Chats and Files as in-panel tabs ---
+        if f.dock_panel("Conversations") {
+            f.row(flare.START, flare.CENTER)
+            f.heading("Inglenook")
+            f.end()
+            let nside = f.segmented("sidetabs", ["Chats", "Files"], side)
+            if nside >= 0 && nside <= 1 {
+                side = nside
+            }
+            if side == 0 {
+                ch.build_chats(f)
+            } else {
+                f.scroll_begin("filetree")
+                tree.build(f, project)
+                f.scroll_end("filetree")
+            }
+            f.dock_panel_end()
+        }
+
+        // --- Chat: the conversation panel (tabs, toolbar, transcript, composer) ---
+        if f.dock_panel("Chat") {
+            let cw = panel_cw(f, "Chat", 280, 820)
+            ch.build_panel(f, cw, tick, conv_closed, insp_closed)
+            f.dock_panel_end()
+        }
+
+        // --- Editor 1 / Editor 2: the stacked code windows ---
+        if f.dock_panel("Editor 1") {
+            let cw1 = panel_cw(f, "Editor 1", 240, 3000)
+            panes.build(f, 0, cw1)
+            f.dock_panel_end()
+        }
+        if f.dock_panel("Editor 2") {
+            let cw2 = panel_cw(f, "Editor 2", 240, 3000)
+            panes.build(f, 1, cw2)
+            f.dock_panel_end()
+        }
+
+        // --- Inspector: the workspace's context at a glance ---
+        if f.dock_panel("Inspector") {
+            let iw = panel_cw(f, "Inspector", 120, 600)
+            f.heading("Context")
+            f.divider()
+            f.text_muted("Provider")
+            f.label(ch.provider_label())
+            f.text_muted("Model")
+            f.label(ch.model_label())
+            f.text_muted("Max tokens")
+            let mt = chat.tokens_for(ch.tok_idx)
+            f.label("{mt}")
+            f.text_muted("Messages")
+            var nmsg = 0
+            var ntool = 0
+            var ii = 0
+            loop {
+                if ii == ch.turns.len() {
+                    break
+                }
+                if ch.turns[ii].kind == 1 {
+                    ntool = ntool + 1
+                } else if ch.turns[ii].kind == 0 {
+                    nmsg = nmsg + 1
+                }
+                ii = ii + 1
+            }
+            f.label("{nmsg} message(s) · {ntool} tool call(s)")
+            f.text_muted("Tools")
+            if ch.provider == 1 {
+                if chat.list_has(ch.ollama_tool_models, ch.ollama_model) {
+                    f.label("list_dir · read_file · write_file")
+                } else {
+                    f.label("(none — local model)")
+                }
+            } else {
+                f.label("list_dir · read_file · write_file")
+            }
+            f.text_muted("Editor 1")
+            var ap = panes.active_path(0)
+            if ap.len() == 0 {
+                ap = "(empty)"
+            }
+            f.paragraph(ap, iw)
+            f.text_muted("Editor 2")
+            var bp = panes.active_path(1)
+            if bp.len() == 0 {
+                bp = "(empty)"
+            }
+            f.paragraph(bp, iw)
+            f.text_muted("System prompt")
+            if ch.sys_prompt.len() > 0 {
+                f.paragraph(ch.sys_prompt, iw)
+            } else {
+                f.label("(default — override in Settings)")
+            }
+            f.spacer()
+            f.divider()
+            f.row(flare.START, flare.CENTER)
+            if f.ghost_button("Settings") {
+                settings_open = true
+            }
+            if f.ghost_button("Reset layout") {
+                dock = build_workspace()
+            }
+            f.end()
+            f.dock_panel_end()
+        }
+
+        // ---- floating layers: context menus, the settings modal, the ⌘K palette ----
+        ch.build_conv_menu(f)
+        tree.build_menu(f)
+
+        if settings_open {
+            if !f.modal_begin("settings", 460, 0) {
+                settings_open = false
+            }
+            f.heading("Settings")
+            f.divider()
+            f.text_muted("Appearance")
+            let new_dark = f.checkbox("dark", "Dark mode", dark)
+            if new_dark != dark {
+                dark = new_dark
+                if dark {
+                    f.use_dark()
+                } else {
+                    f.use_light()
+                }
+                ch.dirty = true
+            }
+            if ch.build_settings(f, tick) {
+                want_disco = true
+            }
+            f.text_muted("Text size — {f.zoom}%")
+            let nz = f.slider("zoom", f.zoom, 60, 220)
+            if nz != f.zoom {
+                f.set_zoom(nz)
+                ch.dirty = true
+            }
+            f.divider()
+            f.row(flare.END, flare.CENTER)
+            if f.primary("Done") {
+                settings_open = false
+            }
+            f.end()
+            f.modal_end()
+        }
+
+        if palette_open {
+            let pick = f.command_palette("cmdk", ["New chat", "Settings…", "Toggle theme", "Zoom in", "Zoom out", "Reset zoom", "Show Conversations", "Show Editor 1", "Show Editor 2", "Show Inspector", "Reset layout", "Refresh files", "Copy conversation as Markdown", "Copy conversation as plain text", "Quit"])
+            if pick != 0 - 1 {
+                palette_open = false
+                if pick == 0 {
+                    if !ch.pending {
+                        ch.new_chat = true
+                    }
+                } else if pick == 1 {
+                    settings_open = true
+                } else if pick == 2 {
+                    dark = !dark
+                    if dark {
+                        f.use_dark()
+                    } else {
+                        f.use_light()
+                    }
+                    ch.dirty = true
+                } else if pick == 3 {
+                    f.zoom_by(10)
+                    ch.dirty = true
+                } else if pick == 4 {
+                    f.zoom_by(0 - 10)
+                    ch.dirty = true
+                } else if pick == 5 {
+                    f.set_zoom(80)
+                    ch.dirty = true
+                } else if pick == 6 {
+                    redock_conv(dock)
+                } else if pick == 7 {
+                    redock_editor(dock, 0)
+                } else if pick == 8 {
+                    redock_editor(dock, 1)
+                } else if pick == 9 {
+                    redock_insp(dock)
+                } else if pick == 10 {
+                    dock = build_workspace()
+                } else if pick == 11 {
+                    tree.refresh()
+                    f.toast("File tree refreshed")
+                } else if pick == 12 {
+                    clipboard_set(chat.transcript_export(ch.turns, true))
+                    f.toast("Conversation copied as Markdown")
+                } else if pick == 13 {
+                    clipboard_set(chat.transcript_export(ch.turns, false))
+                    f.toast("Conversation copied as text")
+                } else if pick == 14 {
+                    quit = true
+                }
+            }
+        }
+
+        f.finish()
+        f.toast_layer()
+        ch.take_undo(f)
+
+        // Idle frame-gating: nothing moving → block on OS events instead of re-rendering.
+        if had_input() || f.is_animating() || ch.pending || ch.discovering {
+            coast = 12
+        } else if coast > 0 {
+            coast = coast - 1
+        }
+        set_event_waiting(coast == 0)
+        draw.finish()
+
+        // ---- post-frame application (the checkout pattern: act only after layout) ----
+        if ch.want_stop {
+            send(stop_ch, true)
+        }
+        ch.apply(f, req_ch, oll_req_ch)
+        if ch.want_settings {
+            settings_open = true
+        }
+        if ch.want_theme {
+            dark = !dark
+            if dark {
+                f.use_dark()
+            } else {
+                f.use_light()
+            }
+            ch.dirty = true
+        }
+        if ch.want_quit {
+            quit = true
+        }
+        if ch.want_redock_conv {
+            redock_conv(dock)
+        }
+        if ch.want_redock_insp {
+            redock_insp(dock)
+        }
+        if want_disco {
+            send(disco_base_ch, ollama_base)
+            ch.discovering = true
+        }
+        if tree.open_path.len() > 0 {          // a file-tree click → open in the chosen pane
+            panes.open(tree.open_pane, tree.open_path)
+            tree.open_path = ""
+            ch.dirty = true
+        }
+        if ch.wrote_path.len() > 0 {           // the agent wrote a file → refresh what shows it
+            panes.reload_if_open(ch.wrote_path)
+            tree.refresh()
+        }
+
+        // A workspace change (dock drag / tab open-close / tree expand) is detected on mouse
+        // release by comparing a serialized snapshot — the rearranged workspace persists too.
+        let now_down = f.ui.down
+        if prev_down && !now_down {
+            var exp = ""
+            var xi = 0
+            loop {
+                if xi == tree.expanded.len() {
+                    break
+                }
+                exp = exp + tree.expanded[xi] + "\n"
+                xi = xi + 1
+            }
+            let cur_ws = json.stringify(dock.to_json()) + json.stringify(panes.to_json()) + exp + "{side}"
+            if ws_snap.len() == 0 {
+                ws_snap = cur_ws                       // first release: baseline, not a change
+            } else if cur_ws != ws_snap {
+                ch.dirty = true
+                ws_snap = cur_ws
+            }
+        }
+        prev_down = now_down
+
+        if ch.dirty {
+            save_store(ch, dock, panes, tree.expanded, dark, f.zoom, side)
+        }
+        if quit {
+            break
+        }
+    }
+    close(req_ch)
+    close(oll_req_ch)
+    close(disco_base_ch)
+    // M:N safety: tear graphics down on THIS thread (it owns the GL context) BEFORE the nursery
+    // join below — see flare_chat for the full story.
+    if tape_path.len() > 0 {
+        draw.tape_off()
+    }
+    draw.close()
+    }
+    return 0
+}

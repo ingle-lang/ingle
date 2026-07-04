@@ -3234,6 +3234,17 @@ struct Flare {
     }
 
 
+    // code shows ONE standalone monospace, syntax-highlighted, selectable code panel — the same
+    // machinery markdown's fenced blocks ride (std/highlight spans + drag-select / ⌘A / ⌘C),
+    // exposed for apps whose code IS the content (a file viewer, a diff pane) rather than a chat
+    // reply. `key` must be frame-stable per panel (it anchors the selection across frames); `lang`
+    // feeds the highlighter ("ember", "c", "python", … — unknown ids fall back to a C-family read).
+    fn code(mut self, key: string, lang: string, src: string, width: int) {
+        self._ensure_fonts()
+        self._code_block(lang, src, width, key)
+    }
+
+
     // _code_block reserves a full-width monospace panel sized to the source's line count, and makes its text
     // SELECTABLE: it runs the read-only selection input (drag-select, Ctrl/Cmd+A, Ctrl/Cmd+C) against LAST
     // frame's solved rect — the same input-now/paint-later split the text fields use, so click/keys are known

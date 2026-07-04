@@ -299,6 +299,9 @@ with an accent bar, **pipe tables** as an aligned grid (content-sized columns, f
 code blocks in a monospace panel syntax-highlighted by `std/highlight` — whose text is **selectable**: drag to
 select, Shift to extend, Ctrl/Cmd+A selects the block, Ctrl/Cmd+C copies, alongside the per-block Copy button
 (read-only, reusing the field caret/selection/clipboard machinery; selection is per-block for now)),
+`code(key, lang, src, width)` (ONE standalone monospace, syntax-highlighted, selectable code panel — the
+same machinery markdown's fenced blocks ride, exposed for apps whose code IS the content: Inglenook's file
+viewer panes are this widget; `key` must be frame-stable, `lang` feeds `std/highlight`),
 `text_field(key, value) -> string` + `submit() -> bool` (Enter committed, clears the field),
 `text_area(key, value) -> string` (a MULTI-LINE field that auto-grows to its content then scrolls — wrapped
 visual lines, a 2D caret with ↑/↓ navigation, full selection/clipboard; **Shift+Enter inserts a newline**,
