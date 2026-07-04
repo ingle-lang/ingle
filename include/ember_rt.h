@@ -168,6 +168,8 @@ typedef struct {
     pthread_mutex_t lock;
     int             nwaiting;
     int             deadlocked;
+    int             sealed;      // 1 once the nursery body is done + all tasks spawned (spawn-at-spawn-time):
+                                 // an all-parked group is only a true deadlock AFTER the parent body seals it.
     ObjChannel     *waits_on[EM_MAX_GROUP_FIBERS];
     int             is_send[EM_MAX_GROUP_FIBERS];
     int             active[EM_MAX_GROUP_FIBERS];
@@ -183,12 +185,28 @@ typedef struct {
     int        slot;
 } EmTask;
 
+// EmNurseryRun — a native SPAWN-AT-SPAWN-TIME nursery: em_nursery_spawn starts each task's OS thread
+// IMMEDIATELY (so it runs concurrently with the parent's body — a `spawn worker; loop { try_recv }`
+// transport works), and em_nursery_join seals + joins at the block close. Mirrors the VM's 1:1 model.
+// Lives on the enclosing block's stack for the nursery's whole lifetime.
+typedef struct {
+    EmNursery grp;
+    pthread_t threads[EM_MAX_GROUP_FIBERS];
+    EmTask    slots[EM_MAX_GROUP_FIBERS];   // owned tasks, alive for the threads' lifetime
+    int       joinable[EM_MAX_GROUP_FIBERS];
+    int       n;
+    void     *(*worker)(void *);
+} EmNurseryRun;
+
 // The running thread's nursery context — read by a channel send/recv to register a block with
 // the deadlock detector. NULL on a thread not running under a nursery.
 extern _Thread_local EmNursery *em_cur_nursery;
 extern _Thread_local int        em_cur_slot;
 
 void  em_run_nursery(EmTask *tasks, int n, void *(*worker)(void *));  // launch one thread/task, join all
+void  em_nursery_open(EmNurseryRun *run, void *(*worker)(void *));    // spawn-at-spawn-time: init the group
+void  em_nursery_spawn(EmNurseryRun *run, int fn_index, Value *args, int argc);  // start this task's thread NOW
+void  em_nursery_join(EmNurseryRun *run);                            // seal + join all at the block close
 void  em_merge(EmberRt *self);          // splice a finished worker's arena into the shared graveyard
 void  em_free_graveyard(void);          // main's exit sweep frees the merged-in (and deferred) objects
 #endif

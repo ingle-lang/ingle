@@ -2657,8 +2657,11 @@ static void emit_nursery(CgcGen *g, const Stmt *s) {
     cgc_indent(g);
     fputs("{\n", g->out);
     g->indent++;
+    // Spawn-at-spawn-time: each `spawn` inside starts its task's OS thread NOW (em_nursery_spawn), so
+    // a task runs concurrently with the body — a `spawn worker(ch); loop { try_recv(ch) }` transport
+    // works. em_nursery_join seals + joins at the close. The run state lives on this block's stack.
     cgc_indent(g);
-    fprintf(g->out, "EmTask *_nt%d = malloc(256 * sizeof(EmTask)); int _nc%d = 0;\n", id, id);
+    fprintf(g->out, "EmNurseryRun _nr%d; em_nursery_open(&_nr%d, em_task_main);\n", id, id);
     if (g->nursery_depth < 16) {
         g->nursery_id[g->nursery_depth] = id;
     }
@@ -2671,11 +2674,7 @@ static void emit_nursery(CgcGen *g, const Stmt *s) {
     g->scope_len = mark;
     g->nursery_depth--;
     cgc_indent(g);
-    fprintf(g->out, "em_run_nursery(_nt%d, _nc%d, em_task_main);\n", id, id);
-    cgc_indent(g);
-    fprintf(g->out, "for (int _i = 0; _i < _nc%d; _i++) { free(_nt%d[_i].args); }\n", id, id);
-    cgc_indent(g);
-    fprintf(g->out, "free(_nt%d);\n", id);
+    fprintf(g->out, "em_nursery_join(&_nr%d);\n", id);
     g->indent--;
     cgc_indent(g);
     fputs("}\n", g->out);
@@ -2725,8 +2724,8 @@ static void emit_spawn(CgcGen *g, const Stmt *s) {
         fputs(";\n", g->out);
     }
     cgc_indent(g);
-    fprintf(g->out, "_nt%d[_nc%d].fn_index = %d; _nt%d[_nc%d].args = _a; _nt%d[_nc%d].argc = %zu; _nc%d++;\n",
-            id, id, call->as.call.resolved_fn, id, id, id, id, total, id);
+    // Start this task's OS thread NOW (concurrent with the body), not at the nursery join.
+    fprintf(g->out, "em_nursery_spawn(&_nr%d, %d, _a, %zu);\n", id, call->as.call.resolved_fn, total);
     g->indent--;
     cgc_indent(g);
     fputs("}\n", g->out);

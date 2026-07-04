@@ -1386,7 +1386,10 @@ static void em_nursery_park(ObjChannel *ch, int is_send) {
         n->active[slot] = 1;
         n->nwaiting++;
     }
-    if (n->nwaiting == n->total) {
+    // A group with all tasks parked is only a TRUE deadlock once the nursery is SEALED — while the
+    // parent body is still running (spawn-at-spawn-time) it may yet send/close and unblock a task.
+    // The seal-time re-check in em_nursery_join catches a group that parked before the seal.
+    if (n->sealed && n->nwaiting == n->total) {
         int any_ready = 0;
         for (int i = 0; i < n->total && !any_ready; i++) {
             if (!n->active[i]) {
@@ -1609,6 +1612,84 @@ void em_run_nursery(EmTask *tasks, int n, void *(*worker)(void *)) {
         }
     }
     pthread_mutex_destroy(&grp.lock);
+}
+
+
+// ---- Spawn-at-spawn-time nursery (EmNurseryRun) ------------------------------------------------
+// The producer/consumer-in-body pattern (`spawn worker(ch); loop { try_recv(ch) }`) needs each task
+// to run WHILE the body runs — em_run_nursery (start-all-at-join) polls an empty channel forever.
+// These three mirror the VM's OP_NURSERY_BEGIN / OP_SPAWN / OP_NURSERY_END (1:1 model).
+
+void em_nursery_open(EmNurseryRun *run, void *(*worker)(void *)) {
+    run->n              = 0;
+    run->worker         = worker;
+    run->grp.total      = 0;
+    run->grp.nwaiting   = 0;
+    run->grp.deadlocked = 0;
+    run->grp.sealed     = 0;
+    for (int i = 0; i < EM_MAX_GROUP_FIBERS; i++) {
+        run->grp.active[i] = 0;
+    }
+    pthread_mutex_init(&run->grp.lock, NULL);
+}
+
+
+// em_nursery_spawn records the task and starts its OS thread NOW (grp.total grows incrementally, like
+// the VM's OP_SPAWN), so it runs concurrently with the body. The task owns its args; the worker frees them.
+void em_nursery_spawn(EmNurseryRun *run, int fn_index, Value *args, int argc) {
+    if (run->n >= EM_MAX_GROUP_FIBERS) {
+        em_panic("too many spawned tasks in one nursery");
+    }
+    int slot = run->n;
+    run->slots[slot].fn_index = fn_index;
+    run->slots[slot].args     = args;
+    run->slots[slot].argc     = argc;
+    run->slots[slot].nursery  = &run->grp;
+    run->slots[slot].slot     = slot;
+    pthread_mutex_lock(&run->grp.lock);
+    run->grp.total = slot + 1;
+    pthread_mutex_unlock(&run->grp.lock);
+    run->joinable[slot] = (pthread_create(&run->threads[slot], NULL, run->worker, &run->slots[slot]) == 0);
+    if (!run->joinable[slot]) {
+        em_panic("could not create a thread for a spawned task");
+    }
+    run->n = slot + 1;
+}
+
+
+// em_nursery_join seals the group (all tasks now known) then joins them. Sealing lets the deadlock
+// detector finally rule — a body-parked group deferred its verdict, but a SEALED all-parked group with
+// no ready channel is a true deadlock (the seal-time companion to em_nursery_park's in-park check).
+void em_nursery_join(EmNurseryRun *run) {
+    pthread_mutex_lock(&run->grp.lock);
+    run->grp.sealed = 1;
+    if (run->grp.total > 0 && run->grp.nwaiting == run->grp.total) {
+        int any_ready = 0;
+        for (int i = 0; i < run->grp.total && !any_ready; i++) {
+            if (!run->grp.active[i]) {
+                continue;
+            }
+            ObjChannel *c = run->grp.waits_on[i];
+            any_ready = run->grp.is_send[i] ? (c->count < c->capacity)
+                                            : (c->count > 0 || c->closed);
+        }
+        if (!any_ready) {
+            __atomic_store_n(&run->grp.deadlocked, 1, __ATOMIC_SEQ_CST);
+            pthread_mutex_unlock(&run->grp.lock);
+            fprintf(stderr, "emberc: deadlock: every task in the nursery is blocked\n");
+            exit(70);
+        }
+    }
+    pthread_mutex_unlock(&run->grp.lock);
+    for (int i = 0; i < run->n; i++) {
+        if (run->joinable[i]) {
+            pthread_join(run->threads[i], NULL);
+        }
+    }
+    for (int i = 0; i < run->n; i++) {
+        free(run->slots[i].args);   // the nursery owns each task's args array; free after the task ends
+    }
+    pthread_mutex_destroy(&run->grp.lock);
 }
 
 #endif  // EMBER_PARALLEL
