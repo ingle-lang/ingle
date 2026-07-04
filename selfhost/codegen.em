@@ -8117,7 +8117,10 @@ struct Chunk {
                     } else if rk >= 0 && is_var == false && self.struct_all_scalar(rk) {
                         self.gen_expr(value.value, value.line)       // CALL -> RETURN_STRUCT span slots
                         self.declare_binding(name, self.struct_field_count(rk), rk, false, false, false, false)
-                    } else if rk >= 0 && is_var == false {
+                    } else if rk >= 0 && self.struct_all_scalar(rk) == false {
+                        // A boxed (refcounted-field) struct returned by a call is boxed regardless of
+                        // mutability, so a `var t = dock_new()` tracks its struct id too — else `t.field.append()`
+                        // finds no struct type and emits nothing (the DockTree-builder gap).
                         self.gen_expr(value.value, value.line)       // CALL -> one owned boxed-struct slot
                         self.declare_binding(name, 1, rk, false, true, true, false)
                     } else if rk == -3 {
