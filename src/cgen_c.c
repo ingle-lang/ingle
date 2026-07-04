@@ -495,6 +495,21 @@ static int is_addressable_vstruct(CgcGen *g, const Expr *e) {
 }
 
 
+// is_reemittable_place reports whether `e` can be emitted TWICE and read the same object with no side
+// effect — an identifier or a chain of field reads rooted at one (`self.ui`). A boxed-parent value-struct
+// writeback (OFI-155/158) re-emits the parent for both the unbox read and the em_set_field write, so it
+// must be re-emittable. A call/index intermediate is NOT (two emissions would touch different objects).
+static int is_reemittable_place(const Expr *e) {
+    if (e->kind == EXPR_IDENT) {
+        return 1;
+    }
+    if (e->kind == EXPR_GET) {
+        return is_reemittable_place(e->as.get.object);
+    }
+    return 0;
+}
+
+
 
 
 
@@ -2829,14 +2844,16 @@ static void emit_stmt(CgcGen *g, const Stmt *s) {
                         boundary = boundary->as.get.object;
                     }
                     const Expr *parent = boundary->as.get.object;
-                    if (parent->kind != EXPR_IDENT) {
-                        // The boxed parent is itself a field/index read (a fresh copy or a separate
-                        // writeback level) — emitting it twice would touch different objects. Fail
-                        // cleanly rather than silently mutate a copy; rebuild the struct immutably.
+                    if (!is_reemittable_place(parent)) {
+                        // The boxed parent is reached through a CALL or INDEX (a fresh copy each time) —
+                        // emitting it twice for the unbox-read + em_set_field-write would touch different
+                        // objects. Fail cleanly rather than silently mutate a copy. An ident-rooted field
+                        // chain (`self.ui`) IS re-emittable (a field read is idempotent), so `self.ui.style.x`
+                        // and deeper boxed `self`-paths now compile (OFI-158 closed).
                         cgc_error(g, s->line,
-                                  "native backend (OFI-155): nested value-struct field assignment "
-                                  "through a non-local boxed parent is not supported — rebuild the "
-                                  "struct immutably (Node{ …, field: Inner{ … } })");
+                                  "native backend (OFI-155): nested value-struct field assignment through a "
+                                  "boxed parent reached by a call or index is not supported — bind it to a "
+                                  "local first, or rebuild the struct immutably (Node{ …, field: Inner{ … } })");
                         break;
                     }
                     int bsid   = struct_sid_of(g, boundary);
@@ -2981,8 +2998,17 @@ static void emit_stmt(CgcGen *g, const Stmt *s) {
                 // return it — the VM's order (a moved-out value has drop==0, so a struct
                 // returned by move is not dropped here).
                 int r = g->next_var++;
+                // A value-struct return is a raw `em_s<sid>`, not a boxed Value — the hoist temp must
+                // match the function's C return type, else clang rejects `Value = (em_s){…}` (OFI-158
+                // follow-on: `return Style{…}` from a fn that also drops an owned local, as flare's
+                // _apply_zoom neighbours do).
+                int rsid = (s->as.ret.value != NULL) ? struct_sid_of(g, s->as.ret.value) : -1;
                 cgc_indent(g);
-                fprintf(g->out, "{ Value v%d = ", r);
+                if (rsid >= 0) {
+                    fprintf(g->out, "{ em_s%d v%d = ", rsid, r);
+                } else {
+                    fprintf(g->out, "{ Value v%d = ", r);
+                }
                 if (s->as.ret.value != NULL) {
                     // Own the return value: a borrowed heap field (`return c.host`) is retained
                     // so it survives the owning-local drops below.
