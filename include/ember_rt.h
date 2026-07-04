@@ -198,6 +198,7 @@ void  em_free_graveyard(void);          // main's exit sweep frees the merged-in
 Value em_channel_new(EmberRt *ctx, int cap);
 Value em_channel_send(EmberRt *ctx, Value ch, Value v);
 Value em_channel_recv(EmberRt *ctx, Value ch, int enum_id, int some_tag, int none_tag);
+Value em_channel_try_recv(EmberRt *ctx, Value ch, int enum_id, int some_tag, int none_tag);  // non-blocking poll
 Value em_channel_close(Value ch);
 
 // Bounded-generic (interface-witness) dispatch (the VM's OP_CALL_INDIRECT): given a method's

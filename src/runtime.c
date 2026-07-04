@@ -1533,6 +1533,27 @@ Value em_channel_recv(EmberRt *ctx, Value chv, int enum_id, int some_tag, int no
 }
 
 
+// em_channel_try_recv — the NON-BLOCKING poll: Some(v) if a value is queued right now, else None. Never
+// parks (unlike em_channel_recv), so an event loop can check a channel each tick (the render thread polls
+// its worker channel per frame). The native counterpart of the VM's OP_TRY_RECV.
+Value em_channel_try_recv(EmberRt *ctx, Value chv, int enum_id, int some_tag, int none_tag) {
+    ObjChannel *ch = AS_CHANNEL(chv);
+    pthread_mutex_lock(&ch->lock);
+    if (ch->count > 0) {
+        Value v = ch->buffer[ch->head];
+        ch->head = (ch->head + 1) % ch->capacity;
+        ch->count--;
+        if (ch->send_waiters > 0) {
+            pthread_cond_signal(&ch->not_full);
+        }
+        pthread_mutex_unlock(&ch->lock);
+        return em_enum(ctx, enum_id, some_tag, 1, v);
+    }
+    pthread_mutex_unlock(&ch->lock);
+    return em_enum(ctx, enum_id, none_tag, 0);
+}
+
+
 
 
 

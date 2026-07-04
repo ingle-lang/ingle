@@ -1436,6 +1436,21 @@ static void emit_call(CgcGen *g, const Expr *e) {
                     some->enum_id, some->variant_index, none->variant_index);
             return;
         }
+        if (e->as.call.arg_count == 1 && strcmp(nm, "try_recv") == 0) {
+            // The NON-BLOCKING poll → Some(v)/None (the async transport's render-thread tick).
+            const CgcVariant *some = resolve_variant(g, "Some");
+            const CgcVariant *none = resolve_variant(g, "None");
+            if (some == NULL || none == NULL) {
+                cgc_error(g, e->line, "native backend: try_recv with no Option/Some/None in scope");
+                fputs("INT_VAL(0)", g->out);
+                return;
+            }
+            fputs("em_channel_try_recv(&g_em, ", g->out);
+            emit_expr(g, e->as.call.args[0]);
+            fprintf(g->out, ", %d, %d, %d)",
+                    some->enum_id, some->variant_index, none->variant_index);
+            return;
+        }
         if (e->as.call.arg_count == 1 && strcmp(nm, "close") == 0) {
             fputs("em_channel_close(", g->out);
             emit_expr(g, e->as.call.args[0]);
