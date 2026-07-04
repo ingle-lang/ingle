@@ -717,6 +717,9 @@ fn elem_type_code(elem_ty: ps.Ty, struct_names: [string], enum_names: [string]) 
     if sid >= 0 {
         return sid
     }
+    if ty_is_array(elem_ty) {
+        return 0 - 2   // a nested-array element (`[[string]]` -> `[string]`) is itself an array (`arr[i].len()`)
+    }
     if ty_is_string(elem_ty) {
         return 0 - 3
     }
