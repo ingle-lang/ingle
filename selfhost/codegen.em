@@ -6488,6 +6488,12 @@ struct Chunk {
                 // declared return width (bool return -> 0 for a num_kind operand).
                 match callee.value {
                     case EIdent(name) {
+                        if name == "to_float" {
+                            return 9                 // to_float(i) -> INT_TO_FLOAT, an f64 result
+                        }
+                        if name == "to_int" {
+                            return 0                 // to_int(f) -> FLOAT_TO_INT, an int result
+                        }
                         if wrapping_opcode(name) >= 0 && args.len() > 0 {
                             return self.scalar_kind_of(args[0])
                         }
