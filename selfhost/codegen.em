@@ -5145,6 +5145,55 @@ struct Chunk {
     }
 
 
+    // place_reads_as_copy reports whether reading `e` materialises an independent COPY of its array (so a
+    // `place.append(x)` on it must write the grown array back, OFI-072): an INDEX read of an ARRAY or
+    // INLINE-STRUCT element clones it (`self.dk_tabs[leaf]` on a `[[string]]`). A scalar/string element, and a
+    // plain local/field array, share the handle (append mutates in place — no write-back).
+    fn place_reads_as_copy(self, e: ps.Expr) -> bool {
+        match e {
+            case EIndex(object, index) {
+                let ec = self.index_elem_code(e)
+                return ec == 0 - 2 || (ec >= 0 && self.struct_array_inline(ec))
+            }
+            case _ {
+                return false
+            }
+        }
+    }
+
+
+    // gen_array_append_writeback lowers `place.append(value)` when `place` reads as a copy: read the array into
+    // a scratch slot, append into it, then store the whole array back through the place (SET_INDEX) — mirrors
+    // stage-0's gen_array_append_writeback. Leaves a unit result (the statement context pops one).
+    fn gen_array_append_writeback(mut self, place: ps.Expr, value: ps.Expr, line: int) {
+        self.cur_line = line
+        self.gen_expr(place, line)                       // [.. A] a copy of place's array
+        let scratch = self.locals.len()
+        self.declare_binding("", 1, -1, false, false, false, false)
+        self.emit(OP_GET_LOCAL)
+        self.emit_idx(scratch)                           // [.. A, A]
+        self.gen_append_value(value, line)               // [.. A, A, value]
+        self.emit(OP_ARRAY_APPEND)                       // [.. A, unit]
+        self.emit(OP_POP)                                // [.. A]
+        match place {
+            case EIndex(object, index) {
+                self.gen_expr(object.value, line)        // [.. A, arr]
+                self.gen_expr(index.value, line)         // [.. A, arr, i]
+                self.emit(OP_GET_LOCAL)
+                self.emit_idx(scratch)                   // [.. A, arr, i, A]
+                self.emit(OP_SET_INDEX)                  // [.. A]
+            }
+            case _ {
+            }
+        }
+        self.emit(OP_POP)                                // drop the scratch alias -> [..]
+        self.truncate_to(scratch)
+        let z = self.add_const_int(0)
+        self.emit(OP_CONST)                              // unit result
+        self.emit_idx(z)
+    }
+
+
     fn gen_method_call(mut self, object: ps.Expr, mname: string, args: [ps.Expr], line: int) {
         // A method call on an INTERFACE-value receiver (`s.area()` where s: Shape) dispatches DYNAMICALLY: push
         // the receiver + args (borrows), then CALL_DYN <method's vtable slot> <arg count>. The VM reads the
@@ -5338,6 +5387,12 @@ struct Chunk {
                     }
                 } else if tk == -2 {
                     self.cur_line = line
+                    if mname == "append" && self.place_reads_as_copy(object) {
+                        // `self.dk_tabs[leaf].append(x)` — the INDEX read copies the array, so append into the
+                        // copy and write it back (else the grown copy is discarded, OFI-072).
+                        self.gen_array_append_writeback(object, args[0], line)
+                        return
+                    }
                     self.gen_expr(object, line)
                     if mname == "len" {
                         self.emit(OP_ARRAY_LEN)
@@ -6608,8 +6663,39 @@ struct Chunk {
             self.emit(OP_GET_LOCAL)
             self.emit_idx(val_slot)
         } else {
+            // A MULTI-SLOT (all-scalar) struct value stored into a boxed field (`self.ui.style = theme_light()`)
+            // must be BOX_STRUCT'd into one Value — SET_FIELD stores a single slot, but a struct-returning call
+            // leaves its N field slots.
+            let mssid = self.store_value_multislot_sid(val_expr)
             self.gen_consume(val_expr, line)
+            if mssid >= 0 {
+                self.emit(OP_BOX_STRUCT)
+                self.emit_idx(mssid)
+            }
         }
+    }
+
+
+    // store_value_multislot_sid returns the all-scalar struct sid of a MULTI-SLOT struct value (a struct-
+    // returning call whose all-scalar return spreads N leaf slots, or a multi-slot struct local), else -1.
+    fn store_value_multislot_sid(self, e: ps.Expr) -> int {
+        if is_call_expr(e) {
+            let rk = self.expr_ret_kind(e)
+            if rk >= 0 && rk < self.st_names.len() && self.struct_all_scalar(rk) {
+                return rk
+            }
+        }
+        match e {
+            case EIdent(name) {
+                let slot = self.resolve_slot(name)
+                if slot >= 0 && self.slot_struct[slot] >= 0 && self.slot_boxed[slot] == false {
+                    return self.slot_struct[slot]
+                }
+            }
+            case _ {
+            }
+        }
+        return 0 - 1
     }
 
 
