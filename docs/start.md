@@ -32,7 +32,7 @@ The source, build instructions, and examples are on GitHub:
 
 ```sh
 git clone https://github.com/ingle-lang/ingle
-cd ingle-lang
+cd ingle
 make            # builds the compiler
 make test       # runs the test suite
 make install    # installs to ~/.ingle
