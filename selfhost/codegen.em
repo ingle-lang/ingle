@@ -3263,6 +3263,76 @@ struct Chunk {
     }
 
 
+    // enum_owns_variant reports whether enum `eid` has a variant named `vname` — the per-enum scope for
+    // module-directed variant resolution (a `Str` variant can exist in several co-imported enums, OFI-179).
+    fn enum_owns_variant(self, eid: int, vname: string) -> bool {
+        var i = 0
+        loop {
+            if i >= self.ev_name.len() {
+                break
+            }
+            if self.ev_owner[i] == eid && self.ev_name[i] == vname {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+
+    // match_owner_enum returns the enum that owns the MOST of a match's non-wildcard case variants. A match's
+    // arms are all variants of ONE enum, so this pins the scrutinee's enum even when a variant NAME collides
+    // across co-imported modules (`Json.Str` vs `highlight.Str`) — stage-0 resolves by the checked scrutinee
+    // type; we recover it from the arm set. -1 if no arm names a known variant (all wildcard / unknown).
+    fn match_owner_enum(self, cases: [ps.Case]) -> int {
+        var best_enum = 0 - 1
+        var best_count = 0
+        var eid = 0
+        loop {
+            if eid >= self.et_names.len() {
+                break
+            }
+            var cnt = 0
+            var ci = 0
+            loop {
+                if ci >= cases.len() {
+                    break
+                }
+                if cases[ci].pattern.wildcard == false && self.enum_owns_variant(eid, cases[ci].pattern.variant) {
+                    cnt = cnt + 1
+                }
+                ci = ci + 1
+            }
+            if cnt > best_count {
+                best_count = cnt
+                best_enum = eid
+            }
+            eid = eid + 1
+        }
+        return best_enum
+    }
+
+
+    // resolve_case_vi returns the flat variant index for `vname` scoped to `owner_enum` (the match's enum), so a
+    // colliding variant name resolves to the SCRUTINEE's enum, not the first global match. Falls back to the
+    // bare-name lookup when the enum is unknown or does not own the variant (an imported prelude arm, etc.).
+    fn resolve_case_vi(self, vname: string, owner_enum: int) -> int {
+        if owner_enum >= 0 {
+            var i = 0
+            loop {
+                if i >= self.ev_name.len() {
+                    break
+                }
+                if self.ev_owner[i] == owner_enum && self.ev_name[i] == vname {
+                    return i
+                }
+                i = i + 1
+            }
+        }
+        return cg_index_of(self.ev_name, vname)
+    }
+
+
     // field_elem_code returns the element type code of array field `fname` of struct `id` (struct sid / -3
     // string / -4 enum / -1 scalar), or -1 if not found. Lets `obj.arr[i]` resolve its element kind.
     fn field_elem_code(self, id: int, fname: string) -> int {
@@ -8243,6 +8313,7 @@ struct Chunk {
                 let subj_drop = self.is_owning_temp_obj(value.value)   // `arr[i]` of a boxed array is a borrow (POP), not owning
                 let subject = self.locals.len()
                 self.declare_binding("", 1, -1, false, subj_drop, false, false)
+                let match_enum = self.match_owner_enum(cases)   // the scrutinee's enum, for scoped variant tags
                 var end_jumps: [int] = []
                 var ci = 0
                 loop {
@@ -8255,10 +8326,10 @@ struct Chunk {
                             end_jumps.append(self.emit_jump(OP_JUMP))
                         }
                     } else {
-                        let vi = cg_index_of(self.ev_name, cases[ci].pattern.variant)
-                        // An imported enum's variant (e.g. matching `ps.Decl`) is not in this module's table
-                        // yet — guard against OOB. Cross-module enum resolution (so the tag is correct) is the
-                        // next milestone; for now a placeholder tag keeps codegen crash-free.
+                        // Scope the variant to the match's OWN enum so a name that collides across co-imported
+                        // modules (`Json.Str` vs `highlight.Str`) resolves to the scrutinee's enum, not the
+                        // first global match — the tag stage-0 derives from the checked scrutinee type (OFI-179).
+                        let vi = self.resolve_case_vi(cases[ci].pattern.variant, match_enum)
                         var vtag = 0
                         if vi >= 0 {
                             vtag = self.ev_tag[vi]
