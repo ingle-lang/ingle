@@ -1926,6 +1926,7 @@ static void gen_stmt(Codegen *cg, const Stmt *s) {
                 emit(cg, OP_SET_INDEX);
                 break;
             }
+            int lslot = resolve_local_logical(cg, target->as.ident);
             int slot = resolve_local(cg, target->as.ident);
             gen_expr(cg, s->as.assign.value);
             if (slot < 0) {
@@ -1935,8 +1936,13 @@ static void gen_stmt(Codegen *cg, const Stmt *s) {
                 // reassigning a `var` that owns a struct/refcounted value does not
                 // leak the old one. The new value is already on the stack (computed
                 // first, so `s = s + x` still reads the old `s`); a moved-out slot
-                // was nilled, making this a no-op there.
-                if (cg->local_drop[slot]) {
+                // was nilled, making this a no-op there. The drop flag lives in a
+                // LOGICAL-indexed array, so test it by logical index (`lslot`) and
+                // drop the PHYSICAL slot — mirroring the scope-exit drop loop.
+                // Indexing local_drop by the physical `slot` silently skipped this
+                // drop whenever a multi-slot local pushed the slot past the logical
+                // count, leaking the old value (OFI-178).
+                if (lslot >= 0 && cg->local_drop[lslot]) {
                     emit(cg, OP_DROP);
                     emit_idx(cg, slot);
                 }

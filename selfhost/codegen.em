@@ -4606,10 +4606,12 @@ struct Chunk {
             }
             i = i + 1
         }
-        let vsome = cg_index_of(self.ev_name, "Some")
+        // A witness is a boxed fn-ref RECORD (like an interface vtable, gen_iface_coerce), NOT a real Option
+        // value — it uses the generic record enum id 0 / tag 0, never `Some`'s owning enum (which is Option's
+        // id, = 4 once user enums precede the prelude in a multi-module program — the flare Map<string,_> bug).
         self.emit(OP_NEW_ENUM)
-        self.emit_idx(self.ev_owner[vsome])
-        self.emit_idx(self.ev_tag[vsome])
+        self.emit_idx(0)
+        self.emit_idx(0)
         self.emit_idx(count)
     }
 
@@ -5448,6 +5450,19 @@ struct Chunk {
                 return false
             }
         }
+    }
+
+
+    // let_multislot_struct_sid returns the all-scalar struct sid of a BOXED struct FIELD read (`self.ui.style`),
+    // else -1 — the value of a `let` binding that should be MULTI-SLOT (UNBOX_STRUCT'd into its leaf slots).
+    fn let_multislot_struct_sid(self, e: ps.Expr) -> int {
+        if self.arg_reads_boxed_struct(e) {
+            let sid = self.expr_type_kind(e)
+            if sid >= 0 && sid < self.st_names.len() && self.struct_all_scalar(sid) {
+                return sid
+            }
+        }
+        return 0 - 1
     }
 
 
@@ -8053,6 +8068,15 @@ struct Chunk {
                         self.declare_binding(name, 1, -1, false, true, false, true)
                         self.slot_elem[self.slot_elem.len() - 1] = aelem
                         self.slot_elem_targs[self.slot_elem_targs.len() - 1] = atargs
+                    } else if is_var == false && self.let_multislot_struct_sid(value.value) >= 0 {
+                        // `let st = self.ui.style` — a boxed all-scalar struct FIELD read bound to an IMMUTABLE
+                        // let is MULTI-SLOT: read it boxed (GET_FIELD) then UNBOX_STRUCT into its leaf slots, so
+                        // `st.f` resolves to GET_LOCAL(base + field offset), not GET_FIELD off a box.
+                        let ssid = self.let_multislot_struct_sid(value.value)
+                        self.gen_expr(value.value, value.line)
+                        self.emit(OP_UNBOX_STRUCT)
+                        self.emit_idx(ssid)
+                        self.declare_binding(name, self.struct_field_count(ssid), ssid, false, false, false, false)
                     } else if self.is_str_local_read(value.value) {
                         // a refcounted ENUM read from a place (`let op = self.advance().kind`, an enum field
                         // or an owned-enum local): aliasing an existing owner INCREFs (gen_consume), and the
@@ -9464,7 +9488,7 @@ fn emit_lifted_disasm(ch: Chunk, fn_names: [string], fn_rets: FnRets, structs: S
             break
         }
         println("== fn <lambda> (arity {ch.lifted[li].caps.len() + ch.lifted[li].decl.params.len()}) ==")
-        let lch = compile_fn(ch.lifted[li].decl, fn_names, no_mods, 0 - 1, fn_rets, structs, enums, globals, instances, 0 - 1, 0, ch.lifted[li].caps, generic_fns, generic_pquals, fn_inst_keys, inst_base, wit, false)
+        let lch = compile_fn(ch.lifted[li].decl, fn_names, no_mods, 0 - 1, fn_rets, structs, enums, globals, instances, 0 - 1, 0, ch.lifted[li].caps, generic_fns, generic_pquals, fn_inst_keys, inst_base, wit, false, "")
         disassemble(lch)
         li = li + 1
     }
@@ -9499,7 +9523,7 @@ fn disassemble_program(decls: [ps.Decl], mod_of: [int], fn_names: [string], fn_r
                         break
                     }
                     if methods[mi].has_body {
-                        let ch = compile_fn(methods[mi], fn_names, fn_mods, 0 - 1, fn_rets, structs, enums, globals, instances, sid0, fn_names.len(), no_caps, gf.names, gf.pquals, no_keys, fn_names.len(), wit, false)
+                        let ch = compile_fn(methods[mi], fn_names, fn_mods, 0 - 1, fn_rets, structs, enums, globals, instances, sid0, fn_names.len(), no_caps, gf.names, gf.pquals, no_keys, fn_names.len(), wit, false, "")
                         total_lambdas = total_lambdas + ch.lifted.len()
                     }
                     mi = mi + 1
@@ -9508,7 +9532,7 @@ fn disassemble_program(decls: [ps.Decl], mod_of: [int], fn_names: [string], fn_r
             }
             case DFn(f) {
                 if f.has_body {
-                    let ch = compile_fn(f, fn_names, fn_mods, 0 - 1, fn_rets, structs, enums, globals, instances, 0 - 1, fn_names.len(), no_caps, gf.names, gf.pquals, no_keys, fn_names.len(), wit, false)
+                    let ch = compile_fn(f, fn_names, fn_mods, 0 - 1, fn_rets, structs, enums, globals, instances, 0 - 1, fn_names.len(), no_caps, gf.names, gf.pquals, no_keys, fn_names.len(), wit, false, "")
                     total_lambdas = total_lambdas + ch.lifted.len()
                 }
             }
@@ -9536,7 +9560,7 @@ fn disassemble_program(decls: [ps.Decl], mod_of: [int], fn_names: [string], fn_r
                     }
                     if methods[mi].has_body {
                         println("== fn {name}.{methods[mi].name} (arity {methods[mi].params.len()}) ==")
-                        let ch = compile_fn(methods[mi], fn_names, fn_mods, mod_at(mod_of, i), fn_rets, structs, enums, globals, instances, sid, lambda_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, false)
+                        let ch = compile_fn(methods[mi], fn_names, fn_mods, mod_at(mod_of, i), fn_rets, structs, enums, globals, instances, sid, lambda_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, false, "")
                         disassemble(ch)
                         lambda_base = lambda_base + ch.lifted.len()
                     }
@@ -9547,7 +9571,7 @@ fn disassemble_program(decls: [ps.Decl], mod_of: [int], fn_names: [string], fn_r
             case DFn(f) {
                 if f.has_body {
                     println("== fn {f.name} (arity {f.params.len()}) ==")
-                    let ch = compile_fn(f, fn_names, fn_mods, mod_at(mod_of, i), fn_rets, structs, enums, globals, instances, 0 - 1, lambda_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, false)
+                    let ch = compile_fn(f, fn_names, fn_mods, mod_at(mod_of, i), fn_rets, structs, enums, globals, instances, 0 - 1, lambda_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, false, "")
                     disassemble(ch)
                     lambda_base = lambda_base + ch.lifted.len()
                 }
@@ -9573,7 +9597,7 @@ fn disassemble_program(decls: [ps.Decl], mod_of: [int], fn_names: [string], fn_r
                         break
                     }
                     if methods[mi].has_body {
-                        let ch = compile_fn(methods[mi], fn_names, fn_mods, mod_at(mod_of, j), fn_rets, structs, enums, globals, instances, sid2, lb2, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, false)
+                        let ch = compile_fn(methods[mi], fn_names, fn_mods, mod_at(mod_of, j), fn_rets, structs, enums, globals, instances, sid2, lb2, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, false, "")
                         emit_lifted_disasm(ch, fn_names, fn_rets, structs, enums, globals, instances, gf.names, gf.pquals, insts.keys, inst_base, wit)
                         lb2 = lb2 + ch.lifted.len()
                     }
@@ -9583,7 +9607,7 @@ fn disassemble_program(decls: [ps.Decl], mod_of: [int], fn_names: [string], fn_r
             }
             case DFn(f) {
                 if f.has_body {
-                    let ch = compile_fn(f, fn_names, fn_mods, mod_at(mod_of, j), fn_rets, structs, enums, globals, instances, 0 - 1, lb2, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, false)
+                    let ch = compile_fn(f, fn_names, fn_mods, mod_at(mod_of, j), fn_rets, structs, enums, globals, instances, 0 - 1, lb2, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, false, "")
                     emit_lifted_disasm(ch, fn_names, fn_rets, structs, enums, globals, instances, gf.names, gf.pquals, insts.keys, inst_base, wit)
                     lb2 = lb2 + ch.lifted.len()
                 }
@@ -9611,7 +9635,7 @@ fn disassemble_program(decls: [ps.Decl], mod_of: [int], fn_names: [string], fn_r
                 case DFn(f) {
                     if f.has_body && f.name == insts.bases[xi] {
                         println("== fn {f.name} (arity {f.params.len()}) ==")
-                        let ich = compile_fn(f, fn_names, fn_mods, 0 - 1, fn_rets, structs, enums, globals, instances, 0 - 1, inst_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, true)
+                        let ich = compile_fn(f, fn_names, fn_mods, 0 - 1, fn_rets, structs, enums, globals, instances, 0 - 1, inst_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, true, insts.keys[xi])
                         disassemble(ich)
                     }
                 }
@@ -9623,7 +9647,7 @@ fn disassemble_program(decls: [ps.Decl], mod_of: [int], fn_names: [string], fn_r
                         }
                         if methods[mi].has_body && "{name}.{methods[mi].name}" == insts.bases[xi] {
                             println("== fn {name}.{methods[mi].name} (arity {methods[mi].params.len()}) ==")
-                            let ich = compile_fn(methods[mi], fn_names, fn_mods, 0 - 1, fn_rets, structs, enums, globals, instances, sidp, inst_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, true)
+                            let ich = compile_fn(methods[mi], fn_names, fn_mods, 0 - 1, fn_rets, structs, enums, globals, instances, sidp, inst_base, no_caps, gf.names, gf.pquals, insts.keys, inst_base, wit, true, insts.keys[xi])
                             disassemble(ich)
                         }
                         mi = mi + 1
@@ -9644,7 +9668,7 @@ fn disassemble_program(decls: [ps.Decl], mod_of: [int], fn_names: [string], fn_r
 // the implicit trailing `CONST <0>; <drops>; RETURN` stage-0 appends (the drops release string locals).
 // A lifted lambda passes its capture flags as `caps` (declared as leading slots before the lambda's params);
 // `lambda_base` is the fn-table index of this function's first lambda (used for MAKE_CLOSURE operands).
-fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_module: [int], cur_module: int, fn_rets: FnRets, structs: StructTable, enums: EnumTable, globals: GlobalConsts, instances: [string], self_struct_id: int, lambda_base: int, caps: [CaptureFlag], generic_fns: [string], generic_pquals: [string], fn_inst_keys: [string], inst_base: int, wit: WitInfo, emitting_instance: bool) -> Chunk {
+fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_module: [int], cur_module: int, fn_rets: FnRets, structs: StructTable, enums: EnumTable, globals: GlobalConsts, instances: [string], self_struct_id: int, lambda_base: int, caps: [CaptureFlag], generic_fns: [string], generic_pquals: [string], fn_inst_keys: [string], inst_base: int, wit: WitInfo, emitting_instance: bool, inst_key: string) -> Chunk {
     var code: [int] = []
     var lines: [int] = []
     var cif: [bool] = []
@@ -9739,17 +9763,12 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_module: [int], cur_module: in
         // a bounded-struct METHOD INSTANCE (`Map.get<string_int>`): bind `self`'s struct type-args from the
         // matching instance key so `self._index(..)` in the body retargets to `Map._index<string_int>` (the
         // method's own generics is empty; the args ride on the key's `<…>`).
-        let mname_full = "{ch.st_names[self_struct_id]}.{f.name}"
-        var ki2 = 0
-        loop {
-            if ki2 >= ch.fn_inst_keys.len() {
-                break
-            }
-            if str_starts_with(ch.fn_inst_keys[ki2], "{mname_full}<") {
-                ch.cur_self_args = inst_key_args_raw(ch.fn_inst_keys[ki2], mname_full)
-                break
-            }
-            ki2 = ki2 + 1
+        // Bind self's type-args from THIS instance's key (`Map.set<string_Rect>` -> "string_Rect"), so
+        // `self._ensure_capacity()` retargets to the SAME specialization — NOT the first matching key, which
+        // conflates every Map<K,V> instantiation onto the first (the flare multi-Map bug).
+        if inst_key != "" {
+            let mname_full = "{ch.st_names[self_struct_id]}.{f.name}"
+            ch.cur_self_args = inst_key_args_raw(inst_key, mname_full)
         }
     }
     if self_struct_id >= 0 {
