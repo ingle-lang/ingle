@@ -71,7 +71,7 @@ void *pooled_alloc(EmberRt *ctx, size_t size) {
         }
         Obj *fresh = malloc(cls << 4);
         if (fresh == NULL) {
-            fprintf(stderr, "emberc: out of memory allocating an object\n");
+            fprintf(stderr, "inglec: out of memory allocating an object\n");
             exit(70);
         }
         fresh->size_class = (int)cls;
@@ -79,7 +79,7 @@ void *pooled_alloc(EmberRt *ctx, size_t size) {
     }
     Obj *big = malloc(size);
     if (big == NULL) {
-        fprintf(stderr, "emberc: out of memory allocating an object\n");
+        fprintf(stderr, "inglec: out of memory allocating an object\n");
         exit(70);
     }
     big->size_class = -1;
@@ -541,7 +541,7 @@ Value alloc_array(EmberRt *ctx, size_t length, uint8_t elem_kind) {
     uint8_t   esz  = elem_size_for(elem_kind);
     void     *buf  = length > 0 ? malloc(length * esz) : NULL;
     if (a == NULL || (length > 0 && buf == NULL)) {
-        fprintf(stderr, "emberc: out of memory allocating an array\n");
+        fprintf(stderr, "inglec: out of memory allocating an array\n");
         exit(70);
     }
     a->obj.type   = OBJ_ARRAY;
@@ -567,7 +567,7 @@ Value alloc_array(EmberRt *ctx, size_t length, uint8_t elem_kind) {
 Value alloc_slice(EmberRt *ctx, ObjArray *src, size_t lo, size_t hi) {
     ObjArray *a = pooled_alloc(ctx, sizeof(ObjArray));
     if (a == NULL) {
-        fprintf(stderr, "emberc: out of memory allocating a slice\n");
+        fprintf(stderr, "inglec: out of memory allocating a slice\n");
         exit(70);
     }
     a->obj.type       = OBJ_ARRAY;
@@ -594,7 +594,7 @@ Value alloc_struct_array(EmberRt *ctx, size_t length, int struct_id) {
     size_t    esz = (size_t)ctx->structs[struct_id].total_size;
     void     *buf = length > 0 ? malloc(length * esz) : NULL;
     if (a == NULL || (length > 0 && buf == NULL)) {
-        fprintf(stderr, "emberc: out of memory allocating a struct array\n");
+        fprintf(stderr, "inglec: out of memory allocating a struct array\n");
         exit(70);
     }
     a->obj.type       = OBJ_ARRAY;
@@ -1402,7 +1402,7 @@ static void em_nursery_park(ObjChannel *ch, int is_send) {
         if (!any_ready) {
             __atomic_store_n(&n->deadlocked, 1, __ATOMIC_SEQ_CST);
             pthread_mutex_unlock(&n->lock);
-            fprintf(stderr, "emberc: deadlock: every task in the nursery is blocked\n");
+            fprintf(stderr, "inglec: deadlock: every task in the nursery is blocked\n");
             exit(70);
         }
     }
@@ -1676,7 +1676,7 @@ void em_nursery_join(EmNurseryRun *run) {
         if (!any_ready) {
             __atomic_store_n(&run->grp.deadlocked, 1, __ATOMIC_SEQ_CST);
             pthread_mutex_unlock(&run->grp.lock);
-            fprintf(stderr, "emberc: deadlock: every task in the nursery is blocked\n");
+            fprintf(stderr, "inglec: deadlock: every task in the nursery is blocked\n");
             exit(70);
         }
     }

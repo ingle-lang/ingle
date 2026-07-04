@@ -657,7 +657,7 @@ static void publish_diagnostics(const Doc *d) {
         json_buf_put_int(&b, line);
         json_buf_puts(&b, ",\"character\":");
         json_buf_put_int(&b, endc);
-        json_buf_puts(&b, "}},\"severity\":1,\"source\":\"emberc\",\"message\":");
+        json_buf_puts(&b, "}},\"severity\":1,\"source\":\"inglec\",\"message\":");
         json_buf_put_str(&b, di.msg != NULL ? di.msg : "error");
         json_buf_putc(&b, '}');
         emitted++;
@@ -2465,7 +2465,7 @@ int lsp_main(void) {
                                 "\"inlayHintProvider\":true,"
                                 "\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]},"
                                 "\"codeActionProvider\":true},"
-                                "\"serverInfo\":{\"name\":\"emberc-lsp\",\"version\":\"");
+                                "\"serverInfo\":{\"name\":\"inglec-lsp\",\"version\":\"");
             json_buf_puts(&cap, EMBER_VERSION);
             json_buf_puts(&cap, "\"}}");
             respond(id, cap.buf);

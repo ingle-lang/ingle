@@ -3313,7 +3313,7 @@ static SemType check_fn_call(Checker *c, Expr *e, FnSig *sig, SemType expected) 
     if (wtotal > 0) {
         ws = malloc(sizeof(Witness) * (size_t)wtotal);
         if (ws == NULL) {
-            fprintf(stderr, "emberc: out of memory building witnesses\n");
+            fprintf(stderr, "inglec: out of memory building witnesses\n");
             exit(70);
         }
     }
@@ -5203,7 +5203,7 @@ static SemType check_expr_inner(Checker *c, Expr *e) {
             if (si->witness_count > 0) {
                 Witness *ws = malloc(sizeof(Witness) * (size_t)si->witness_count);
                 if (ws == NULL) {
-                    fprintf(stderr, "emberc: out of memory building struct witnesses\n");
+                    fprintf(stderr, "inglec: out of memory building struct witnesses\n");
                     exit(70);
                 }
                 int wi = 0;
@@ -7964,7 +7964,7 @@ static int *build_witness(Checker *c, SemType type, int iid, int *out_count) {
     int n = ii->method_count > 0 ? ii->method_count : 1;
     int *w = malloc(sizeof(int) * (size_t)n);
     if (w == NULL) {
-        fprintf(stderr, "emberc: out of memory building a witness\n");
+        fprintf(stderr, "inglec: out of memory building a witness\n");
         exit(70);
     }
     for (int m = 0; m < ii->method_count; m++) {
@@ -8395,7 +8395,7 @@ static void build_mono_instances(Checker *c, const Program *program,
     const FnDecl **fn_by_fi   = malloc((size_t)(table_fns > 0 ? table_fns : 1) * sizeof(*fn_by_fi));
     int           *fi_generic = malloc((size_t)(table_fns > 0 ? table_fns : 1) * sizeof(*fi_generic));
     if (fn_by_fi == NULL || fi_generic == NULL) {
-        fprintf(stderr, "emberc: out of memory enumerating functions\n");
+        fprintf(stderr, "inglec: out of memory enumerating functions\n");
         exit(70);
     }
     int fi = 0;
@@ -8489,7 +8489,7 @@ static void build_mono_instances(Checker *c, const Program *program,
     plan->res           = malloc(sizeof(MonoPlanRes) *
                                  (m.res_count > 0 ? m.res_count : 1));
     if (plan->base_of == NULL || plan->res == NULL) {
-        fprintf(stderr, "emberc: out of memory building the mono plan\n");
+        fprintf(stderr, "inglec: out of memory building the mono plan\n");
         exit(70);
     }
     for (int s = 0; s < appended; s++) {
@@ -8584,7 +8584,7 @@ static void build_layouts(Checker *c, StructLayout **out_layouts, int *out_count
     int n = c->struct_count + c->sinst_count;
     StructLayout *L = malloc(sizeof(StructLayout) * (n > 0 ? n : 1));
     if (L == NULL) {
-        fprintf(stderr, "emberc: out of memory building struct layouts\n");
+        fprintf(stderr, "inglec: out of memory building struct layouts\n");
         exit(70);
     }
     // The declared structs, in id order.

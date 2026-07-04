@@ -208,7 +208,7 @@ static int w_http_post(const Value *a, Value *o) {
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, net_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &m);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "ember-claude/0.1");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "ingle-claude/0.1");
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
     CURLcode rc = curl_easy_perform(curl);
     curl_slist_free_all(hdrs);
@@ -256,7 +256,7 @@ static int w_http_get(const Value *a, Value *o) {
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, net_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &m);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "ember-http/0.1");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "ingle-http/0.1");
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 4L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
     CURLcode rc = curl_easy_perform(curl);
@@ -355,7 +355,7 @@ static int w_http_open(const Value *a, Value *o) {
     curl_easy_setopt(s->easy, CURLOPT_HTTPHEADER, s->hdrs);
     curl_easy_setopt(s->easy, CURLOPT_WRITEFUNCTION, hs_write_cb);
     curl_easy_setopt(s->easy, CURLOPT_WRITEDATA, s);
-    curl_easy_setopt(s->easy, CURLOPT_USERAGENT, "ember-http/0.1");
+    curl_easy_setopt(s->easy, CURLOPT_USERAGENT, "ingle-http/0.1");
     curl_easy_setopt(s->easy, CURLOPT_TIMEOUT, 300L);
     curl_multi_add_handle(s->multi, s->easy);
     s->running = 1;

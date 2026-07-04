@@ -127,7 +127,7 @@ static void push_token(TokenList *list, Token t) {
         size_t new_cap = list->capacity ? list->capacity * 2 : 16;
         Token *grown = realloc(list->tokens, new_cap * sizeof(Token));
         if (grown == NULL) {
-            fprintf(stderr, "emberc: out of memory while scanning\n");
+            fprintf(stderr, "inglec: out of memory while scanning\n");
             exit(70);
         }
         list->tokens   = grown;

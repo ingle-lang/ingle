@@ -362,7 +362,7 @@ static inline int em_nk_bits(int nk) {
 // own process, prints the same line and exits non-zero. The differential test
 // compares stdout, so neither emits a `=> N` line on the faulting path.
 static inline void em_panic(const char *msg) {
-    fprintf(stderr, "emberc: runtime error: %s\n", msg);
+    fprintf(stderr, "inglec: runtime error: %s\n", msg);
     exit(70);
 }
 

@@ -32,18 +32,18 @@
 static char *read_file(const char *path) {
     FILE *f = fopen(path, "rb");
     if (f == NULL) {
-        fprintf(stderr, "emberc: cannot open '%s'\n", path);
+        fprintf(stderr, "inglec: cannot open '%s'\n", path);
         return NULL;
     }
 
     if (fseek(f, 0, SEEK_END) != 0) {
-        fprintf(stderr, "emberc: cannot seek '%s'\n", path);
+        fprintf(stderr, "inglec: cannot seek '%s'\n", path);
         fclose(f);
         return NULL;
     }
     long size = ftell(f);
     if (size < 0) {
-        fprintf(stderr, "emberc: cannot size '%s'\n", path);
+        fprintf(stderr, "inglec: cannot size '%s'\n", path);
         fclose(f);
         return NULL;
     }
@@ -51,7 +51,7 @@ static char *read_file(const char *path) {
 
     char *buffer = malloc((size_t)size + 1);
     if (buffer == NULL) {
-        fprintf(stderr, "emberc: out of memory reading '%s'\n", path);
+        fprintf(stderr, "inglec: out of memory reading '%s'\n", path);
         fclose(f);
         return NULL;
     }
@@ -102,7 +102,7 @@ static int emit_ast(const TokenList *tokens, const char *name) {
 // g_std_dir is the directory holding the standard library's `.em` files. The
 // `std/` import prefix is reserved: `import "std/string"` resolves to a file in
 // this directory regardless of the importer's location. Set once in main() from
-// $EMBER_STD or, failing that, relative to the compiler binary.
+// $INGLE_STD (or the legacy $EMBER_STD) or, failing that, relative to the compiler binary.
 static const char *g_std_dir = NULL;
 
 // resolve_import_path joins an import path against the importing file's directory
@@ -142,13 +142,17 @@ static const char *resolve_import_path(Arena *arena, const char *importer,
 
 
 
-// init_std_dir locates the standard library: $EMBER_STD wins (installed toolchains), else
-// `<dir-of-binary>/../std` — both the repo layout (build/emberc -> ../std) and a central install
-// (~/.ember/bin/emberc -> ~/.ember/std). Called before any mode (including --lsp, which would
-// otherwise resolve `std/` imports against a NULL directory).
+// init_std_dir locates the standard library: $INGLE_STD wins (installed toolchains), else
+// `<dir-of-binary>/../std` — both the repo layout (build/inglec -> ../std) and a central install
+// (~/.ingle/bin/inglec -> ~/.ingle/std). $EMBER_STD is still honoured as a back-compat alias. Called
+// before any mode (including --lsp, which would otherwise resolve `std/` imports against a NULL dir).
 static void init_std_dir(const char *argv0) {
     static char std_buf[4096];
-    const char *env_std = getenv("EMBER_STD");
+    // $INGLE_STD is the canonical env var; $EMBER_STD stays accepted so old setups keep working.
+    const char *env_std = getenv("INGLE_STD");
+    if (env_std == NULL || env_std[0] == '\0') {
+        env_std = getenv("EMBER_STD");
+    }
     if (env_std != NULL && env_std[0] != '\0') {
         g_std_dir = env_std;
         return;
@@ -261,7 +265,7 @@ static int load_modules(const TokenList *entry_tokens, const char *entry_path,
                 // Reserve one slot for the synthetic prelude module added below, so
                 // a program that maxes out user modules never loses Option/Result.
                 if (set->count >= MAX_MODULES - 1) {
-                    fprintf(stderr, "emberc: too many modules\n");
+                    fprintf(stderr, "inglec: too many modules\n");
                     error = 1;
                     continue;
                 }
@@ -328,7 +332,7 @@ static int load_modules(const TokenList *entry_tokens, const char *entry_path,
     int pm = -1;
     if (prelude_count > 0) {
         if (set->count >= MAX_MODULES) {
-            fprintf(stderr, "emberc: too many modules (no room for the prelude)\n");
+            fprintf(stderr, "inglec: too many modules (no room for the prelude)\n");
             error = 1;
         } else {
             pm = set->count++;
@@ -474,7 +478,7 @@ static int emit_bytecode_bin(const TokenList *tokens, const char *name, const ch
     compiled_program_init(&prog);
     int error = compile_program(tokens, name, &prog);
     if (!error && bytecode_write(&prog, out_path) != 0) {
-        fprintf(stderr, "emberc: could not write bytecode to '%s'\n", out_path);
+        fprintf(stderr, "inglec: could not write bytecode to '%s'\n", out_path);
         error = 1;
     }
     compiled_program_free(&prog);
@@ -591,7 +595,7 @@ static int run_bytecode(const char *path) {
     CompiledProgram prog;
     compiled_program_init(&prog);
     if (bytecode_read(path, &prog) != 0) {
-        fprintf(stderr, "emberc: could not load bytecode '%s' (unreadable, malformed, or a VM-ABI mismatch)\n",
+        fprintf(stderr, "inglec: could not load bytecode '%s' (unreadable, malformed, or a VM-ABI mismatch)\n",
                 path);
         compiled_program_free(&prog);
         return 66;
@@ -677,7 +681,7 @@ static int compile_native(const TokenList *tokens, const char *name,
 
     FILE *cf = fopen(cpath, "w");
     if (cf == NULL) {
-        fprintf(stderr, "emberc: cannot write '%s'\n", cpath);
+        fprintf(stderr, "inglec: cannot write '%s'\n", cpath);
         return 1;
     }
     int concurrent = 0;
@@ -734,7 +738,7 @@ static int compile_native(const TokenList *tokens, const char *name,
 #endif
     int rc = system(cmd);
     if (rc != 0) {
-        fprintf(stderr, "emberc: C compilation failed (cc exit %d); kept %s\n", rc, cpath);
+        fprintf(stderr, "inglec: C compilation failed (cc exit %d); kept %s\n", rc, cpath);
         return 1;
     }
     remove(cpath);
@@ -883,11 +887,11 @@ static int emit_trace(const TokenList *tokens, const char *name) {
 // shared frontend) and prints the EXACT fix for anything wrong, then the editor next-steps. Returns
 // 0 when the essentials pass, 1 otherwise.
 static int run_doctor(const char *argv0) {
-    printf("emberc doctor — checking your Ember setup\n\n");
+    printf("inglec doctor — checking your Ingle setup\n\n");
     int ok = 1;
 
-    // 1. The binary itself — we are running, so this is informational (shows which emberc this is).
-    printf("[ok]   emberc            %s\n", argv0);
+    // 1. The binary itself — we are running, so this is informational (shows which inglec this is).
+    printf("[ok]   inglec            %s\n", argv0);
 
     // 2. The standard library must resolve, or every `import \"std/...\"` fails (the LSP resolves it
     //    too). g_std_dir was set by init_std_dir from $EMBER_STD or <bin>/../std.
@@ -907,7 +911,7 @@ static int run_doctor(const char *argv0) {
         ok = 0;
         printf("[!!]   standard library  NOT FOUND (looked in %s)\n",
                g_std_dir != NULL ? g_std_dir : "<unset>");
-        printf("       fix: run `make install`, or set EMBER_STD to the directory holding std/*.em\n");
+        printf("       fix: run `make install`, or set INGLE_STD to the directory holding std/*.em\n");
     }
 
     // 3. The frontend (lexer + parser + checker) must be healthy — the LSP shares it, so a broken
@@ -928,13 +932,13 @@ static int run_doctor(const char *argv0) {
     // 4. The language server is this very binary (one frontend, no second process).
     printf("[ok]   language server    %s --lsp  (ready)\n", argv0);
 
-    // 5. The editor's LSP runs the INSTALLED binary (~/.ember/bin/emberc), not build/emberc — so a
+    // 5. The editor's LSP runs the INSTALLED binary (~/.ingle/bin/inglec), not build/inglec — so a
     //    rebuild that wasn't re-installed leaves the editor on STALE code (phantom errors, missing
     //    features; the gotcha behind Zed/VS Code showing old behaviour after a change). Compare the
     //    installed binary's version to this one. Advisory — it never changes the exit code.
     const char *home = getenv("HOME");
     char        installed[4096];
-    snprintf(installed, sizeof installed, "%s/.ember/bin/emberc", home != NULL ? home : "");
+    snprintf(installed, sizeof installed, "%s/.ingle/bin/inglec", home != NULL ? home : "");
     char run_real[PATH_MAX]  = "";
     char inst_real[PATH_MAX] = "";
     int  have_run  = realpath(argv0, run_real) != NULL;
@@ -964,7 +968,7 @@ static int run_doctor(const char *argv0) {
         }
     } else {
         printf("[--]   installed binary   none at %s\n", installed);
-        printf("       run `make install` so your editor can find emberc on the default path.\n");
+        printf("       run `make install` so your editor can find inglec on the default path.\n");
     }
 
     // Editor setup — the friction phase. Spell it out so no one gets stuck on the steps we hit.
@@ -972,12 +976,12 @@ static int run_doctor(const char *argv0) {
     printf("  VS Code:  make install-vscode    then reload the window\n");
     printf("  Zed:      Rust via rustup, NOT Homebrew:   rustup target add wasm32-wasip1\n");
     printf("            make build-zed    then  palette -> 'zed: install dev extension' -> editors/zed/\n");
-    printf("  After ANY change to emberc:  make install   then reload your editor\n");
-    printf("            (your editor runs the INSTALLED binary, not build/emberc)\n");
+    printf("  After ANY change to inglec:  make install   then reload your editor\n");
+    printf("            (your editor runs the INSTALLED binary, not build/inglec)\n");
 
     printf("\n%s\n", ok
-        ? "All essential checks passed — the Ember LSP is ready."
-        : "Some checks failed — fix the [!!] item(s) above, then re-run `emberc --doctor`.");
+        ? "All essential checks passed — the Ingle LSP is ready."
+        : "Some checks failed — fix the [!!] item(s) above, then re-run `inglec --doctor`.");
     return ok ? 0 : 1;
 }
 
@@ -1003,7 +1007,7 @@ int main(int argc, char **argv) {
             // Load and run a serialized `.emb` container (no source, no front end). Everything after the
             // .emb path is the Ember program's args(), mirroring `emberc --emit=run app.em foo bar`.
             if (i + 1 >= argc) {
-                fprintf(stderr, "emberc: --run-bytecode requires a <file.emb>\n");
+                fprintf(stderr, "inglec: --run-bytecode requires a <file.emb>\n");
                 return 64;
             }
             const char *bc_path = argv[i + 1];
@@ -1013,29 +1017,29 @@ int main(int argc, char **argv) {
             return run_bytecode(bc_path);
         }
         if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
-            printf("emberc %s\n", EMBER_VERSION);
+            printf("inglec %s\n", EMBER_VERSION);
             return 0;
         }
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printf(
-                "emberc %s — the Ember compiler & language server\n\n"
+                "inglec %s — the Ingle compiler & language server\n\n"
                 "usage:\n"
-                "  emberc <file.em>                inspect/compile a source file (default --emit=tokens)\n"
-                "  emberc --emit=<mode> <file.em>  mode: run|ast|bytecode|c|docs|prove|check|replay|trace|tokens\n"
-                "  emberc --emit=bytecode-bin -o <f.emb> <file.em>  serialize a runnable bytecode container\n"
-                "  emberc --run-bytecode <file.emb>  load and run a serialized .emb container\n"
-                "  emberc -o <bin> <file.em>       compile to a native binary (C backend)\n"
-                "  emberc --tape <file.em>         record the execution tape (alias for --emit=trace)\n"
-                "  emberc --lsp                    run the language server (JSON-RPC over stdio)\n"
-                "  emberc --doctor                 check your setup and print the fix for anything wrong\n"
-                "  emberc --version                print the version\n"
-                "  emberc --help                   show this help\n\n"
+                "  inglec <file.em>                inspect/compile a source file (default --emit=tokens)\n"
+                "  inglec --emit=<mode> <file.em>  mode: run|ast|bytecode|c|docs|prove|check|replay|trace|tokens\n"
+                "  inglec --emit=bytecode-bin -o <f.emb> <file.em>  serialize a runnable bytecode container\n"
+                "  inglec --run-bytecode <file.emb>  load and run a serialized .emb container\n"
+                "  inglec -o <bin> <file.em>       compile to a native binary (C backend)\n"
+                "  inglec --tape <file.em>         record the execution tape (alias for --emit=trace)\n"
+                "  inglec --lsp                    run the language server (JSON-RPC over stdio)\n"
+                "  inglec --doctor                 check your setup and print the fix for anything wrong\n"
+                "  inglec --version                print the version\n"
+                "  inglec --help                   show this help\n\n"
                 "flags:\n"
                 "  --release                       elide debug-only contract checks\n"
                 "  --freestanding                  with --emit=c: bare-metal C (freestanding entry,\n"
                 "                                  no stdio/argv; see docs/design/kernel-freestanding.md)\n"
                 "  --diagnostics=json              structured (LLM-friendly) error output\n\n"
-                "Building Ember itself? Run `make help` for the build / test / install commands.\n",
+                "Building Ingle itself? Run `make help` for the build / test / install commands.\n",
                 EMBER_VERSION);
             return 0;
         }
@@ -1069,7 +1073,7 @@ int main(int argc, char **argv) {
             } else if (strcmp(m, "human") == 0) {
                 fault_set_mode(FAULT_RENDER_HUMAN);   // the default teacher-voice render
             } else {
-                fprintf(stderr, "emberc: --faults= must be 'human' or 'agent'\n");
+                fprintf(stderr, "inglec: --faults= must be 'human' or 'agent'\n");
                 return 64;
             }
         } else if (strncmp(argv[i], "--emit=", 7) == 0) {
@@ -1078,7 +1082,7 @@ int main(int argc, char **argv) {
             emit = "trace";               // FROG-style alias: record the execution tape
         } else if (strcmp(argv[i], "-o") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "emberc: -o requires an output path\n");
+                fprintf(stderr, "inglec: -o requires an output path\n");
                 return 64;
             }
             out_path = argv[++i];         // native backend: compile to a standalone binary
@@ -1107,7 +1111,7 @@ int main(int argc, char **argv) {
     // hosted runtime (a freestanding program is cross-compiled by the user's own toolchain), and
     // every other emit mode runs on the hosted VM. Reject the combinations honestly.
     if (freestanding && (out_path != NULL || strcmp(emit, "c") != 0)) {
-        fprintf(stderr, "emberc: --freestanding applies to --emit=c only (cross-compile the "
+        fprintf(stderr, "inglec: --freestanding applies to --emit=c only (cross-compile the "
                         "emitted C against a freestanding runtime; `-o` links the hosted one)\n");
         return 64;
     }
@@ -1124,7 +1128,7 @@ int main(int argc, char **argv) {
         // Serialize a runnable `.emb` container (docs/design/bytecode-container.md). Takes precedence over
         // the bare `-o` native-binary path, which `-o` would otherwise trigger.
         if (out_path == NULL) {
-            fprintf(stderr, "emberc: --emit=bytecode-bin requires -o <file.emb>\n");
+            fprintf(stderr, "inglec: --emit=bytecode-bin requires -o <file.emb>\n");
             rc = 64;
         } else {
             int error = emit_bytecode_bin(&tokens, path, out_path);
@@ -1166,7 +1170,7 @@ int main(int argc, char **argv) {
         int parse_error = emit_docs(&tokens, path);
         rc = (tokens.had_error || parse_error) ? 65 : 0;
     } else {
-        fprintf(stderr, "emberc: unknown emit mode '%s' (expected tokens or ast)\n", emit);
+        fprintf(stderr, "inglec: unknown emit mode '%s' (expected tokens or ast)\n", emit);
         rc = 64;
     }
 

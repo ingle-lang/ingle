@@ -256,21 +256,23 @@ asan-trace: | build
 	$(CC) $(ASAN_FLAGS) -DEMBER_DROP_TRACE=1 $(SOURCES) $(LDLIBS_MATH) -o build/inglec-trace
 	@$(call LINK_COMPAT,build/inglec-trace)
 
-# Install a release build to a central, self-contained toolchain dir (default ~/.ember) so editors
-# and tools find it from ANY folder: the binary lands at $(PREFIX)/bin/emberc and the stdlib at
+# Install a release build to a central, self-contained toolchain dir (default ~/.ingle) so editors
+# and tools find it from ANY folder: the binary lands at $(PREFIX)/bin/inglec and the stdlib at
 # $(PREFIX)/std, which the binary resolves relative to itself (<bin>/../std). The VS Code client
-# launches $(PREFIX)/bin/emberc --lsp. Re-run after changes: `make install`.
-PREFIX ?= $(HOME)/.ember
+# launches $(PREFIX)/bin/inglec --lsp. A compat `emberc` symlink is installed alongside (F3). Re-run
+# after changes: `make install`.
+PREFIX ?= $(HOME)/.ingle
 install: release
 	mkdir -p "$(PREFIX)/bin" "$(PREFIX)/std"
 	# rm-then-cp, NOT cp-in-place: overwriting the existing binary keeps its inode, and macOS
 	# caches the ad-hoc code signature (cdhash) per-inode. The new content's cdhash then mismatches
 	# the cache and the kernel SIGKILLs the process on exec ("Killed: 9") — the launched LSP dies
 	# silently and editors show no hover/diagnostics. Removing first gives the copy a fresh inode.
-	rm -f "$(PREFIX)/bin/emberc"
-	cp $(RELEASE_BIN) "$(PREFIX)/bin/emberc"
+	rm -f "$(PREFIX)/bin/inglec" "$(PREFIX)/bin/emberc"
+	cp $(RELEASE_BIN) "$(PREFIX)/bin/inglec"
+	ln -sf inglec "$(PREFIX)/bin/emberc"
 	cp std/*.em "$(PREFIX)/std/"
-	@echo "installed emberc + std to $(PREFIX)  (VS Code: emberLsp.serverPath = $(PREFIX)/bin/emberc)"
+	@echo "installed inglec (+ emberc alias) + std to $(PREFIX)  (VS Code: emberLsp.serverPath = $(PREFIX)/bin/inglec)"
 
 # Deploy the VS Code extension. The CANONICAL SOURCE is editors/vscode/ in this repo.
 # IMPORTANT: modern VS Code (1.74+) does NOT scan ~/.vscode/extensions on startup — it
@@ -339,7 +341,7 @@ doctor: all
 
 # `make help`: every build/test/install command in one place — the canonical list so none get lost.
 help:
-	@echo "Ember build commands — make <target>:"
+	@echo "Ingle build commands — make <target>:"
 	@echo ""
 	@echo "  Build & run"
 	@echo "    make                  build the dev compiler (build/inglec)"
@@ -356,7 +358,7 @@ help:
 	@echo "    make asan             AddressSanitizer build"
 	@echo "    make doctor           setup health-check (binary, stdlib, frontend, install, Zed toolchain)"
 	@echo "  Install & editors"
-	@echo "    make install          install emberc + std to ~/.ember  (editors run THIS binary)"
+	@echo "    make install          install inglec + std to ~/.ingle  (editors run THIS binary)"
 	@echo "    make install-vscode   build + install the VS Code extension"
 	@echo "    make build-zed        build the Zed extension wasm"
 	@echo "    make install-zed      build + show the Zed dev-extension install step"
@@ -367,7 +369,7 @@ help:
 	@echo "  Docs & site"
 	@echo "    make docs             regenerate the /guide site + llms-full.txt from THE_EMBER_BOOK.md"
 	@echo ""
-	@echo "Using the language? Run 'emberc --help'."
+	@echo "Using the language? Run 'inglec --help'."
 
 # Multicore compiler (see PARALLEL_FLAGS). Single invocation like `release`, so it
 # always reflects current source and never collides with the dev -O0 objects.

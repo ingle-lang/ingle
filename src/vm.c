@@ -285,7 +285,7 @@ struct VM {
 #endif
 
 static void runtime_error(const char *msg) {
-    fprintf(stderr, "emberc: runtime error: %s\n", msg);
+    fprintf(stderr, "inglec: runtime error: %s\n", msg);
 }
 
 
@@ -812,7 +812,7 @@ static Value alloc_channel(VM *vm, int cap) {
     ObjChannel *ch = pooled_alloc(RT(vm), sizeof(ObjChannel));
     Value *buf = malloc((cap > 0 ? (size_t)cap : 1) * sizeof(Value));
     if (buf == NULL) {
-        fprintf(stderr, "emberc: out of memory allocating a channel\n");
+        fprintf(stderr, "inglec: out of memory allocating a channel\n");
         exit(70);
     }
     ch->obj.type = OBJ_CHANNEL;
@@ -1006,7 +1006,7 @@ static void vm_out(VM *vm, const char *s, size_t n) {
         }
         vm->cap_buf = realloc(vm->cap_buf, want);
         if (vm->cap_buf == NULL) {
-            fprintf(stderr, "emberc: out of memory capturing output\n");
+            fprintf(stderr, "inglec: out of memory capturing output\n");
             exit(70);
         }
         vm->cap_cap = want;
@@ -1026,7 +1026,7 @@ static NondetEvent *nondet_append(VM *vm) {
         vm->nondet_cap = vm->nondet_cap ? vm->nondet_cap * 2 : 16;
         vm->nondet_log = realloc(vm->nondet_log, (size_t)vm->nondet_cap * sizeof(NondetEvent));
         if (vm->nondet_log == NULL) {
-            fprintf(stderr, "emberc: out of memory recording nondeterminism\n");
+            fprintf(stderr, "inglec: out of memory recording nondeterminism\n");
             exit(70);
         }
     }
@@ -1079,7 +1079,7 @@ static void nondet_record_string(VM *vm, const char *src, ObjString *s) {
     e->src = src;  e->kind = NDV_STRING;  e->num = 0;  e->len = s->length;
     e->str = malloc(s->length + 1);
     if (e->str == NULL) {
-        fprintf(stderr, "emberc: out of memory recording nondeterminism\n");
+        fprintf(stderr, "inglec: out of memory recording nondeterminism\n");
         exit(70);
     }
     memcpy(e->str, s->chars, s->length);
@@ -2825,7 +2825,7 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                     size_t newcap = a->capacity < 4 ? 4 : a->capacity * 2;
                     void *nb = realloc(a->data, newcap * a->elem_size);
                     if (nb == NULL) {
-                        fprintf(stderr, "emberc: out of memory growing an array\n");
+                        fprintf(stderr, "inglec: out of memory growing an array\n");
                         exit(70);
                     }
                     a->data     = nb;
@@ -3843,7 +3843,7 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 // closing brace parks the parent until they all finish.
                 Nursery *nn = malloc(sizeof(Nursery));
                 if (nn == NULL) {
-                    fprintf(stderr, "emberc: out of memory opening a nursery\n");
+                    fprintf(stderr, "inglec: out of memory opening a nursery\n");
                     exit(70);
                 }
                 nn->total = 0;
@@ -3876,7 +3876,7 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 // the heap until the join at NURSERY_END frees them.
                 NurseryRun *run = malloc(sizeof(NurseryRun));
                 if (run == NULL) {
-                    fprintf(stderr, "emberc: out of memory opening a nursery\n");
+                    fprintf(stderr, "inglec: out of memory opening a nursery\n");
                     exit(70);
                 }
                 run->grp.total      = 0;
@@ -3906,7 +3906,7 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 }
                 Fiber *child = malloc(sizeof(Fiber));
                 if (child == NULL) {
-                    fprintf(stderr, "emberc: out of memory spawning a task\n");
+                    fprintf(stderr, "inglec: out of memory spawning a task\n");
                     exit(70);
                 }
                 for (int i = 0; i < argc; i++) {
@@ -3959,7 +3959,7 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 }
                 Fiber *child = malloc(sizeof(Fiber));
                 if (child == NULL) {
-                    fprintf(stderr, "emberc: out of memory spawning a task\n");
+                    fprintf(stderr, "inglec: out of memory spawning a task\n");
                     exit(70);
                 }
                 for (int i = 0; i < argc; i++) {
@@ -4345,7 +4345,7 @@ VM *vm_create(const CompiledProgram *prog) {
     Heap *heap = malloc(sizeof(Heap));
     Fiber *main_fiber = malloc(sizeof(Fiber));
     if (vm == NULL || heap == NULL || main_fiber == NULL) {
-        fprintf(stderr, "emberc: out of memory creating the VM\n");
+        fprintf(stderr, "inglec: out of memory creating the VM\n");
         exit(70);
     }
     srand((unsigned)time(NULL));   // seed random() for this run

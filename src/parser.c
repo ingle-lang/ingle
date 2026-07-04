@@ -58,7 +58,7 @@ static void vec_push(Vec *v, const void *elem) {
         size_t new_cap = v->cap ? v->cap * 2 : 8;
         unsigned char *grown = realloc(v->data, new_cap * v->elem);
         if (grown == NULL) {
-            fprintf(stderr, "emberc: out of memory while parsing\n");
+            fprintf(stderr, "inglec: out of memory while parsing\n");
             exit(70);
         }
         v->data = grown;
