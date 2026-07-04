@@ -1,10 +1,10 @@
 # Ember reference compiler — build rules.
-# `make`           builds the compiler at build/emberc (dev: -O0 -g, debuggable)
+# `make`           builds the compiler at build/inglec (dev: -O0 -g, debuggable)
 # `make test`      runs the regression suite (tests/run.sh)
 # `make test-update` regenerates snapshot goldens (review the diff first!)
-# `make release`   builds an optimized compiler at build/emberc-release (-O2)
-# `make parallel`  builds the multicore compiler at build/emberc-par (-O2, M:N)
-# `make graphics`  builds the graphics compiler at build/emberc-gfx (-O2, raylib)
+# `make release`   builds an optimized compiler at build/inglec-release (-O2)
+# `make parallel`  builds the multicore compiler at build/inglec-par (-O2, M:N)
+# `make graphics`  builds the graphics compiler at build/inglec-gfx (-O2, raylib)
 # `make kernel`    builds the bare-metal aarch64 image kernel/kernel.elf (OFI-167; needs LLVM cross + qemu)
 # `make test-kernel` boots kernel.elf on QEMU aarch64 virt and checks the UART output
 # `make bench`     builds release, then runs + times every benchmarks/*.em
@@ -28,7 +28,7 @@ LDLIBS_MATH   := -lm
 # so changing a header (e.g. opcode.h) rebuilds every object that includes it.
 # Without this, stale objects can desync silently (see git history / OFI-003).
 CFLAGS  := -std=c17 -Wall -Wextra -Werror -Iinclude -O0 -g -MMD -MP $(PORTABLE_DEFS)
-BIN     := build/emberc
+BIN     := build/inglec
 # The native backend's runtime library, linked into compiled Ember programs (emberc -o).
 # Defined here (before `all`) so it is in `all`'s prerequisites — GNU make expands a rule's
 # prerequisites when the rule is read, so a later definition would expand to empty.
@@ -45,39 +45,45 @@ RT_LIB_PAR := build/libember_rt_par.a
 # Linked by compile_native when the compiler itself is graphics-flavored (#if EMBER_GRAPHICS).
 RT_LIB_NETGFX := build/libember_rt_net_gfx.a
 
+# F3 (Ingle rebrand): `emberc` stays a permanent compatibility alias for `inglec`. Each binary recipe
+# emits a relative symlink build/emberc* -> inglec* via $(call LINK_COMPAT,<the-inglec-path>), so
+# harnesses, editor spawns, and scripts that still say `build/emberc` keep resolving. The real binary
+# is inglec; emberc is the alias. (The internal C runtime lib stays libember_rt*.a — not user-facing.)
+LINK_COMPAT = ln -sf $(notdir $(1)) $(subst inglec,emberc,$(1))
+
 # Optimized build for speed/benchmark runs. The dev build is -O0 -g for fast
 # rebuilds and debuggability; this one is -O2 -DNDEBUG and so understates nothing
 # when timing. Compiled in a single invocation (no per-object .o files) so its
 # objects never collide with the dev build's -O0 objects in build/.
-RELEASE_BIN   := build/emberc-release
+RELEASE_BIN   := build/inglec-release
 RELEASE_FLAGS := -std=c17 -Wall -Wextra -Werror -Iinclude -O2 -DNDEBUG $(PORTABLE_DEFS)
 
 # Multicore build. Same sources, -DEMBER_PARALLEL=1 swaps the cooperative green-
 # thread scheduler for an OS-thread-per-task one (atomic refcounts, mutex/condvar
 # channels, pthread nursery join) so nursery/spawn/channel programs run across all
 # cores. Identical output to the serial build; only wall-clock time changes.
-PARALLEL_BIN   := build/emberc-par
+PARALLEL_BIN   := build/inglec-par
 PARALLEL_FLAGS := -std=c17 -Wall -Wextra -Werror -Iinclude -O2 -DNDEBUG -DEMBER_PARALLEL=1 $(PORTABLE_DEFS) -pthread
 
 # M:N green-thread scheduler build (OFI-071): many fibers multiplexed over a worker pool, replacing
 # the 1:1 pthread-per-spawn model. Layered on the EMBER_PARALLEL thread-safe heap (so both flags).
 # Gated/opt-in until it clears every gate (Crucible + TSan + the mn-stress fuzzer + the suites),
-# then the default `make parallel` flips to it. Build: `build/emberc-mn --emit=run <file.em>`.
-MN_BIN         := build/emberc-mn
+# then the default `make parallel` flips to it. Build: `build/inglec-mn --emit=run <file.em>`.
+MN_BIN         := build/inglec-mn
 MN_FLAGS       := -std=c17 -Wall -Wextra -Werror -Iinclude -O2 -DNDEBUG -DEMBER_MN=1 -DEMBER_PARALLEL=1 $(PORTABLE_DEFS) -pthread
 # TSan over the M:N runtime — the right instrument for scheduler data races (ready-queue splices,
 # channel waiter FIFOs, the live/idle/inflight accounting). -O1 keeps reports readable.
-TSAN_MN_BIN    := build/emberc-tsan-mn
+TSAN_MN_BIN    := build/inglec-tsan-mn
 TSAN_MN_FLAGS  := -std=c17 -Wall -Wextra -Iinclude -O1 -g -fsanitize=thread -fno-omit-frame-pointer -DEMBER_MN=1 -DEMBER_PARALLEL=1 $(PORTABLE_DEFS) -pthread
 # ASan over M:N — use-after-free on fiber retire / per-fiber-arena merge.
-ASAN_MN_BIN    := build/emberc-asan-mn
+ASAN_MN_BIN    := build/inglec-asan-mn
 ASAN_MN_FLAGS  := -std=c17 -Wall -Wextra -Werror -Iinclude -O1 -g -fsanitize=address -fno-omit-frame-pointer -DEMBER_MN=1 -DEMBER_PARALLEL=1 $(PORTABLE_DEFS) -pthread
 # M:N + graphics (and + networking) — to dogfood the GUI apps on the M:N scheduler. Like the graphics/
 # net builds, third-party headers (raylib/curl) aren't held to -Werror. The Claude app uses
 # `make mn-net-graphics`; a graphics-only demo uses `make mn-graphics`.
-MN_GFX_BIN     := build/emberc-mn-gfx
+MN_GFX_BIN     := build/inglec-mn-gfx
 MN_GFX_FLAGS   := -std=c17 -Wall -Wextra -Iinclude -O2 -DNDEBUG -DEMBER_GRAPHICS=1 -DEMBER_MN=1 -DEMBER_PARALLEL=1 $(PORTABLE_DEFS) -pthread
-MN_NETGFX_BIN  := build/emberc-mn-net-gfx
+MN_NETGFX_BIN  := build/inglec-mn-net-gfx
 MN_NETGFX_FLAGS := -std=c17 -Wall -Wextra -Iinclude -O2 -DNDEBUG -DEMBER_NET=1 -DEMBER_GRAPHICS=1 -DEMBER_MN=1 -DEMBER_PARALLEL=1 $(PORTABLE_DEFS) -pthread
 
 # Graphics build (MANIFESTO §5g): -DEMBER_GRAPHICS=1 links the raylib backend and
@@ -85,7 +91,7 @@ MN_NETGFX_FLAGS := -std=c17 -Wall -Wextra -Iinclude -O2 -DNDEBUG -DEMBER_NET=1 -
 # Opt-in only — the default build above stays dependency-free and display-free, so
 # `make` / `make test` never need raylib. raylib's own headers aren't held to our
 # -Werror (third-party), so this build uses -Wall -Wextra without -Werror.
-GRAPHICS_BIN   := build/emberc-gfx
+GRAPHICS_BIN   := build/inglec-gfx
 GRAPHICS_FLAGS := -std=c17 -Wall -Wextra -Iinclude -O2 -DNDEBUG -DEMBER_GRAPHICS=1 $(PORTABLE_DEFS)
 
 # Bare-metal kernel target (OFI-167 / kernel milestone 1): a freestanding aarch64 image booted under
@@ -106,9 +112,9 @@ KERNEL_ELF      := kernel/kernel.elf
 # Opt-in only — the default build stays dependency-free, so `make` / `make test` never need
 # libcurl. libcurl's headers aren't held to our -Werror, so this build uses -Wall -Wextra only.
 # (The combined net+graphics build for the desktop app is `make net-graphics`.)
-NET_BIN          := build/emberc-net
+NET_BIN          := build/inglec-net
 NET_FLAGS        := -std=c17 -Wall -Wextra -Iinclude -O2 -DNDEBUG -DEMBER_NET=1 $(PORTABLE_DEFS)
-NETGFX_BIN       := build/emberc-net-gfx
+NETGFX_BIN       := build/inglec-net-gfx
 # The desktop app also builds with -DEMBER_PARALLEL so it can run its blocking HTTPS fetch on a
 # spawned worker fiber (its own OS thread) while the raylib render loop stays responsive on the
 # main thread — see public/claude-desktop/gui.em (nursery + try_recv). pthread is in libc on
@@ -119,8 +125,8 @@ NETGFX_FLAGS     := -std=c17 -Wall -Wextra -Iinclude -O2 -DNDEBUG -DEMBER_NET=1 
 # the VENDORED SQLite amalgamation (third_party/sqlite). Unlike net/graphics this needs no system
 # package — SQLite is two checked-in files — so `make db` works on any machine, dependency-free. The
 # default build stays SQL-free, so `make` / `make test` never compile sqlite3.c. Run a program with:
-#   build/emberc-db --emit=run <file.em>
-DB_BIN       := build/emberc-db
+#   build/inglec-db --emit=run <file.em>
+DB_BIN       := build/inglec-db
 DB_FLAGS     := -std=c17 -Wall -Wextra -Iinclude -O2 -DNDEBUG -DEMBER_SQLITE=1 $(PORTABLE_DEFS)
 # sqlite3.c is third-party C: compiled once into its own object with its own flags (NOT held to our
 # -Werror). THREADSAFE=0 (the VM running std/sqlite is single-threaded) and no extension loader, so
@@ -134,9 +140,9 @@ SQLITE_CFLAGS := -std=c17 -O2 -DNDEBUG -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_
 # heap-overflow with a stack trace. -O1 keeps traces readable at usable speed. NOTE: LeakSanitizer is
 # unsupported on macOS, so leaks stay RSS-verified — ASan covers the temporal/spatial bugs RSS can't.
 # asan-par adds -DEMBER_PARALLEL=1 to exercise the channel/nursery cross-thread paths under ASan.
-ASAN_BIN       := build/emberc-asan
+ASAN_BIN       := build/inglec-asan
 ASAN_FLAGS     := -std=c17 -Wall -Wextra -Werror -Iinclude -O1 -g -fsanitize=address -fno-omit-frame-pointer $(PORTABLE_DEFS)
-ASAN_PAR_BIN   := build/emberc-asan-par
+ASAN_PAR_BIN   := build/inglec-asan-par
 ASAN_PAR_FLAGS := -std=c17 -Wall -Wextra -Werror -Iinclude -O1 -g -fsanitize=address -fno-omit-frame-pointer -DEMBER_PARALLEL=1 $(PORTABLE_DEFS) -pthread
 
 SOURCES := $(wildcard src/*.c)
@@ -156,6 +162,7 @@ all: $(BIN) $(RT_LIB) $(RT_LIB_PAR)
 
 $(BIN): $(OBJECTS)
 	$(CC) $(CFLAGS) $(OBJECTS) $(LDLIBS_MATH) -o $@
+	@$(call LINK_COMPAT,$@)
 
 build/%.o: src/%.c | build
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -228,22 +235,26 @@ test-lsp: all
 # builds are infrequent), so it always reflects the current source.
 release: | build
 	$(CC) $(RELEASE_FLAGS) $(SOURCES) $(LDLIBS_MATH) -o $(RELEASE_BIN)
+	@$(call LINK_COMPAT,$(RELEASE_BIN))
 
 # AddressSanitizer compilers (see ASAN_FLAGS). Run the suite under one with:
-#   make asan && ASAN_OPTIONS=detect_leaks=0 build/emberc-asan --emit=run <file.em>
+#   make asan && ASAN_OPTIONS=detect_leaks=0 build/inglec-asan --emit=run <file.em>
 # Single invocation like release so the instrumented objects never collide with the dev build's.
 asan: | build
 	$(CC) $(ASAN_FLAGS) $(SOURCES) $(LDLIBS_MATH) -o $(ASAN_BIN)
+	@$(call LINK_COMPAT,$(ASAN_BIN))
 
 asan-par: | build
 	$(CC) $(ASAN_PAR_FLAGS) $(SOURCES) $(LDLIBS_MATH) -o $(ASAN_PAR_BIN)
+	@$(call LINK_COMPAT,$(ASAN_PAR_BIN))
 
 # The "memory tape": ASan + the reclaim double-drop detector (-DEMBER_DROP_TRACE). The pool hides a
 # use-after-free from plain ASan (it recycles, not free()s), so the detector stamps a sentinel after
 # each reclaim and aborts with both drop sites if an object is reclaimed twice. This caught OFI-058.
-# Run: ASAN_OPTIONS=detect_leaks=0 build/emberc-trace --emit=run <file.em>
+# Run: ASAN_OPTIONS=detect_leaks=0 build/inglec-trace --emit=run <file.em>
 asan-trace: | build
-	$(CC) $(ASAN_FLAGS) -DEMBER_DROP_TRACE=1 $(SOURCES) $(LDLIBS_MATH) -o build/emberc-trace
+	$(CC) $(ASAN_FLAGS) -DEMBER_DROP_TRACE=1 $(SOURCES) $(LDLIBS_MATH) -o build/inglec-trace
+	@$(call LINK_COMPAT,build/inglec-trace)
 
 # Install a release build to a central, self-contained toolchain dir (default ~/.ember) so editors
 # and tools find it from ANY folder: the binary lands at $(PREFIX)/bin/emberc and the stdlib at
@@ -300,7 +311,7 @@ install-zed: build-zed
 # hit (Homebrew's `rust` has no rustup, so the wasm target can't be added). Sources ~/.cargo/env so
 # a rustup install is found even though make runs /bin/sh, not the login shell.
 doctor: all
-	@build/emberc --doctor
+	@build/inglec --doctor
 	@printf '\nZed extension toolchain (only needed to BUILD the Zed extension):\n'
 	@. "$$HOME/.cargo/env" 2>/dev/null; \
 	 if command -v rustup >/dev/null 2>&1 && rustup target list --installed 2>/dev/null | grep -q wasm32-wasip1; then \
@@ -331,7 +342,7 @@ help:
 	@echo "Ember build commands — make <target>:"
 	@echo ""
 	@echo "  Build & run"
-	@echo "    make                  build the dev compiler (build/emberc)"
+	@echo "    make                  build the dev compiler (build/inglec)"
 	@echo "    make release          optimized build         make parallel   multicore build (1:1)"
 	@echo "    make mn               M:N green-thread scheduler build (OFI-071; gated/experimental)"
 	@echo "    make mn-net-graphics  M:N + networking + raylib (run the Flare Claude app on M:N)"
@@ -362,49 +373,59 @@ help:
 # always reflects current source and never collides with the dev -O0 objects.
 parallel: | build
 	$(CC) $(PARALLEL_FLAGS) $(SOURCES) $(LDLIBS_MATH) -o $(PARALLEL_BIN)
+	@$(call LINK_COMPAT,$(PARALLEL_BIN))
 
 # M:N scheduler compiler (see MN_FLAGS). Single invocation like `parallel`.
 mn: | build
 	$(CC) $(MN_FLAGS) $(SOURCES) $(LDLIBS_MATH) -o $(MN_BIN)
+	@$(call LINK_COMPAT,$(MN_BIN))
 
 # TSan / ASan over the M:N runtime (scheduler race + use-after-free gates).
 tsan-mn: | build
 	$(CC) $(TSAN_MN_FLAGS) $(SOURCES) $(LDLIBS_MATH) -o $(TSAN_MN_BIN)
+	@$(call LINK_COMPAT,$(TSAN_MN_BIN))
 
 asan-mn: | build
 	$(CC) $(ASAN_MN_FLAGS) $(SOURCES) $(LDLIBS_MATH) -o $(ASAN_MN_BIN)
+	@$(call LINK_COMPAT,$(ASAN_MN_BIN))
 
 # M:N scheduler + graphics (and + networking) compilers — run the GUI apps on M:N. Single invocation
-# like `graphics`/`net-graphics`. Run: build/emberc-mn-net-gfx --emit=run <app.em>
+# like `graphics`/`net-graphics`. Run: build/inglec-mn-net-gfx --emit=run <app.em>
 mn-graphics: | build
 	$(CC) $(MN_GFX_FLAGS) `pkg-config --cflags raylib freetype2` $(SOURCES) `pkg-config --libs raylib freetype2` $(LDLIBS_MATH) -o $(MN_GFX_BIN)
+	@$(call LINK_COMPAT,$(MN_GFX_BIN))
 
 mn-net-graphics: | build
 	$(CC) $(MN_NETGFX_FLAGS) `curl-config --cflags` `pkg-config --cflags raylib freetype2` $(SOURCES) `curl-config --libs` `pkg-config --libs raylib freetype2` $(LDLIBS_MATH) -o $(MN_NETGFX_BIN)
+	@$(call LINK_COMPAT,$(MN_NETGFX_BIN))
 
 # Graphics compiler (see GRAPHICS_FLAGS). Links raylib + FreeType (hinted text) via pkg-config;
-# single invocation like release. Run a demo with: build/emberc-gfx --emit=run <file.em>
+# single invocation like release. Run a demo with: build/inglec-gfx --emit=run <file.em>
 graphics: $(RT_LIB_NETGFX) | build
 	$(CC) $(GRAPHICS_FLAGS) `pkg-config --cflags raylib freetype2` $(SOURCES) `pkg-config --libs raylib freetype2` $(LDLIBS_MATH) -o $(GRAPHICS_BIN)
+	@$(call LINK_COMPAT,$(GRAPHICS_BIN))
 
 # Networking compiler (see NET_FLAGS): links libcurl via curl-config, registers the http_post
-# FFI wrapper. Run an HTTPS program with: build/emberc-net --emit=run <file.em>
+# FFI wrapper. Run an HTTPS program with: build/inglec-net --emit=run <file.em>
 net: | build
 	$(CC) $(NET_FLAGS) `curl-config --cflags` $(SOURCES) `curl-config --libs` $(LDLIBS_MATH) -o $(NET_BIN)
+	@$(call LINK_COMPAT,$(NET_BIN))
 
 # Combined networking + graphics compiler — the desktop app (public/) needs both: HTTPS for
-# the Anthropic API and raylib for the GUI. Run with: build/emberc-net-gfx --emit=run <file.em>
+# the Anthropic API and raylib for the GUI. Run with: build/inglec-net-gfx --emit=run <file.em>
 net-graphics: $(RT_LIB_NETGFX) | build
 	$(CC) $(NETGFX_FLAGS) `curl-config --cflags` `pkg-config --cflags raylib freetype2` $(SOURCES) `curl-config --libs` `pkg-config --libs raylib freetype2` $(LDLIBS_MATH) -o $(NETGFX_BIN)
+	@$(call LINK_COMPAT,$(NETGFX_BIN))
 
 # The vendored SQLite amalgamation, compiled once into its own object (third-party, not -Werror).
 $(SQLITE_OBJ): third_party/sqlite/sqlite3.c third_party/sqlite/sqlite3.h | build
 	$(CC) $(SQLITE_CFLAGS) -c third_party/sqlite/sqlite3.c -o $(SQLITE_OBJ)
 
 # Database compiler (see DB_FLAGS): registers the std/sqlite FFI wrappers and links the vendored
-# SQLite object. Run a SQL program with: build/emberc-db --emit=run <file.em>
+# SQLite object. Run a SQL program with: build/inglec-db --emit=run <file.em>
 db: $(SQLITE_OBJ) | build
 	$(CC) $(DB_FLAGS) -Ithird_party/sqlite $(SOURCES) $(SQLITE_OBJ) $(LDLIBS_MATH) -o $(DB_BIN)
+	@$(call LINK_COMPAT,$(DB_BIN))
 
 # Database regression suite (std/sqlite). Needs the db build, so it is separate from the
 # dependency-free `make test`; each case runs against a scratch DB under the system temp dir.
@@ -457,7 +478,7 @@ test-net: net
 
 # Self-hosting bootstrap differential (docs/design/self-hosting.md). Runs the compiler-shaped programs
 # under tests/selfhost/ on BOTH backends and requires byte-identical stdout — the drift guard for the
-# staged port of the compiler into Ember. Depends on `all` so build/emberc and the runtime static libs
+# staged port of the compiler into Ember. Depends on `all` so build/inglec and the runtime static libs
 # (needed by `emberc -o`'s native link) exist; dependency-free, no display/libs.
 selfhost: all
 	@tests/run-selfhost.sh
