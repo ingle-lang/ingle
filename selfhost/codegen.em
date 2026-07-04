@@ -5362,6 +5362,20 @@ struct Chunk {
             case _ {
             }
         }
+        if no_incref == false && self.arg_reads_boxed_struct(e) {
+            // A BOXED all-scalar struct VALUE (a field read `self.style`, a boxed `var` local) passed to a
+            // CONCRETE (non-erased) param is FLATTENED to its leaf slots — an all-scalar struct is MULTI-SLOT at
+            // a plain-borrow param position, so the boxed value is read then UNBOX_STRUCT'd (a multi-slot local
+            // is already spread by the EIdent case; a struct-returning call is already multi-slot). Suppressed
+            // for an erased param (no_incref), where the struct stays boxed.
+            let bsid = self.expr_type_kind(e)
+            if bsid >= 0 && bsid < self.st_names.len() && self.struct_all_scalar(bsid) {
+                self.gen_expr(e, line)
+                self.emit(OP_UNBOX_STRUCT)
+                self.emit_idx(bsid)
+                return self.struct_field_count(bsid)
+            }
+        }
         if no_incref == false && self.arg_needs_incref(e) {
             // a refcounted value passed to an owned param keeps the caller's reference -> INCREF (the callee
             // drops its copy). Covers a string/enum local AND a string PLACE read (field / `arr[i]` element).
@@ -5373,6 +5387,21 @@ struct Chunk {
         }
         self.gen_expr(e, line)
         return 1
+    }
+
+
+    // arg_reads_boxed_struct reports whether a call arg reads a BOXED struct value — a struct FIELD read
+    // (`self.style`, a materialised boxed copy) or a BOXED (`var`) struct local. A multi-slot struct local is
+    // spread by the EIdent case above; a struct-returning call already delivers multi-slot slots.
+    fn arg_reads_boxed_struct(self, e: ps.Expr) -> bool {
+        match e {
+            case EGet(object, name) {
+                return true
+            }
+            case _ {
+                return false
+            }
+        }
     }
 
 
@@ -6935,6 +6964,7 @@ struct Chunk {
         self.slot_boxed.append(false)
         self.slot_array.append(false)
         self.slot_elem.append(0 - 1)
+        self.slot_elem_targs.append("")     // keep parallel to slot_elem (else slot_elem_targs[slot] OOBs)
         self.slot_kind.append(0)
         self.slot_iface.append(ifn)
     }
