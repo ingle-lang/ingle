@@ -3635,6 +3635,7 @@ struct Chunk {
         let inc = self.is_str_local_read(e)
         let mvslot = self.move_local_slot(e)
         let barr = self.is_borrowed_array_read(e)
+        let bstruct = self.is_borrowed_struct_read(e)
         self.gen_expr(e, line)
         if inc {
             self.emit(OP_INCREF)
@@ -3647,6 +3648,8 @@ struct Chunk {
             self.emit(OP_POP)
         } else if barr {
             self.emit(OP_INCREF)                     // a BORROWED array (a borrow param) aliased into an OWNER
+        } else if bstruct {
+            self.emit(OP_INCREF)                     // a BORROWED boxed struct aliased into an OWNER (moves_local==2)
         }
     }
 
@@ -3659,6 +3662,23 @@ struct Chunk {
             case EIdent(name) {
                 let slot = self.resolve_slot(name)
                 return slot >= 0 && self.slot_array[slot] && self.local_drop[slot] == false
+            }
+            case _ {
+                return false
+            }
+        }
+    }
+
+
+    // is_borrowed_struct_read reports whether `e` reads a BORROWED boxed-struct local (a boxed-struct param —
+    // slot_struct set, boxed, not droppable). Consuming one into a new OWNER (a struct field value, a return)
+    // keeps the borrow's reference, so it INCREFs — the moves_local==2 rule for a refcounted place, extended
+    // from strings/enums/arrays to boxed structs (an OWNED boxed-struct `let` is MOVED via move_local_slot).
+    fn is_borrowed_struct_read(self, e: ps.Expr) -> bool {
+        match e {
+            case EIdent(name) {
+                let slot = self.resolve_slot(name)
+                return slot >= 0 && self.slot_struct[slot] >= 0 && self.slot_boxed[slot] && self.local_drop[slot] == false
             }
             case _ {
                 return false

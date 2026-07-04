@@ -3962,10 +3962,12 @@ struct CgcGen {
                     }
                     case EIndex(object, index) {
                         // Element mutation `arr[i] = v` → em_set_index (bounds-checked; drops the old element,
-                        // moves the new value in). Object/index/value emitted in source order (OFI-166).
+                        // moves the new value in). Object/index/value emitted in source order (OFI-166). The
+                        // array CONSUMES the value (a refcounted string/enum/array/struct is own_into_slot'd in,
+                        // exactly like `.append(v)`) — emit_consume_arg, not a raw read (closes OFI-166/173).
                         let o = self.emit_expr(object.value)
                         let ix = self.emit_expr(index.value)
-                        let val = self.emit_expr(value.value)
+                        let val = self.emit_consume_arg(value.value)
                         println("{self.ind()}em_set_index(&g_em, {o}, {ix}, {val});")
                     }
                     case EGet(object, name) {
