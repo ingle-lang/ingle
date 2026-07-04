@@ -62,7 +62,7 @@ Two distinct things — don't conflate them:
 ## Layout (intended — build out as we go)
 
 ```
-ember/
+ingle/
   CLAUDE.md        — this file
   MANIFESTO.md     — language design philosophy and the "improve on Rust" decisions
   docs/            — language spec (language.md, grammar.ebnf) + architecture.md (compiler/toolchain decisions)

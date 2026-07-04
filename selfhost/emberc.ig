@@ -1,4 +1,4 @@
-// selfhost/inglec.ig — the UNIFIED self-hosted compiler: lex → parse → CHECK → codegen → SERIALIZE, run
+// selfhost/emberc.ig — the UNIFIED self-hosted compiler: lex → parse → CHECK → codegen → SERIALIZE, run
 // as ONE program (the per-stage `*_dump.ig` drivers each run only a slice for the differentials). It
 // type-checks the entry program — rejecting an ill-typed one with exit 65, exactly like stage-0's check
 // error — then, given an output path, emits a RUNNABLE `.igb` bytecode container (docs/design/bytecode-
@@ -7,8 +7,8 @@
 // This is the standalone-bootstrap milestone: the self-hosted compiler as a single program that produces
 // executable bytecode. It runs on the stage-0 VM and compiles to a native self-built compiler BINARY:
 //
-//   inglec --emit=run selfhost/inglec.ig <file.ig>                    # disassembly, on the stage-0 VM
-//   inglec -o inglec-self selfhost/inglec.ig                          # a self-built compiler binary
+//   inglec --emit=run selfhost/emberc.ig <file.ig>                    # disassembly, on the stage-0 VM
+//   inglec -o inglec-self selfhost/emberc.ig                          # a self-built compiler binary
 //   ./inglec-self <file.ig> <out.igb> && inglec --run-bytecode out.igb  # emit + run a bytecode image
 //
 // The checker is single-module and lenient about imports (mirrors check_dump.ig); codegen + serialize run

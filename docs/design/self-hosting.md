@@ -11,9 +11,9 @@
 > pipeline is gated by `make selfhost` (**1139 checks, 0 failures**) and folded into `make verify`. The
 > remaining work is **checker completeness** (the 7 not-yet-rejected invalid files; it never false-rejects,
 > so it already compiles every valid program including itself) and finishing the **standalone bootstrap**.
-> **The first bootstrap milestone has LANDED:** `selfhost/inglec.ig` is the UNIFIED self-hosted compiler —
+> **The first bootstrap milestone has LANDED:** `selfhost/emberc.ig` is the UNIFIED self-hosted compiler —
 > the whole pipeline (lex → parse → **check** → codegen) as ONE program, compiled to a native self-built
-> compiler **binary** (`inglec -o inglec-self selfhost/inglec.ig`). It rejects an ill-typed program with
+> compiler **binary** (`inglec -o inglec-self selfhost/emberc.ig`). It rejects an ill-typed program with
 > exit 65, emits valid programs' bytecode byte-identically to stage-0, and **reproduces all four of its own
 > modules byte-identically** — gated as Stage 5 of `make selfhost` (**1147/0**). The remaining bootstrap
 > step is making the emitted bytecode *runnable* (a serialization format + a stage-0 loader, or an M5
@@ -677,7 +677,7 @@ The VM fixed point is reached and the M3b ownership dataflow has shipped, so the
    ECall` change), plus a parse-time literal-range check (`int_literal_range`, a lexer/parser change). Then
    **M3c** — exact message + position parity over the error files (prerequisite: extend the parser AST to
    carry `line:col`; adding positions won't change `ast_print`, so M2 stays green).
-3. **The standalone bootstrap — STARTED.** **Step 1 LANDED:** `selfhost/inglec.ig`, the UNIFIED driver
+3. **The standalone bootstrap — STARTED.** **Step 1 LANDED:** `selfhost/emberc.ig`, the UNIFIED driver
    (lex → parse → check → codegen as one program), compiled to a native self-built compiler binary that
    rejects ill-typed programs (exit 65), emits valid bytecode byte-identical to stage-0, and reproduces all
    four of its own modules (gated, Stage 5 of `make selfhost`). **Step 2 — the M5 C-emit backend — IN

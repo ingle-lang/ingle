@@ -80,7 +80,7 @@ int main(void) {
     L("  \"$schema\": \"https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json\",");
     L("  \"name\": \"Ingle\",");
     L("  \"scopeName\": \"source.ember\",");
-    L("  \"fileTypes\": [\"em\"],");
+    L("  \"fileTypes\": [\"ig\"],");
     L("  \"patterns\": [");
     L("    { \"include\": \"#comments\" },");
     L("    { \"include\": \"#strings\" },");

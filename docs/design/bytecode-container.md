@@ -11,7 +11,7 @@
 Today the self-hosted pipeline reaches two fixed points, but neither yields a *runnable* artifact from
 Ingle-only code:
 
-- `selfhost/inglec.ig` (lex → parse → **check** → codegen) emits stage-0's `--emit=bytecode`
+- `selfhost/emberc.ig` (lex → parse → **check** → codegen) emits stage-0's `--emit=bytecode`
   **disassembly text** — verifiable, but not executable.
 - `selfhost/cgen_c.ig` emits real C that compiles to a binary, but **skips the checker** and needs a C
   compiler present to run anything.
