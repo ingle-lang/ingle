@@ -272,7 +272,7 @@ install: release
 	cp $(RELEASE_BIN) "$(PREFIX)/bin/inglec"
 	ln -sf inglec "$(PREFIX)/bin/emberc"
 	cp std/*.ig "$(PREFIX)/std/"
-	@echo "installed inglec (+ emberc alias) + std to $(PREFIX)  (VS Code: emberLsp.serverPath = $(PREFIX)/bin/inglec)"
+	@echo "installed inglec (+ emberc alias) + std to $(PREFIX)  (VS Code: ingleLsp.serverPath = $(PREFIX)/bin/inglec)"
 
 # Deploy the VS Code extension. The CANONICAL SOURCE is editors/vscode/ in this repo.
 # IMPORTANT: modern VS Code (1.74+) does NOT scan ~/.vscode/extensions on startup — it

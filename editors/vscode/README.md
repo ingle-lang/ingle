@@ -7,7 +7,7 @@ intentional editor *glue* — the actual language intelligence lives in the comp
 | File | Role |
 |------|------|
 | `extension.js` | Thin launcher: starts `inglec --lsp` over stdio and brokers JSON-RPC via `vscode-languageclient`. |
-| `package.json` | Manifest: declares the `ember` language (`.ig`), the TextMate grammar, and the `emberLsp.*` settings. |
+| `package.json` | Manifest: declares the `ember` language (`.ig`), the TextMate grammar, and the `ingleLsp.*` settings. |
 | `language-configuration.json` | Brackets, comments (`//`), auto-closing/surrounding pairs. |
 | `syntaxes/ember.tmLanguage.json` | TextMate grammar — **syntax highlighting** (keywords, types, strings + interpolation, contracts, builtins, numbers, operators). **Generated — do not edit by hand** (see below). |
 

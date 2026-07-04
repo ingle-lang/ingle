@@ -31,12 +31,12 @@
     "configuration": {
       "title": "Ingle",
       "properties": {
-        "emberLsp.serverPath": {
+        "ingleLsp.serverPath": {
           "type": "string",
           "default": "",
           "description": "Absolute path to the inglec binary (started with --lsp). Leave empty to use the default install location (~/.ingle/bin/inglec, where `make install` deploys it)."
         },
-        "emberLsp.stdPath": {
+        "ingleLsp.stdPath": {
           "type": "string",
           "default": "",
           "description": "Path to the Ingle standard library (passed as INGLE_STD). Leave empty to use the default install location (~/.ingle/std)."
