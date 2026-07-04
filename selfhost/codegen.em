@@ -5244,6 +5244,37 @@ struct Chunk {
 
     // gen_call_args_e is gen_call_args with a per-EXPLICIT-param erasure mask (`erase[a]=='1'` -> the callee's
     // param `a` is a bare erased type-param, so a string arg BORROWS it and is NOT incref'd — stage-0's rule).
+    // expr_line returns an expression's own SOURCE line — the line of its leftmost boxed sub-node (which the
+    // parser stamped with its start token), or `fallback` for a bare leaf (EIdent / literal, which carry no
+    // box). Stage-0 stamps every AST node with e->line; a MULTI-LINE call's later-line arg (`self.style.pad`
+    // wrapped onto the next line) must get its own line, not the call's — this recovers that without boxing args.
+    fn expr_line(self, e: ps.Expr, fallback: int) -> int {
+        match e {
+            case EGet(object, name) {
+                return object.line
+            }
+            case EBinary(op, l, r) {
+                return l.line
+            }
+            case EIndex(object, index) {
+                return object.line
+            }
+            case EUnary(op, operand) {
+                return operand.line
+            }
+            case ECall(callee, args) {
+                return callee.line
+            }
+            case ETry(operand) {
+                return operand.line
+            }
+            case _ {
+                return fallback
+            }
+        }
+    }
+
+
     fn gen_call_args_e(mut self, args: [ps.Expr], line: int, erase: string) -> int {
         let em = erase.bytes()
         var total = 0
@@ -5256,7 +5287,7 @@ struct Chunk {
             if a < em.len() && int(em[a]) == 49 {    // '1' == 49
                 no_incref = true
             }
-            total = total + self.gen_one_arg_e(args[a], line, no_incref)
+            total = total + self.gen_one_arg_e(args[a], self.expr_line(args[a], line), no_incref)
             a = a + 1
         }
         return total
@@ -5455,10 +5486,9 @@ struct Chunk {
                 if a >= args.len() {
                     break
                 }
-                self.gen_expr(args[a], line)
+                self.gen_expr(args[a], self.expr_line(args[a], line))
                 a = a + 1
             }
-            self.cur_line = line
             self.emit(OP_CALL_NATIVE)
             self.emit_idx(nid)
             self.emit_idx(args.len())
@@ -5470,7 +5500,7 @@ struct Chunk {
                 break
             }
             if masked[k] {
-                self.gen_expr(args[k], line)
+                self.gen_expr(args[k], self.expr_line(args[k], line))
             }
             k = k + 1
         }
@@ -5486,12 +5516,11 @@ struct Chunk {
                 self.emit_idx(keep + built - 1 - t_seen)
                 t_seen = t_seen + 1
             } else {
-                self.gen_expr(args[b], line)
+                self.gen_expr(args[b], self.expr_line(args[b], line))
             }
             built = built + 1
             b = b + 1
         }
-        self.cur_line = line
         self.emit(OP_CALL_NATIVE)
         self.emit_idx(nid)
         self.emit_idx(args.len())
