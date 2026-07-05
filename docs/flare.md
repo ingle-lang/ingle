@@ -300,8 +300,14 @@ code blocks in a monospace panel syntax-highlighted by `std/highlight` — whose
 select, Shift to extend, Ctrl/Cmd+A selects the block, Ctrl/Cmd+C copies, alongside the per-block Copy button
 (read-only, reusing the field caret/selection/clipboard machinery; selection is per-block for now)),
 `code(key, lang, src, width)` (ONE standalone monospace, syntax-highlighted, selectable code panel — the
-same machinery markdown's fenced blocks ride, exposed for apps whose code IS the content: Inglenook's file
-viewer panes are this widget; `key` must be frame-stable, `lang` feeds `std/highlight`),
+same machinery markdown's fenced blocks ride, exposed for apps whose code IS the content: a read-only file
+viewer; `key` must be frame-stable, `lang` feeds `std/highlight`),
+`code_editor(key, lang, value) -> string` (an **editable** code editor: a line-number gutter beside
+syntax-highlighted, internally-scrolled source with a live caret, full selection/clipboard, Tab-indents,
+and Enter that copies the current line's indent; round-trips its text like `text_area` — `src =
+f.code_editor("main", "ember", src)` — and **virtualizes**, painting only the visible lines so a thousand-line
+file costs a screenful; it GROWS to fill its slot, and keeps independent scroll per `key`. Inglenook's two
+editor panes are this widget),
 `text_field(key, value) -> string` + `submit() -> bool` (Enter committed, clears the field),
 `text_area(key, value) -> string` (a MULTI-LINE field that auto-grows to its content then scrolls — wrapped
 visual lines, a 2D caret with ↑/↓ navigation, full selection/clipboard; **Shift+Enter inserts a newline**,

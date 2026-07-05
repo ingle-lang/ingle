@@ -98,6 +98,8 @@ let _SLIDER = 50        // a horizontal value track + draggable knob (text = fil
 let _DROPDOWN = 51      // a collapsed selector box: left label + right "▾" chevron (opens a popover list)
 let _TAB = 52          // a tab chip (inactive): bar fill, muted label, a trailing "×" close zone
 let _TAB_ON = 53       // …the active tab chip: panel fill, ink label, an accent underline
+let _EDITOR = 54       // an editable monospace code editor: line-number gutter + highlighted, scrolled lines
+                       // (text = source; id = packed "lang\nwidget-id\ngutter\nhoff\nvoff")
 
 // HANDLE_W is the on-screen thickness (px) of a splitter's hit band — wide enough to grab, a hairline to look
 // at. Public so a caller can account for it when computing the remaining content width beside a resized pane.
@@ -251,6 +253,24 @@ fn _strip(s: string) -> string {
 fn spinner(tick: int) -> string {
     let frames = ["-", "\\", "|", "/"]
     return frames[(tick / 6) % 4]
+}
+
+
+// _gutter_w is the pixel width of a code editor's line-number gutter for a `nlines`-line file at char
+// size `cs`: enough monospace digits for the largest line number, plus a pad each side. The MONO font
+// must be active for the measure — the code_editor method and its painter both call it under set_font.
+// Kept a free function so input (scroll math) and paint compute the identical gutter and never disagree.
+fn _gutter_w(nlines: int, cs: int, pad: int) -> int {
+    var digits = 1
+    var n = nlines
+    loop {
+        if n < 10 {
+            break
+        }
+        digits = digits + 1
+        n = n / 10
+    }
+    return digits * measure_text("0", cs) + pad * 2
 }
 
 
@@ -3245,6 +3265,82 @@ struct Flare {
     }
 
 
+    // code_editor is an EDITABLE monospace code editor: a line-number gutter beside syntax-highlighted,
+    // internally-scrolled source with a live caret, full selection/clipboard, Tab-indents, and Enter that
+    // keeps the block's indentation. It round-trips its value like text_area — `src = f.code_editor("main",
+    // "ember", src)` — so the app owns the text; the widget owns only its scroll (kept in encapsulated
+    // state, so two editors keep independent positions) and drives it to follow the caret. It GROWS to
+    // fill its slot (put it in a panel/column that stretches) and VIRTUALIZES — only the visible lines are
+    // highlighted and painted, so a thousand-line file costs the same as a screenful. Input runs now
+    // against last frame's rect (mono font active for the hit-test); paint is deferred to the solved rect.
+    fn code_editor(mut self, key: string, lang: string, value: string) -> string {
+        self._ensure_fonts()
+        let id  = self.scope + key
+        let wid = self.ui.wid(key)
+        let cs  = self.ui.style.text_size - 1
+        let lh  = cs + cs / 2
+        let pad = self.ui.style.pad
+        var voff = self.state_int(key + "/voff", 0)     // scroll persists per-editor (encapsulated state)
+        var hoff = self.state_int(key + "/hoff", 0)
+        var shown = value
+        let nlines = value.split("\n").len()
+        if !(self._modal && !self._in_modal) {          // inert while a modal covers the app
+            match self.rects.get(id) {
+                case Some(r) {
+                    var mslot = self.mono
+                    if mslot < 0 {
+                        mslot = 0
+                    }
+                    set_font(mslot)                     // mono active: the (mx,my)->caret hit-test + measures
+                    let gutw = _gutter_w(nlines, cs, pad)
+                    let gx0  = r.x + pad + gutw          // text origin (past the gutter), unshifted
+                    let ty0  = r.y + pad
+                    shown = self.ui._code_edit(wid, r.x, r.y, r.w, r.h, gx0 - hoff, ty0 - voff, cs, lh, value)
+                    if self.ui.focus == wid {           // caret-follow scroll (in px), clamped to content
+                        let boxh = r.h - pad * 2
+                        let boxw = r.w - pad * 2 - gutw
+                        let crow = ui.code_row_of(shown, self.ui.caret)
+                        let cpx  = self.ui._code_caret_x(shown, cs)
+                        let cy   = crow * lh
+                        if cy - voff < 0 {
+                            voff = cy
+                        }
+                        if cy + lh - voff > boxh {
+                            voff = cy + lh - boxh
+                        }
+                        var maxv = (nlines * lh) - boxh
+                        if maxv < 0 {
+                            maxv = 0
+                        }
+                        if voff > maxv {
+                            voff = maxv
+                        }
+                        if voff < 0 {
+                            voff = 0
+                        }
+                        if cpx - hoff < 0 {
+                            hoff = cpx
+                        }
+                        if cpx - hoff > boxw {
+                            hoff = cpx - boxw
+                        }
+                        if hoff < 0 {
+                            hoff = 0
+                        }
+                        self.set_int(key + "/voff", voff)
+                        self.set_int(key + "/hoff", hoff)
+                    }
+                    set_font(0)
+                }
+                case None {}
+            }
+        }
+        let node = self.lo.leaf(0, lh * 3 + pad * 2, 1)   // STRETCH width, GROW to fill the slot's height
+        self._queue(node, _EDITOR, shown, id)
+        return shown
+    }
+
+
     // _code_block reserves a full-width monospace panel sized to the source's line count, and makes its text
     // SELECTABLE: it runs the read-only selection input (drag-select, Ctrl/Cmd+A, Ctrl/Cmd+C) against LAST
     // frame's solved rect — the same input-now/paint-later split the text fields use, so click/keys are known
@@ -3358,6 +3454,155 @@ struct Flare {
             }
             base = base + cpn + 1
             li = li + 1
+        }
+        clip_pop()
+        set_font(0)
+    }
+
+
+    // _paint_code_editor draws the editable code editor at its solved rect: a recessed surface, a line-
+    // number gutter, then the source as monospace highlighted lines shifted by the editor's scroll, with
+    // a translucent selection underlay and a blinking caret when focused. It VIRTUALIZES — only the lines
+    // whose rows fall in the viewport are highlighted + drawn (plus one of overscan each side), so a huge
+    // file paints like a screenful. `pid` is the packed "lang\nwidget-id"; the scroll (voff/hoff, px) is
+    // read from the widget's encapsulated state by that id, and the gutter is recomputed to match input.
+    fn _paint_code_editor(mut self, src: string, pid: string, x: int, y: int, w: int, h: int) {
+        let st = self.ui.style
+        let cs = st.text_size - 1
+        let lh = cs + cs / 2
+        let pad = st.pad
+        let parts = pid.split("\n")
+        var lang = ""
+        var wkey = ""
+        if parts.len() > 0 {
+            lang = parts[0]
+        }
+        if parts.len() > 1 {
+            wkey = parts[1]
+        }
+        let voff = self.state_int(wkey + "/voff", 0)     // absolute id-key (scope is "" at paint) — see code_editor
+        let hoff = self.state_int(wkey + "/hoff", 0)
+        let focused = self.ui.focus == hash(wkey)
+        var lo = self.ui.sel_anchor
+        var hi = self.ui.caret
+        if lo > hi {
+            lo = self.ui.caret
+            hi = self.ui.sel_anchor
+        }
+        let has_sel = focused && lo != hi
+        let lines = src.split("\n")
+        let gutw = _gutter_w(lines.len(), cs, pad)
+
+        fill_round(x, y, w, h, st.radius, ui.shade(st.bg, 0 - 6), 255)   // recessed surface
+        stroke_round(x, y, w, h, st.radius, 1, st.border, 150)
+        var mslot = self.mono
+        if mslot < 0 {
+            mslot = 0
+        }
+        set_font(mslot)
+
+        let tx0 = x + pad + gutw - hoff                  // text origin x (past the gutter), scrolled
+        let ty0 = y + pad - voff                         // text origin y, scrolled
+        let boxh = h - pad * 2
+        let space_w = measure_text(" ", cs)
+        var first = (voff - lh) / lh                     // virtualize: only rows in the viewport (+1 overscan)
+        if first < 0 {
+            first = 0
+        }
+        var last = (voff + boxh) / lh + 1
+        if last > lines.len() {
+            last = lines.len()
+        }
+
+        // base code-point offset of the first drawn line (walk once; the lexing, not this count, is the cost)
+        var base = 0
+        var bi = 0
+        loop {
+            if bi == first {
+                break
+            }
+            base = base + str.cp_count(lines[bi]) + 1
+            bi = bi + 1
+        }
+        let first_base = base
+
+        // Gutter pass — the line-number column, clipped to the gutter so it never scrolls horizontally.
+        fill_round(x, y, gutw, h, 0, ui.shade(st.bg, 0 - 10), 255)
+        clip_push(x, y, gutw, h)
+        var gi = first
+        var gbase = first_base
+        loop {
+            if gi == last {
+                break
+            }
+            let cpn = str.cp_count(lines[gi])
+            let num = "{gi + 1}"
+            let nw = measure_text(num, cs)
+            var ncol = st.muted_ink
+            if focused && self.ui.caret >= gbase && self.ui.caret <= gbase + cpn {
+                ncol = st.ink                            // the caret's line number brightens
+            }
+            draw_text(num, x + gutw - pad - nw, ty0 + gi * lh, cs, ncol)
+            gbase = gbase + cpn + 1
+            gi = gi + 1
+        }
+        clip_pop()
+
+        // Text pass — selection underlay, highlighted spans, caret; clipped to the text COLUMN so a
+        // horizontally-scrolled long line can never paint over the gutter.
+        clip_push(x + gutw, y, w - gutw, h)
+        var li = first
+        loop {
+            if li == last {
+                break
+            }
+            let ly = ty0 + li * lh
+            let cpn = str.cp_count(lines[li])
+            let lend = base + cpn
+            if has_sel && hi > base && lo <= lend {      // selection underlay for this line (the _paint_code logic)
+                var a = lo
+                if a < base {
+                    a = base
+                }
+                var b = hi
+                if b > lend {
+                    b = lend
+                }
+                var left = 0
+                if a > base {
+                    left = measure_text(str.cp_prefix(lines[li], a - base), cs)
+                }
+                var right = left
+                if b > a {
+                    right = measure_text(str.cp_prefix(lines[li], b - base), cs)
+                }
+                if hi > lend {                           // trailing newline selected → a sliver past the text
+                    right = right + space_w
+                }
+                if right > left {
+                    fill_round(tx0 + left, ly, right - left, lh, 0, st.accent, 70)
+                }
+            }
+            // highlighted spans (per-line, like _paint_code — multi-line block comments aren't tracked)
+            let sp = hl.spans(lang, lines[li])
+            var gx = tx0
+            var si = 0
+            loop {
+                if si == sp.len() {
+                    break
+                }
+                draw_text(sp[si].text, gx, ly, cs, self._code_color(sp[si].kind))
+                gx = gx + measure_text(sp[si].text, cs)
+                si = si + 1
+            }
+            base = base + cpn + 1
+            li = li + 1
+        }
+        if focused && (self.ui.frame / 30) % 2 == 0 {    // blinking caret, on top of the glyphs
+            let crow = ui.code_row_of(src, self.ui.caret)
+            let ccol = self.ui.caret - ui.code_row_start(src, crow)
+            let cxp = measure_text(str.cp_prefix(lines[crow], ccol), cs)
+            draw_rect(tx0 + cxp, ty0 + crow * lh, 2, lh, st.accent)
         }
         clip_pop()
         set_font(0)
@@ -3753,6 +3998,8 @@ struct Flare {
             ui.card(x, y, w, h, st.panel, st, false)   // surface fill behind the panel's children
         } else if kind == _CODE {
             self._paint_code(text, id, x, y, w, h)
+        } else if kind == _EDITOR {
+            self._paint_code_editor(text, id, x, y, w, h)
         } else if kind == _QUOTE {
             // a blockquote: an accent bar + indented muted lines (text = pre-wrapped, '\n'-joined)
             let size = st.text_size

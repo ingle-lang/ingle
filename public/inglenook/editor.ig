@@ -15,17 +15,19 @@ import "std/string" as sstr
 struct Panes {
     a_paths: [string]
     a_text: [string]
+    a_dirty: [bool]
     a_active: int
     b_paths: [string]
     b_text: [string]
+    b_dirty: [bool]
     b_active: int
+    saved_path: string       // per-frame action: a file was just saved to disk → ide.ig refreshes the tree
 
 
-    // open loads `path` into `pane` (0 = top, 1 = bottom): an already-open file just refocuses
-    // its tab (contents re-read, so re-opening is also a refresh); a new one appends a tab and
-    // drops the least-recent beyond the cap.
+    // open loads `path` into `pane` (0 = top, 1 = bottom): an already-open file just refocuses its
+    // tab WITHOUT re-reading (so unsaved edits survive re-opening); a new one is read from disk,
+    // appended as a clean (not-dirty) tab, and the least-recent dropped beyond the cap.
     fn open(mut self, pane: int, path: string) {
-        let text = read_file(path)
         if pane == 0 {
             var i = 0
             loop {
@@ -33,17 +35,18 @@ struct Panes {
                     break
                 }
                 if self.a_paths[i] == path {
-                    self.a_text[i] = text
                     self.a_active = i
                     return
                 }
                 i = i + 1
             }
             self.a_paths.append(path)
-            self.a_text.append(text)
+            self.a_text.append(read_file(path))
+            self.a_dirty.append(false)
             if self.a_paths.len() > 8 {
                 self.a_paths.remove_at(0)
                 let _ = self.a_text.remove_at(0)
+                let _ = self.a_dirty.remove_at(0)
             }
             self.a_active = self.a_paths.len() - 1
         } else {
@@ -53,17 +56,18 @@ struct Panes {
                     break
                 }
                 if self.b_paths[i] == path {
-                    self.b_text[i] = text
                     self.b_active = i
                     return
                 }
                 i = i + 1
             }
             self.b_paths.append(path)
-            self.b_text.append(text)
+            self.b_text.append(read_file(path))
+            self.b_dirty.append(false)
             if self.b_paths.len() > 8 {
                 self.b_paths.remove_at(0)
                 let _ = self.b_text.remove_at(0)
+                let _ = self.b_dirty.remove_at(0)
             }
             self.b_active = self.b_paths.len() - 1
         }
@@ -71,7 +75,8 @@ struct Panes {
 
 
     // reload_if_open re-reads `path` in any pane showing it — called when the agent's write_file
-    // lands so an open file never shows stale bytes.
+    // lands so an open file matches the bytes the agent wrote (its write is authoritative, so this
+    // also clears the pane's dirty flag; a rare user-vs-agent edit conflict resolves to the agent).
     fn reload_if_open(mut self, path: string) {
         var i = 0
         loop {
@@ -80,6 +85,7 @@ struct Panes {
             }
             if self.a_paths[i] == path {
                 self.a_text[i] = read_file(path)
+                self.a_dirty[i] = false
             }
             i = i + 1
         }
@@ -90,6 +96,7 @@ struct Panes {
             }
             if self.b_paths[i] == path {
                 self.b_text[i] = read_file(path)
+                self.b_dirty[i] = false
             }
             i = i + 1
         }
@@ -151,18 +158,98 @@ struct Panes {
         }
         let path = paths[active]
         var text = ""
+        var dirty = false
         if pane == 0 {
             text = self.a_text[active]
+            dirty = self.a_dirty[active]
         } else {
             text = self.b_text[active]
+            dirty = self.b_dirty[active]
         }
-        f.scroll_begin("edscroll{pane}")
-        if lang_for(path) == "markdown" {
-            f.markdown(text, cw)
-        } else {
-            f.code("edcode{pane}", lang_for(path), text, cw)
+
+        // Toolbar: the path (with a • when modified) on the left, a Save button on the right.
+        f.row(flare.START, flare.CENTER)
+        var label = basename(path)
+        if dirty {
+            label = "• " + label
         }
-        f.scroll_end("edscroll{pane}")
+        f.text_muted(label)
+        f.spacer()
+        if dirty {
+            if f.ghost_button("Save") {
+                write_file(path, text)
+                if pane == 0 {
+                    self.a_dirty[active] = false
+                } else {
+                    self.b_dirty[active] = false
+                }
+                self.saved_path = path
+                f.toast("Saved " + basename(path))
+            }
+            f.tooltip("Write this file to disk (⌘S)")
+        }
+        f.end()
+
+        // The editable, syntax-highlighted editor — keyed by pane AND path so each open file keeps
+        // its own scroll/caret and switching tabs never carries one file's position onto another.
+        let ekey = "edcode{pane}:{path}"
+        let edited = f.code_editor(ekey, lang_for(path), text)
+        if edited != text {
+            if pane == 0 {
+                self.a_text[active] = edited
+                self.a_dirty[active] = true
+            } else {
+                self.b_text[active] = edited
+                self.b_dirty[active] = true
+            }
+        }
+    }
+
+
+    // save_active writes the active file of `pane` to disk and clears its dirty flag, returning the
+    // path saved — or "" if the pane is empty or the active file has no unsaved edits (so ⌘S over a
+    // clean file is a no-op, never touching the mtime). Drives the ⌘S shortcut from ide.ig.
+    fn save_active(mut self, pane: int) -> string {
+        if pane == 0 {
+            if self.a_active < 0 || self.a_active >= self.a_paths.len() || !self.a_dirty[self.a_active] {
+                return ""
+            }
+            write_file(self.a_paths[self.a_active], self.a_text[self.a_active])
+            self.a_dirty[self.a_active] = false
+            return self.a_paths[self.a_active]
+        }
+        if self.b_active < 0 || self.b_active >= self.b_paths.len() || !self.b_dirty[self.b_active] {
+            return ""
+        }
+        write_file(self.b_paths[self.b_active], self.b_text[self.b_active])
+        self.b_dirty[self.b_active] = false
+        return self.b_paths[self.b_active]
+    }
+
+
+    // any_dirty reports whether any open file in either pane has unsaved edits (the window-title •).
+    fn any_dirty(self) -> bool {
+        var i = 0
+        loop {
+            if i == self.a_dirty.len() {
+                break
+            }
+            if self.a_dirty[i] {
+                return true
+            }
+            i = i + 1
+        }
+        i = 0
+        loop {
+            if i == self.b_dirty.len() {
+                break
+            }
+            if self.b_dirty[i] {
+                return true
+            }
+            i = i + 1
+        }
+        return false
     }
 
 
@@ -174,6 +261,7 @@ struct Panes {
             }
             let _ = self.a_paths.remove_at(idx)
             let _ = self.a_text.remove_at(idx)
+            let _ = self.a_dirty.remove_at(idx)
             if self.a_active >= self.a_paths.len() {
                 self.a_active = self.a_paths.len() - 1
             }
@@ -186,6 +274,7 @@ struct Panes {
             }
             let _ = self.b_paths.remove_at(idx)
             let _ = self.b_text.remove_at(idx)
+            let _ = self.b_dirty.remove_at(idx)
             if self.b_active >= self.b_paths.len() {
                 self.b_active = self.b_paths.len() - 1
             }
@@ -202,15 +291,19 @@ struct Panes {
             let cur = self.a_paths[self.a_active]
             let p = self.a_paths.remove_at(from)
             let t = self.a_text.remove_at(from)
+            let d = self.a_dirty.remove_at(from)
             self.a_paths = insert_str(self.a_paths, to, p)
             self.a_text = insert_str(self.a_text, to, t)
+            self.a_dirty = insert_bool(self.a_dirty, to, d)
             self.a_active = pos_of(self.a_paths, cur)
         } else {
             let cur = self.b_paths[self.b_active]
             let p = self.b_paths.remove_at(from)
             let t = self.b_text.remove_at(from)
+            let d = self.b_dirty.remove_at(from)
             self.b_paths = insert_str(self.b_paths, to, p)
             self.b_text = insert_str(self.b_text, to, t)
+            self.b_dirty = insert_bool(self.b_dirty, to, d)
             self.b_active = pos_of(self.b_paths, cur)
         }
     }
@@ -308,11 +401,36 @@ fn new_panes() -> Panes {
     return Panes {
         a_paths: [],
         a_text: [],
+        a_dirty: [],
         a_active: 0,
         b_paths: [],
         b_text: [],
-        b_active: 0
+        b_dirty: [],
+        b_active: 0,
+        saved_path: ""
     }
+}
+
+
+// insert_bool returns `arr` with `v` inserted before `idx` (>= len appends) — the [bool] twin of
+// insert_str, for keeping the dirty flags aligned with the paths through a tab reorder.
+fn insert_bool(arr: [bool], idx: int, v: bool) -> [bool] {
+    var out: [bool] = []
+    var k = 0
+    loop {
+        if k == arr.len() {
+            break
+        }
+        if k == idx {
+            out.append(v)
+        }
+        out.append(arr[k])
+        k = k + 1
+    }
+    if idx >= arr.len() {
+        out.append(v)
+    }
+    return out
 }
 
 

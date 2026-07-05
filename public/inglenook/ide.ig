@@ -32,6 +32,7 @@ let KEY_N       = 78
 let KEY_K       = 75
 let KEY_COMMA   = 44
 let KEY_Q       = 81
+let KEY_S       = 83
 let KEY_ESCAPE  = 256
 
 
@@ -285,6 +286,19 @@ fn main() -> int {
         }
         if cmd && key_pressed(KEY_Q) {
             quit = true
+        }
+        if cmd && key_pressed(KEY_S) {                 // ⌘S: save the active file of both editor panes
+            let s0 = panes.save_active(0)
+            let s1 = panes.save_active(1)
+            if s0.len() > 0 || s1.len() > 0 {
+                tree.refresh()
+                ch.dirty = true
+                var saved = s0
+                if saved.len() == 0 {
+                    saved = s1
+                }
+                f.toast("Saved " + editor.basename(saved))
+            }
         }
         if key_pressed(KEY_ESCAPE) && ch.pending {
             send(stop_ch, true)
@@ -650,6 +664,11 @@ fn main() -> int {
         if ch.wrote_path.len() > 0 {           // the agent wrote a file → refresh what shows it
             panes.reload_if_open(ch.wrote_path)
             tree.refresh()
+        }
+        if panes.saved_path.len() > 0 {        // the editor's Save button wrote a file → refresh the tree
+            tree.refresh()
+            panes.saved_path = ""
+            ch.dirty = true
         }
 
         // A workspace change (dock drag / tab open-close / tree expand) is detected on mouse

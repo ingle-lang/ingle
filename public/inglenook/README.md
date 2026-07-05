@@ -19,10 +19,13 @@ Conversations | Chat | Editor 1  | Inspector
   tool_use → tool_result loop, and both providers (Anthropic API / local Ollama). The agent's
   tools are `list_dir`, `read_file`, and `write_file` over the project the IDE was launched in —
   it browses before it guesses.
-- **Editor 1 / Editor 2** — stacked code windows: per-pane file tabs, syntax-highlighted
-  selectable source (`f.code`, the std/highlight machinery), markdown files rendered as rich
-  markdown. When the agent writes a file that's open, the pane reloads — what you see is the
-  disk it acted on.
+- **Editor 1 / Editor 2** — stacked code windows: per-pane file tabs, and a real editable,
+  syntax-highlighted code editor (`f.code_editor`) — line-number gutter, caret, selection,
+  clipboard, Tab-indents, Enter that keeps the block's indentation, and its own caret-following
+  scroll. Edit a file, hit **Save** (or ⌘S) to write it; a `•` marks unsaved changes. Each open
+  file keeps its own scroll position, and when the agent writes a file that's open the pane
+  reloads — what you see is the disk it acted on. The editor **virtualizes**, so a thousand-line
+  file costs the same as a screenful.
 - **Inspector** — the workspace's context at a glance; verdicts and the tape scrubber land here
   in later phases.
 

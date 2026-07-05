@@ -31,6 +31,7 @@ let KEY_UP        = 265
 let KEY_DELETE    = 261
 let KEY_HOME      = 268
 let KEY_END       = 269
+let KEY_TAB       = 258  // code editor: indent (insert spaces); < 32 so it never reaches char_pressed
 let KEY_A         = 65   // select-all / copy / cut / paste letters (raylib uses ASCII for letters)
 let KEY_C         = 67
 let KEY_V         = 86
@@ -153,6 +154,76 @@ fn code_caret_at(src: string, tx: int, ty0: int, cs: int, lh: int, mx: int, my: 
         i = i + 1
     }
     return base + cp_caret_from_x(lines[row], mx - tx, cs)
+}
+
+
+
+
+// code_row_of returns the 0-based LITERAL line (split on '\n', no wrapping) that holds code-point
+// index `caret`. A caret exactly on a line's terminating boundary belongs to that line, not the next;
+// a caret past the end clamps to the last line. The literal-line twin of a text area's _ta_row.
+fn code_row_of(src: string, caret: int) -> int {
+    let lines = src.split("\n")
+    var base = 0
+    var i = 0
+    loop {
+        if i == lines.len() {
+            return lines.len() - 1
+        }
+        let end = base + str.cp_count(lines[i])
+        if caret <= end {
+            return i
+        }
+        base = end + 1                       // + 1 for the '\n' that ended this line
+        i = i + 1
+    }
+    return 0
+}
+
+
+
+
+// code_row_start returns the code-point index where literal line `row` begins (the char after the
+// previous line's '\n'). Pairs with code_row_of so ↑/↓/Home/End can move by whole source lines.
+fn code_row_start(src: string, row: int) -> int {
+    let lines = src.split("\n")
+    var base = 0
+    var i = 0
+    loop {
+        if i == row || i == lines.len() {
+            break
+        }
+        base = base + str.cp_count(lines[i]) + 1
+        i = i + 1
+    }
+    return base
+}
+
+
+
+
+// _leading_indent returns the run of spaces/tabs that opens the line holding `caret` — pressing Enter
+// copies it onto the new line so a code editor keeps the block's indentation instead of snapping to
+// column 0. Stops at the first non-whitespace char, or at the caret (so a mid-indent split can't over-copy).
+fn _leading_indent(src: string, caret: int) -> string {
+    let lines = src.split("\n")
+    let row = code_row_of(src, caret)
+    let col = caret - code_row_start(src, row)
+    let cs = lines[row].chars()
+    var out = ""
+    var i = 0
+    loop {
+        if i == cs.len() || i == col {
+            break
+        }
+        if cs[i] == " " || char_code(cs[i]) == 9 {
+            out = out + cs[i]
+        } else {
+            break
+        }
+        i = i + 1
+    }
+    return out
 }
 
 
@@ -1432,6 +1503,191 @@ struct Ui {
                 }
             }
         }
+    }
+
+
+    // _code_edit runs one frame of INPUT for an EDITABLE monospace code editor at (x,y,w,h). It is the
+    // editable twin of _code_input: it reuses the same focus/caret/sel_anchor/clipboard machinery, but
+    // MUTATES the buffer — printable chars, Backspace/Delete, Enter (a real newline that copies the
+    // current line's leading indent), Tab (four spaces), the Ctrl/Cmd A·C·X·V clipboard verbs, and 2D
+    // caret motion over LITERAL source lines (←/→ flat, ↑/↓ keep the pixel column, Home/End to the
+    // line's edges). Caret navigation and the click hit-test measure against the MONO font, so the
+    // caller MUST have set the mono font active (as _code_block does). `tsx`/`tsy` are the text origin
+    // ALREADY SHIFTED by the editor's horizontal/vertical scroll, so a click maps through the scroll.
+    // Scroll itself is the caller's (std/flare) to own — this returns only the edited buffer; the paint
+    // is a separate pass at the solved rect, the same split _code_input/_paint_code use.
+    fn _code_edit(mut self, id: int, x: int, y: int, w: int, h: int, tsx: int, tsy: int, cs: int, lh: int, value: string) -> string {
+        let shift = key_down(KEY_LSHIFT) || key_down(KEY_RSHIFT)
+        let cmd   = key_down(KEY_LCTRL) || key_down(KEY_RCTRL) || key_down(KEY_LSUPER) || key_down(KEY_RSUPER)
+        let _ = self.press(id, x, y, w, h)               // own the hover + clicks over the whole editor
+        if self.pressed_down(id, x, y, w, h) {           // press: focus, load the buffer, drop the caret
+            self.focus = id
+            self.buf   = value
+            let cc = code_caret_at(self.buf, tsx, tsy, cs, lh, self.mx, self.my)
+            self.caret = cc
+            if !shift {
+                self.sel_anchor = cc
+            }
+        }
+        if self.focus == id && self.down && self.was {   // drag: extend the selection to the cursor
+            self.caret = code_caret_at(self.buf, tsx, tsy, cs, lh, self.mx, self.my)
+        }
+        var shown = value
+        if self.focus == id {
+            if cmd && key_pressed(KEY_A) {               // Ctrl/Cmd+A — select all
+                self.sel_anchor = 0
+                self.caret = str.cp_count(self.buf)
+            } else if cmd && key_pressed(KEY_C) {        // Ctrl/Cmd+C — copy the selection
+                if self.sel_anchor != self.caret {
+                    var clo = self.sel_anchor
+                    var chi = self.caret
+                    if clo > chi {
+                        clo = self.caret
+                        chi = self.sel_anchor
+                    }
+                    clipboard_set(str.cp_slice(self.buf, clo, chi))
+                }
+            } else if cmd && key_pressed(KEY_X) {        // Ctrl/Cmd+X — cut
+                if self.sel_anchor != self.caret {
+                    var xlo = self.sel_anchor
+                    var xhi = self.caret
+                    if xlo > xhi {
+                        xlo = self.caret
+                        xhi = self.sel_anchor
+                    }
+                    clipboard_set(str.cp_slice(self.buf, xlo, xhi))
+                    self._del_selection()
+                }
+            } else if cmd && key_pressed(KEY_V) {        // Ctrl/Cmd+V — paste, replacing any selection
+                let p = clipboard_get()
+                self._del_selection()
+                if p.len() > 0 {
+                    self.buf   = str.cp_insert(self.buf, self.caret, p)
+                    self.caret = self.caret + str.cp_count(p)
+                }
+                self.sel_anchor = self.caret
+            } else {
+                loop {                                   // printable characters (Tab/Enter are < 32)
+                    let c = char_pressed()
+                    if c == 0 {
+                        break
+                    }
+                    if c >= 32 {
+                        self._del_selection()
+                        self.buf   = str.cp_insert(self.buf, self.caret, from_char_code(c))
+                        self.caret = self.caret + 1
+                        self.sel_anchor = self.caret
+                    }
+                }
+                if key_pressed(KEY_ENTER) || key_repeat(KEY_ENTER) {   // newline + copy the line's indent
+                    self._del_selection()
+                    let ins = "\n" + _leading_indent(self.buf, self.caret)
+                    self.buf   = str.cp_insert(self.buf, self.caret, ins)
+                    self.caret = self.caret + str.cp_count(ins)
+                    self.sel_anchor = self.caret
+                }
+                if key_pressed(KEY_TAB) || key_repeat(KEY_TAB) {       // indent: four spaces
+                    self._del_selection()
+                    self.buf   = str.cp_insert(self.buf, self.caret, "    ")
+                    self.caret = self.caret + 4
+                    self.sel_anchor = self.caret
+                }
+                if key_pressed(KEY_BACKSPACE) || key_repeat(KEY_BACKSPACE) {
+                    if self.sel_anchor != self.caret {
+                        self._del_selection()
+                    } else if self.caret > 0 {
+                        self.buf   = str.cp_delete(self.buf, self.caret - 1)
+                        self.caret = self.caret - 1
+                        self.sel_anchor = self.caret
+                    }
+                }
+                if key_pressed(KEY_DELETE) || key_repeat(KEY_DELETE) {
+                    if self.sel_anchor != self.caret {
+                        self._del_selection()
+                    } else if self.caret < str.cp_count(self.buf) {
+                        self.buf = str.cp_delete(self.buf, self.caret)
+                        self.sel_anchor = self.caret
+                    }
+                }
+                if key_pressed(KEY_LEFT) || key_repeat(KEY_LEFT) {
+                    if !shift && self.sel_anchor != self.caret {
+                        if self.sel_anchor < self.caret {
+                            self.caret = self.sel_anchor
+                        }
+                    } else if self.caret > 0 {
+                        self.caret = self.caret - 1
+                    }
+                    if !shift {
+                        self.sel_anchor = self.caret
+                    }
+                }
+                if key_pressed(KEY_RIGHT) || key_repeat(KEY_RIGHT) {
+                    if !shift && self.sel_anchor != self.caret {
+                        if self.sel_anchor > self.caret {
+                            self.caret = self.sel_anchor
+                        }
+                    } else if self.caret < str.cp_count(self.buf) {
+                        self.caret = self.caret + 1
+                    }
+                    if !shift {
+                        self.sel_anchor = self.caret
+                    }
+                }
+                if key_pressed(KEY_UP) || key_repeat(KEY_UP) {
+                    let row = code_row_of(self.buf, self.caret)
+                    if row > 0 {
+                        self.caret = self._code_caret_on_row(self.buf, row - 1, self._code_caret_x(self.buf, cs), cs)
+                    }
+                    if !shift {
+                        self.sel_anchor = self.caret
+                    }
+                }
+                if key_pressed(KEY_DOWN) || key_repeat(KEY_DOWN) {
+                    let lines = self.buf.split("\n")
+                    let row = code_row_of(self.buf, self.caret)
+                    if row + 1 < lines.len() {
+                        self.caret = self._code_caret_on_row(self.buf, row + 1, self._code_caret_x(self.buf, cs), cs)
+                    }
+                    if !shift {
+                        self.sel_anchor = self.caret
+                    }
+                }
+                if key_pressed(KEY_HOME) {
+                    self.caret = code_row_start(self.buf, code_row_of(self.buf, self.caret))
+                    if !shift {
+                        self.sel_anchor = self.caret
+                    }
+                }
+                if key_pressed(KEY_END) {
+                    let lines = self.buf.split("\n")
+                    let row = code_row_of(self.buf, self.caret)
+                    self.caret = code_row_start(self.buf, row) + str.cp_count(lines[row])
+                    if !shift {
+                        self.sel_anchor = self.caret
+                    }
+                }
+            }
+            shown = self.buf
+        }
+        return shown
+    }
+
+
+    // _code_caret_x returns the caret's pixel x WITHIN its literal line (mono font), so ↑/↓ can keep the
+    // column across lines. The mono font must be active (the caller sets it) for the measure to match.
+    fn _code_caret_x(self, src: string, cs: int) -> int {
+        let lines = src.split("\n")
+        let row = code_row_of(src, self.caret)
+        let col = self.caret - code_row_start(src, row)
+        return measure_text(str.cp_prefix(lines[row], col), cs)
+    }
+
+
+    // _code_caret_on_row returns the caret index on literal line `row` nearest pixel column `x` — the
+    // landing spot when ↑/↓ moves between lines (mono font active for the measure).
+    fn _code_caret_on_row(self, src: string, row: int, x: int, cs: int) -> int {
+        let lines = src.split("\n")
+        return code_row_start(src, row) + cp_caret_from_x(lines[row], x, cs)
     }
 
 
