@@ -239,6 +239,9 @@ fn encode_trace(path: string, exit: int, out: string, err: string) -> string {
     var fns: [json.Json] = []
     var output = ""
     var truncated = false
+    var last_line = 0                          // the OVERFLOW's most recent event, kept so a fault past
+    var last_op = ""                           // the cap is still the scrubber's final (parked) step
+    var last_fn = ""
     let raw = out.split("\n")
     var i = 0
     loop {
@@ -247,17 +250,20 @@ fn encode_trace(path: string, exit: int, out: string, err: string) -> string {
         }
         let ln = raw[i]
         if sstr.starts_with(ln, "\{\"fn\":") {
-            if lines.len() >= TAPE_CAP {
-                truncated = true
-            } else {
-                match json.parse(ln) {
-                    case Ok(ev) {
+            match json.parse(ln) {
+                case Ok(ev) {
+                    if lines.len() >= TAPE_CAP {
+                        truncated = true       // past the cap: don't grow the arrays, but remember this event
+                        last_line = json.as_int(json.get(ev, "line"))
+                        last_op = json.as_str(json.get(ev, "op"))
+                        last_fn = json.as_str(json.get(ev, "fn"))
+                    } else {
                         lines.append(json.num(json.as_int(json.get(ev, "line"))))
                         ops.append(json.str(json.as_str(json.get(ev, "op"))))
                         fns.append(json.str(json.as_str(json.get(ev, "fn"))))
                     }
-                    case Err(e) {}
                 }
+                case Err(e) {}
             }
         } else if ln.len() > 0 {
             if output.len() > 0 {
@@ -266,6 +272,11 @@ fn encode_trace(path: string, exit: int, out: string, err: string) -> string {
             output = output + ln
         }
         i = i + 1
+    }
+    if truncated {                             // append the overflow's LAST event so a fault line is scrubable
+        lines.append(json.num(last_line))
+        ops.append(json.str(last_op))
+        fns.append(json.str(last_fn))
     }
     if err.len() > 0 {                        // a compile error (or a fault message) → show it as output
         if output.len() > 0 {

@@ -23,7 +23,6 @@ struct Linter {
     seen_code: string       // the buffer as of last frame (debounce: detect "stopped typing")
     seen_path: string
     stable: int             // frames the buffer has sat unchanged
-    last_code: string       // the buffer of the last check dispatched (don't re-check identical text)
     pend_code: string       // per-frame action: code to dispatch ("" = none)
 
 
@@ -77,8 +76,11 @@ struct Linter {
             return
         }
         self.stable = self.stable + 1
-        if self.stable == LINT_SETTLE && !self.checking && code != self.last_code {
-            self.last_code = code
+        // Fire ONCE per settle period: `stable == LINT_SETTLE` (not `>=`) is only true the single frame
+        // it crosses the threshold, so a stable buffer isn't re-checked every frame. (An earlier
+        // `code != last_code` guard here was redundant AND wrong — it permanently suppressed re-checking
+        // if you edited then reverted to the exact prior text, leaving stale squiggles. Removed.)
+        if self.stable == LINT_SETTLE && !self.checking {
             self.checking = true
             self.checking_path = path
             self.pend_code = code                 // dispatched to the worker after the frame
@@ -126,7 +128,6 @@ fn new_linter() -> Linter {
         seen_code: "",
         seen_path: "",
         stable: 0,
-        last_code: "",
         pend_code: ""
     }
 }

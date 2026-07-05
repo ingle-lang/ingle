@@ -99,7 +99,8 @@ let _DROPDOWN = 51      // a collapsed selector box: left label + right "▾" ch
 let _TAB = 52          // a tab chip (inactive): bar fill, muted label, a trailing "×" close zone
 let _TAB_ON = 53       // …the active tab chip: panel fill, ink label, an accent underline
 let _EDITOR = 54       // an editable monospace code editor: line-number gutter + highlighted, scrolled lines
-                       // (text = source; id = packed "lang\nwidget-id\ngutter\nhoff\nvoff")
+                       // (text = source; id = packed "lang\nwidget-id" — scroll/marks/hot are read from
+                       // encapsulated state by the widget-id at paint time, not carried in the id)
 let _BADGE = 55        // a compact rounded status pill (id = kind: "0" neutral · "1" ok · "2" bad · "3" pending)
 
 // HANDLE_W is the on-screen thickness (px) of a splitter's hit band — wide enough to grab, a hairline to look
