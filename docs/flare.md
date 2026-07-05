@@ -308,6 +308,9 @@ and Enter that copies the current line's indent; round-trips its text like `text
 f.code_editor("main", "ember", src)` — and **virtualizes**, painting only the visible lines so a thousand-line
 file costs a screenful; it GROWS to fill its slot, and keeps independent scroll per `key`. Inglenook's two
 editor panes are this widget),
+`badge(text, kind)` (a compact rounded status pill — `kind` 0 neutral · 1 ok/green · 2 bad/red · 3
+pending/accent; content-sized, so a row of them reads as a status strip — Inglenook's Verified-Loop
+compiles / contracts / runs-clean verdict),
 `text_field(key, value) -> string` + `submit() -> bool` (Enter committed, clears the field),
 `text_area(key, value) -> string` (a MULTI-LINE field that auto-grows to its content then scrolls — wrapped
 visual lines, a 2D caret with ↑/↓ navigation, full selection/clipboard; **Shift+Enter inserts a newline**,

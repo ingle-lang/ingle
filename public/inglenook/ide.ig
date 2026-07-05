@@ -20,6 +20,7 @@ import "../claude-desktop/ollama" as oll
 import "chat" as chat
 import "editor" as editor
 import "files" as files
+import "verify" as verify
 
 // Keyboard shortcuts (raylib keycodes): ⌘/Ctrl with +/- to zoom, N new chat, K palette,
 // comma settings, Q quit; Esc stops a streaming reply.
@@ -241,12 +242,15 @@ fn main() -> int {
     let stop_ch: Channel<bool> = channel(2)
     let disco_base_ch: Channel<string> = channel(2)
     let disco_resp_ch: Channel<string> = channel(2)
+    let verify_req_ch: Channel<string> = channel(2)    // the Verified Loop: snippet → worker
+    let verify_resp_ch: Channel<string> = channel(4)   // …its verdict JSON comes back here
     let api_key = env("ANTHROPIC_API_KEY")
     let ollama_base = oll.default_base()
     nursery {
     spawn api.stream_worker(api_key, req_ch, resp_ch, stop_ch)
     spawn oll.stream_worker(ollama_base, oll_req_ch, resp_ch, stop_ch)
     spawn oll.disco_worker(disco_base_ch, disco_resp_ch)
+    spawn verify.verify_worker(verify_req_ch, verify_resp_ch)   // compiles+checks+runs agent code off-thread
     if ch.provider == 1 {
         send(disco_base_ch, ollama_base)
         ch.discovering = true
@@ -262,6 +266,7 @@ fn main() -> int {
         ch.begin_frame()
         ch.drain(resp_ch, req_ch, oll_req_ch)
         ch.drain_disco(disco_resp_ch)
+        ch.drain_verify(verify_resp_ch)
         var quit = false
         var want_disco = false
 
@@ -491,6 +496,22 @@ fn main() -> int {
             } else {
                 f.label("list_dir · read_file · write_file")
             }
+            f.text_muted("Verified Loop")
+            if !ch.auto_verify {
+                f.label("off (Settings ⌘,)")
+            } else if ch.verifying {
+                f.badge("checking " + flare.spinner(tick), 3)
+            } else if !ch.verdict.ran {
+                f.label("waiting for code")
+            } else if verify.all_green(ch.verdict) {
+                f.badge("verified", 1)
+            } else if !ch.verdict.compiles {
+                f.badge("won't compile", 2)
+            } else if !ch.verdict.contracts_ok {
+                f.badge("contract falsifiable", 2)
+            } else {
+                f.badge("faults at runtime", 2)
+            }
             f.text_muted("Editor 1")
             var ap = panes.active_path(0)
             if ap.len() == 0 {
@@ -618,7 +639,7 @@ fn main() -> int {
         ch.take_undo(f)
 
         // Idle frame-gating: nothing moving → block on OS events instead of re-rendering.
-        if had_input() || f.is_animating() || ch.pending || ch.discovering {
+        if had_input() || f.is_animating() || ch.pending || ch.discovering || ch.verifying {
             coast = 12
         } else if coast > 0 {
             coast = coast - 1
@@ -655,6 +676,9 @@ fn main() -> int {
         if want_disco {
             send(disco_base_ch, ollama_base)
             ch.discovering = true
+        }
+        if ch.verify_code.len() > 0 {          // a reply carried Ingle code → verify it off-thread
+            send(verify_req_ch, ch.verify_code)
         }
         if tree.open_path.len() > 0 {          // a file-tree click → open in the chosen pane
             panes.open(tree.open_pane, tree.open_path)
@@ -704,6 +728,7 @@ fn main() -> int {
     close(req_ch)
     close(oll_req_ch)
     close(disco_base_ch)
+    close(verify_req_ch)   // wake the verify worker out of recv → None → it exits (nursery join)
     // M:N safety: tear graphics down on THIS thread (it owns the GL context) BEFORE the nursery
     // join below — see flare_chat for the full story.
     if tape_path.len() > 0 {

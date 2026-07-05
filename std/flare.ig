@@ -100,6 +100,7 @@ let _TAB = 52          // a tab chip (inactive): bar fill, muted label, a traili
 let _TAB_ON = 53       // …the active tab chip: panel fill, ink label, an accent underline
 let _EDITOR = 54       // an editable monospace code editor: line-number gutter + highlighted, scrolled lines
                        // (text = source; id = packed "lang\nwidget-id\ngutter\nhoff\nvoff")
+let _BADGE = 55        // a compact rounded status pill (id = kind: "0" neutral · "1" ok · "2" bad · "3" pending)
 
 // HANDLE_W is the on-screen thickness (px) of a splitter's hit band — wide enough to grab, a hairline to look
 // at. Public so a caller can account for it when computing the remaining content width beside a resized pane.
@@ -2973,6 +2974,18 @@ struct Flare {
     }
 
 
+    // badge is a compact rounded status pill — a tinted chip with a centred label. `kind` picks the
+    // tint: 0 neutral (panel), 1 ok (green), 2 bad (danger red), 3 pending (accent). Content-sized, so a
+    // row of them reads as a status strip — the Verified Loop's compiles / contracts / runs-clean pills.
+    fn badge(mut self, text: string, kind: int) {
+        let st = self.ui.style
+        let w = measure_text(text, st.text_size) + st.pad * 2
+        let h = st.text_size + st.pad
+        let node = self.lo.leaf_fixed(w, h, 0)
+        self._queue(node, _BADGE, text, "{kind}")
+    }
+
+
     // text_muted is secondary text (hints, counts) in the muted ink.
     fn text_muted(mut self, s: string) {
         let node = self.lo.leaf(measure_text(s, self.ui.style.text_size), self.ui.style.row_h, 0)
@@ -3609,6 +3622,31 @@ struct Flare {
     }
 
 
+    // _paint_badge draws a status pill: a rounded tinted fill (green ok / red bad / accent pending /
+    // panel neutral) with the label centred in a contrasting ink. Pill-shaped (radius = half height).
+    fn _paint_badge(mut self, text: string, kind: string, x: int, y: int, w: int, h: int) {
+        let st = self.ui.style
+        var fill = st.panel
+        var ink = st.muted_ink
+        if kind == "1" {
+            fill = ui.rgb(122, 162, 92)      // ok — a muted leaf green (readable in both themes)
+            ink = ui.rgb(250, 252, 245)
+        } else if kind == "2" {
+            fill = st.danger
+            ink = st.danger_ink
+        } else if kind == "3" {
+            fill = st.accent
+            ink = st.accent_ink
+        }
+        fill_round(x, y, w, h, h / 2, fill, 255)
+        if kind == "0" {
+            stroke_round(x, y, w, h, h / 2, 1, st.border, 160)   // neutral: a hairline so it reads as a chip
+        }
+        let tw = measure_text(text, st.text_size)
+        draw_text(text, x + (w - tw) / 2, y + (h - st.text_size) / 2, st.text_size, ink)
+    }
+
+
     // _quote_block pre-wraps the text (indented for the bar) and reserves its height; the _QUOTE paint
     // node draws the accent bar + the muted lines.
     fn _quote_block(mut self, text: string, width: int) {
@@ -4000,6 +4038,8 @@ struct Flare {
             self._paint_code(text, id, x, y, w, h)
         } else if kind == _EDITOR {
             self._paint_code_editor(text, id, x, y, w, h)
+        } else if kind == _BADGE {
+            self._paint_badge(text, id, x, y, w, h)
         } else if kind == _QUOTE {
             // a blockquote: an accent bar + indented muted lines (text = pre-wrapped, '\n'-joined)
             let size = st.text_size

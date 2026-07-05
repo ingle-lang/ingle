@@ -11,6 +11,7 @@ import "std/json" as json
 import "std/string" as sstr
 import "../claude-desktop/anthropic" as api
 import "../claude-desktop/ollama" as oll
+import "verify" as verify
 
 
 // Conv is one in-memory conversation: a title (derived from the first user turn) plus its own
@@ -70,10 +71,18 @@ struct Chat {
     want_quit: bool
     want_redock_conv: bool
     want_redock_insp: bool
+    // --- the Verified Loop ---
+    verifying: bool          // a verify run is in flight for the latest reply
+    verdict: verify.Verdict  // the latest verdict (ran=false until the first result)
+    verify_turn: int         // the assistant turn index the verdict is for (-1 = none)
+    verify_rounds: int       // auto-fix rounds spent on the current failing snippet (capped)
+    auto_verify: bool        // verify every reply automatically (the flagship default)
+    verify_code: string      // per-frame: source to dispatch to the verify worker ("" = none)
 
 
     // begin_frame clears the per-frame action flags before the panels build.
     fn begin_frame(mut self) {
+        self.verify_code = ""
         self.want_send = false
         self.want_stop = false
         self.new_chat = false
@@ -119,11 +128,23 @@ struct Chat {
                             self.streaming = false
                             self.dirty = true
                         } else {
-                            self.turns.append(api.mk_turn(1, self.cur_reply))
+                            let reply = self.cur_reply
+                            self.turns.append(api.mk_turn(1, reply))
                             self.cur_reply = ""
                             self.streaming = false
                             self.pending = false
                             self.dirty = true
+                            // The Verified Loop: if the committed reply carries Ingle code and
+                            // auto-verify is on, queue it for the worker — its verdict lands async.
+                            if self.auto_verify {
+                                let code = verify.extract_code(reply)
+                                if code.len() > 0 {
+                                    self.verify_code = code
+                                    self.verifying = true
+                                    self.verify_turn = self.turns.len() - 1
+                                    self.verdict = verify.empty_verdict()
+                                }
+                            }
                         }
                     } else if api.is_tool_msg(d) {
                         match json.parse(api.strip_tool_mark(d)) {
@@ -159,6 +180,39 @@ struct Chat {
                     self.ollama_model = self.ollama_models[0]
                 }
                 self.discovering = false
+            }
+            case None {}
+        }
+    }
+
+
+    // reset_verify clears the Verified Loop state — called when the active conversation changes so a
+    // verdict never bleeds from one chat onto another.
+    fn reset_verify(mut self) {
+        self.verifying = false
+        self.verdict = verify.empty_verdict()
+        self.verify_turn = 0 - 1
+        self.verify_rounds = 0
+    }
+
+
+    // drain_verify lands the Verified Loop's result: decode the verdict, then AUTO-ROUTE a red one
+    // back to the model — append the precise fault (or the prover's counterexample) as a new user
+    // turn and re-send, so the model fixes it and tries again, capped at verify.VERIFY_CAP rounds so
+    // a genuinely hard bug can't spiral. A green verdict resets the round counter. Polled each frame.
+    fn drain_verify(mut self, verify_resp_ch: Channel<string>) {
+        match try_recv(verify_resp_ch) {
+            case Some(vj) {
+                self.verdict = verify.decode(vj)
+                self.verifying = false
+                if verify.all_green(self.verdict) {
+                    self.verify_rounds = 0
+                } else if self.auto_verify && self.verify_rounds < verify.VERIFY_CAP && !self.pending {
+                    self.verify_rounds = self.verify_rounds + 1
+                    self.turns.append(api.mk_turn(0, verify.agent_feedback(self.verdict)))
+                    self.want_send = true
+                    self.dirty = true
+                }
             }
             case None {}
         }
@@ -440,6 +494,11 @@ struct Chat {
             } else if self.pending {
                 thinking_turn(f, tick, self.provider, self.ollama_model)
             }
+            // The Verified Loop's verdict strip — the compiler's receipt for the latest reply,
+            // rendered at the foot of the transcript (a checking pill while it runs, then the pills).
+            if self.verifying || (self.verdict.ran && self.verify_turn >= 0) {
+                verify.render(f, self.verdict, self.verifying, tick, cw)
+            }
         }
         f.page_end()
         f.scroll_end("transcript")
@@ -608,6 +667,13 @@ struct Chat {
             self.tok_idx = nt
             self.dirty = true
         }
+        f.text_muted("Verified Loop")
+        let nav = f.checkbox("autoverify", "Auto-verify + fix the agent's code", self.auto_verify)
+        if nav != self.auto_verify {
+            self.auto_verify = nav
+            self.dirty = true
+        }
+
         f.text_muted("System prompt")
         let new_sys = f.text_area("sysprompt", self.sys_prompt)
         if new_sys != self.sys_prompt {
@@ -646,6 +712,7 @@ struct Chat {
             self.input = ""
             self.cur_reply = ""
             self.streaming = false
+            self.reset_verify()
         }
         if self.switch_to >= 0 && !self.want_send {
             self.dirty = true
@@ -656,6 +723,7 @@ struct Chat {
             self.input = ""
             self.cur_reply = ""
             self.streaming = false
+            self.reset_verify()
         }
         if self.retry_idx >= 1 && !self.want_send && !self.pending {
             self.dirty = true
@@ -708,6 +776,7 @@ struct Chat {
             self.input = ""
             self.cur_reply = ""
             self.streaming = false
+            self.reset_verify()
         }
     }
 
@@ -770,6 +839,7 @@ struct Chat {
             json.member("system", json.str(self.sys_prompt)),
             json.member("provider", json.num(self.provider)),
             json.member("ollama_model", json.str(self.ollama_model)),
+            json.member("auto_verify", json.boolean(self.auto_verify)),
             json.member("convos", json.arr(cjs))
         ])
     }
@@ -839,6 +909,9 @@ fn load(j: json.Json) -> Chat {
     }
     if !json.is_null(json.get(j, "ollama_model")) {
         c.ollama_model = json.as_str(json.get(j, "ollama_model"))
+    }
+    if !json.is_null(json.get(j, "auto_verify")) {
+        c.auto_verify = json.as_bool(json.get(j, "auto_verify"))
     }
     if c.convos.len() == 0 {
         c.convos.append(Conv { title: "New chat", turns: [] })
@@ -911,7 +984,13 @@ fn new_chat() -> Chat {
         want_theme: false,
         want_quit: false,
         want_redock_conv: false,
-        want_redock_insp: false
+        want_redock_insp: false,
+        verifying: false,
+        verdict: verify.empty_verdict(),
+        verify_turn: 0 - 1,
+        verify_rounds: 0,
+        auto_verify: true,
+        verify_code: ""
     }
 }
 
