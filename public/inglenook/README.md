@@ -19,13 +19,13 @@ Conversations | Chat | Editor 1  | Inspector
   tool_use → tool_result loop, and both providers (Anthropic API / local Ollama). The agent's
   tools are `list_dir`, `read_file`, and `write_file` over the project the IDE was launched in —
   it browses before it guesses.
-- **Editor 1 / Editor 2** — stacked code windows: per-pane file tabs, and a real editable,
-  syntax-highlighted code editor (`f.code_editor`) — line-number gutter, caret, selection,
-  clipboard, Tab-indents, Enter that keeps the block's indentation, and its own caret-following
-  scroll. Edit a file, hit **Save** (or ⌘S) to write it; a `•` marks unsaved changes. Each open
-  file keeps its own scroll position, and when the agent writes a file that's open the pane
-  reloads — what you see is the disk it acted on. The editor **virtualizes**, so a thousand-line
-  file costs the same as a screenful.
+- **Editor 1 / Editor 2 · Run** — stacked code windows (the bottom one tabs with the **Run**
+  panel). A real editable, syntax-highlighted editor (`f.code_editor`) — line-number gutter, caret,
+  selection, clipboard, Tab-indents, Enter that keeps the block's indentation, caret-following
+  scroll. Edit a file, hit **Save** (or ⌘S); a `•` marks unsaved changes. **Live squiggles** appear
+  as you type — a worker runs the real compiler (`inglec --diagnostics=json`) over your buffer on a
+  debounced pause and underlines the lines that don't type-check. The editor **virtualizes**, so a
+  thousand-line file costs a screenful.
 - **Inspector** — the workspace's context at a glance, including the latest **Verified Loop** verdict.
 
 ## The Verified Loop — the moat, made visible
@@ -48,6 +48,20 @@ can't spiral. The model literally can't hand you code that doesn't hold. Toggle 
 
 No other AI IDE can build this, because the languages they serve have no verification story. Ingle was
 built for exactly this loop.
+
+## The Run panel — a *time* window
+
+Hit **▶ Run** and the bottom pane becomes a time machine. Inglenook runs your file under the execution
+tape (`inglec --emit=trace` — one event per bytecode step, each carrying its source line) and lets you
+**scrub** it: drag the slider or step ◂ ▸, and the editor **spotlights the exact line that was executing**
+at that moment, with the function and opcode shown beside it. Because Ingle's tape is deterministic and
+total, this is real time-travel debugging — Cursor debugs with `console.log`; Inglenook scrubs the tape.
+
+## Contract-first Implement
+
+Write just a signature and its executable contract — `requires` / `ensures` — and press **Implement**.
+Inglenook hands it to the agent, and the Verified Loop drives the reply to green against those very
+contracts. Spec-driven development where the spec can't drift, because it executes.
 
 Everything docks: drag dividers, close panels, re-dock from the View menu / toolbar / ⌘K
 palette; the layout (and your chats, open tabs, and tree expansions) persists across restarts.

@@ -186,6 +186,16 @@ struct Chat {
     }
 
 
+    // ask injects a user message and queues a send — the programmatic way another panel starts a turn
+    // (contract-first Implement sends the editor's contract here, then the Verified Loop drives the
+    // reply to green). want_send is consumed by apply() in the same post-frame pass ide.ig calls this in.
+    fn ask(mut self, prompt: string) {
+        self.turns.append(api.mk_turn(0, prompt))
+        self.want_send = true
+        self.dirty = true
+    }
+
+
     // reset_verify clears the Verified Loop state — called when the active conversation changes so a
     // verdict never bleeds from one chat onto another.
     fn reset_verify(mut self) {

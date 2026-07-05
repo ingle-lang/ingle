@@ -1,0 +1,303 @@
+// run.ig — the tape scrubber: the bottom pane as a TIME window. Run the file in the editor, capture
+// the execution TAPE (`inglec --emit=trace` — one JSON event per bytecode step, each carrying its
+// source line), and scrub it like video: drag the slider or step ◂ ▸, and the editor spotlights the
+// exact line that was executing at that moment. Cursor debugs with console.log; this debugs with time
+// travel, because Ingle's tape is deterministic and total. The run happens on a worker fiber (std/proc)
+// so a long program never freezes the 60fps UI.
+import "std/proc" as proc
+import "std/json" as json
+import "std/string" as sstr
+import "std/flare" as flare
+import "verify" as verify
+
+
+let TAPE_CAP = 6000     // max events kept (a huge trace is capped so the channel + scrubber stay snappy)
+
+
+// TapeEvent is one executed step: the function, the opcode, and the SOURCE LINE it ran (1-based) —
+// the line is what the scrubber spotlights in the editor.
+struct TapeEvent {
+    fn_name: string
+    op: string
+    line: int
+}
+
+
+// Runner owns the tape scrubber's state: the captured events, the scrub position, the program's
+// output + exit code, and which file was run (so the editor showing THAT file gets the spotlight).
+struct Runner {
+    ran: bool
+    running: bool
+    ran_path: string
+    exit_code: int
+    output: string
+    truncated: bool
+    events: [TapeEvent]
+    scrub: int              // current event index (the slider position)
+    run_code: string        // per-frame action: a path to dispatch to the worker ("" = none)
+
+
+    fn begin_frame(mut self) {
+        self.run_code = ""
+    }
+
+
+    // hot_line returns the 1-based source line the scrubber is currently parked on for `path` — or -1
+    // if nothing is loaded, the run is stale, or `path` isn't the file that was run. The editor showing
+    // `path` passes this to code_editor_marked to spotlight the executing line.
+    fn hot_line(self, path: string) -> int {
+        if !self.ran || self.events.len() == 0 || path != self.ran_path {
+            return 0 - 1
+        }
+        var i = self.scrub
+        if i < 0 {
+            i = 0
+        }
+        if i >= self.events.len() {
+            i = self.events.len() - 1
+        }
+        return self.events[i].line
+    }
+
+
+    // drain lands a finished run: decode the events + output + exit, park the scrubber at the start (or,
+    // for a fault, at the LAST event — where it stopped). Polled each frame off the worker channel.
+    fn drain(mut self, resp_ch: Channel<string>) {
+        match try_recv(resp_ch) {
+            case Some(js) {
+                self.decode(js)
+                self.running = false
+                self.ran = true
+                self.scrub = 0
+                if self.exit_code != 0 && self.events.len() > 0 {
+                    self.scrub = self.events.len() - 1   // a fault → jump to where it stopped
+                }
+            }
+            case None {}
+        }
+    }
+
+
+    // build renders the Run panel: a Run/Stop control + exit status, the program output, and — once a
+    // tape is captured — the scrubber (◂ step ▸, a slider, and the current event read-out).
+    fn build(mut self, mut f: flare.Flare, active_path: string, tick: int, cw: int) {
+        f.row(flare.START, flare.CENTER)
+        f.heading("Run")
+        f.spacer()
+        if self.running {
+            f.badge("running " + flare.spinner(tick), 3)
+        } else if self.ran {
+            if self.exit_code == 0 {
+                f.badge("exit 0", 1)
+            } else {
+                f.badge("exit {self.exit_code}", 2)
+            }
+        }
+        f.end()
+
+        if active_path.len() == 0 {
+            f.text_muted("Open a file in Editor 1 to run it.")
+            return
+        }
+        f.row(flare.START, flare.CENTER)
+        if !self.running {
+            if f.primary("▶  Run " + basename(active_path)) {
+                self.run_code = active_path       // dispatched to the worker after the frame
+            }
+        } else {
+            f.text_muted("Running " + basename(active_path) + " " + flare.spinner(tick))
+        }
+        f.end()
+
+        if !self.ran {
+            f.text_muted("Run the file to capture its execution tape, then scrub the line that ran.")
+            return
+        }
+
+        // The scrubber: step buttons, a slider over the event index, and the current event read-out.
+        if self.events.len() > 0 {
+            f.divider()
+            f.text_muted("Tape — {self.events.len()} step(s){tape_more(self.truncated)}")
+            f.row(flare.START, flare.CENTER)
+            if f.ghost_button("◂ step") {
+                self.scrub = self.scrub - 1
+            }
+            if f.ghost_button("step ▸") {
+                self.scrub = self.scrub + 1
+            }
+            f.spacer()
+            let ev = self.events[self.clamp_scrub()]
+            f.label("{ev.fn_name}  line {ev.line}  ·  {ev.op}")
+            f.end()
+            let ns = f.slider("tapescrub", self.clamp_scrub(), 0, self.events.len() - 1)
+            if ns != self.clamp_scrub() {
+                self.scrub = ns
+            }
+            self.scrub = self.clamp_scrub()
+        }
+
+        // Program output (stdout, minus the tape lines).
+        if self.output.len() > 0 {
+            f.divider()
+            f.text_muted("Output")
+            f.code("runout", "", self.output, cw)
+        }
+    }
+
+
+    // clamp_scrub keeps the scrub index within the event range.
+    fn clamp_scrub(self) -> int {
+        var i = self.scrub
+        if i < 0 {
+            i = 0
+        }
+        if i >= self.events.len() {
+            i = self.events.len() - 1
+        }
+        if i < 0 {
+            i = 0
+        }
+        return i
+    }
+
+
+    // decode parses the worker's JSON envelope into the runner: exit, output, truncated, and the events
+    // as three parallel arrays (lines/ops/fns — compact over the channel).
+    fn decode(mut self, js: string) {
+        self.events = []
+        self.output = ""
+        self.exit_code = 0
+        self.truncated = false
+        match json.parse(js) {
+            case Ok(root) {
+                self.exit_code = json.as_int(json.get(root, "exit"))
+                self.output = json.as_str(json.get(root, "output"))
+                self.truncated = json.as_bool(json.get(root, "truncated"))
+                let ln = json.get(root, "lines")
+                let op = json.get(root, "ops")
+                let fnn = json.get(root, "fns")
+                var i = 0
+                loop {
+                    if i == json.length(ln) {
+                        break
+                    }
+                    self.events.append(TapeEvent {
+                        fn_name: json.as_str(json.at(fnn, i)),
+                        op: json.as_str(json.at(op, i)),
+                        line: json.as_int(json.at(ln, i))
+                    })
+                    i = i + 1
+                }
+            }
+            case Err(e) {}
+        }
+    }
+}
+
+
+fn new_runner() -> Runner {
+    return Runner {
+        ran: false,
+        running: false,
+        ran_path: "",
+        exit_code: 0,
+        output: "",
+        truncated: false,
+        events: [],
+        scrub: 0,
+        run_code: ""
+    }
+}
+
+
+// run_worker is the fiber behind the scrubber: receive a file path, run it under `--emit=trace`, split
+// the tape events (lines starting with `{"fn":`) from the program's own stdout, and send back a compact
+// JSON envelope. Mirrors std/http's stream_worker; closing req_ch ends it (nursery join).
+fn run_worker(req_ch: Channel<string>, resp_ch: Channel<string>) {
+    loop {
+        match recv(req_ch) {
+            case Some(path) {
+                let cc = verify.inglec_path()
+                let q = proc.shell_quote(path)
+                let r = proc.run(cc + " --emit=trace " + q)
+                send(resp_ch, encode_trace(path, r.code(), r.out(), r.err()))
+            }
+            case None {
+                break
+            }
+        }
+    }
+}
+
+
+// encode_trace parses the raw --emit=trace stdout (tape JSON lines interleaved with the program's own
+// output) into the compact envelope the Runner decodes: exit, the non-tape lines as `output`, and the
+// events as parallel lines/ops/fns arrays (capped at TAPE_CAP). Compile errors (on stderr) become output.
+fn encode_trace(path: string, exit: int, out: string, err: string) -> string {
+    var lines: [json.Json] = []
+    var ops: [json.Json] = []
+    var fns: [json.Json] = []
+    var output = ""
+    var truncated = false
+    let raw = out.split("\n")
+    var i = 0
+    loop {
+        if i == raw.len() {
+            break
+        }
+        let ln = raw[i]
+        if sstr.starts_with(ln, "\{\"fn\":") {
+            if lines.len() >= TAPE_CAP {
+                truncated = true
+            } else {
+                match json.parse(ln) {
+                    case Ok(ev) {
+                        lines.append(json.num(json.as_int(json.get(ev, "line"))))
+                        ops.append(json.str(json.as_str(json.get(ev, "op"))))
+                        fns.append(json.str(json.as_str(json.get(ev, "fn"))))
+                    }
+                    case Err(e) {}
+                }
+            }
+        } else if ln.len() > 0 {
+            if output.len() > 0 {
+                output = output + "\n"
+            }
+            output = output + ln
+        }
+        i = i + 1
+    }
+    if err.len() > 0 {                        // a compile error (or a fault message) → show it as output
+        if output.len() > 0 {
+            output = output + "\n"
+        }
+        output = output + sstr.trim(err)
+    }
+    return json.stringify(json.obj([
+        json.member("exit", json.num(exit)),
+        json.member("output", json.str(output)),
+        json.member("truncated", json.boolean(truncated)),
+        json.member("lines", json.arr(lines)),
+        json.member("ops", json.arr(ops)),
+        json.member("fns", json.arr(fns))
+    ]))
+}
+
+
+// tape_more renders the "(capped)" note when a trace overran TAPE_CAP.
+fn tape_more(truncated: bool) -> string {
+    if truncated {
+        return " (capped)"
+    }
+    return ""
+}
+
+
+// basename returns the final path component (the filename) for a button/label.
+fn basename(path: string) -> string {
+    let parts = path.split("/")
+    if parts.len() > 0 {
+        return parts[parts.len() - 1]
+    }
+    return path
+}

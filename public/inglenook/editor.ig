@@ -22,6 +22,7 @@ struct Panes {
     b_dirty: [bool]
     b_active: int
     saved_path: string       // per-frame action: a file was just saved to disk → ide.ig refreshes the tree
+    implement_code: string   // per-frame action: contract-first Implement was clicked → ide.ig sends it to the agent
 
 
     // open loads `path` into `pane` (0 = top, 1 = bottom): an already-open file just refocuses its
@@ -105,8 +106,9 @@ struct Panes {
 
     // build renders one pane's content: the tab strip (labels are disambiguated basenames),
     // then the active file in a scrollable viewer — f.markdown for .md, f.code for everything
-    // else. An empty pane shows the how-to hint instead.
-    fn build(mut self, mut f: flare.Flare, pane: int, cw: int) {
+    // else. An empty pane shows the how-to hint instead. `hot_line` spotlights the execution-tape line
+    // as you scrub (the Run panel); `err_lines` flags compiler-diagnostic lines with a red squiggle.
+    fn build(mut self, mut f: flare.Flare, pane: int, cw: int, hot_line: int, err_lines: [int]) {
         var paths: [string] = self.a_paths.clone()
         var active = self.a_active
         if pane == 1 {
@@ -175,6 +177,13 @@ struct Panes {
         }
         f.text_muted(label)
         f.spacer()
+        if lang_for(path) == "ember" {              // contract-first: hand the code to the agent to implement
+            if f.ghost_button("Implement") {
+                self.implement_code = text
+                f.toast("Sent to the agent — the Verified Loop will drive it to green")
+            }
+            f.tooltip("Send this code to the agent and let the Verified Loop implement it until its contracts hold")
+        }
         if dirty {
             if f.ghost_button("Save") {
                 write_file(path, text)
@@ -192,8 +201,9 @@ struct Panes {
 
         // The editable, syntax-highlighted editor — keyed by pane AND path so each open file keeps
         // its own scroll/caret and switching tabs never carries one file's position onto another.
+        // Diagnostic squiggles (err_lines) and the tape spotlight (hot_line) ride along.
         let ekey = "edcode{pane}:{path}"
-        let edited = f.code_editor(ekey, lang_for(path), text)
+        let edited = f.code_editor_marked(ekey, lang_for(path), text, err_lines, hot_line)
         if edited != text {
             if pane == 0 {
                 self.a_text[active] = edited
@@ -325,6 +335,22 @@ struct Panes {
     }
 
 
+    // active_text returns the LIVE buffer of `pane`'s active file (unsaved edits included, "" if empty)
+    // — the linter checks this so squiggles reflect what you're typing, not the last saved bytes.
+    fn active_text(self, pane: int) -> string {
+        if pane == 0 {
+            if self.a_active >= 0 && self.a_active < self.a_text.len() {
+                return self.a_text[self.a_active]
+            }
+        } else {
+            if self.b_active >= 0 && self.b_active < self.b_text.len() {
+                return self.b_text[self.b_active]
+            }
+        }
+        return ""
+    }
+
+
     // to_json persists the open tabs (paths + active index per pane) — contents re-read on load,
     // the disk is the truth.
     fn to_json(self) -> json.Json {
@@ -407,7 +433,8 @@ fn new_panes() -> Panes {
         b_text: [],
         b_dirty: [],
         b_active: 0,
-        saved_path: ""
+        saved_path: "",
+        implement_code: ""
     }
 }
 

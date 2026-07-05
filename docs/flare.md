@@ -307,7 +307,9 @@ syntax-highlighted, internally-scrolled source with a live caret, full selection
 and Enter that copies the current line's indent; round-trips its text like `text_area` — `src =
 f.code_editor("main", "ember", src)` — and **virtualizes**, painting only the visible lines so a thousand-line
 file costs a screenful; it GROWS to fill its slot, and keeps independent scroll per `key`. Inglenook's two
-editor panes are this widget),
+editor panes are this widget), `code_editor_marked(key, lang, value, marks, hot) -> string` (code_editor
+plus a red squiggle + gutter dot on each 1-based line in `marks` — compiler diagnostics — and a full-width
+spotlight band on the 1-based `hot` line, -1 for none — the execution-tape line as you scrub it),
 `badge(text, kind)` (a compact rounded status pill — `kind` 0 neutral · 1 ok/green · 2 bad/red · 3
 pending/accent; content-sized, so a row of them reads as a status strip — Inglenook's Verified-Loop
 compiles / contracts / runs-clean verdict),

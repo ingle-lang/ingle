@@ -21,6 +21,8 @@ import "chat" as chat
 import "editor" as editor
 import "files" as files
 import "verify" as verify
+import "run" as run
+import "lint" as lint
 
 // Keyboard shortcuts (raylib keycodes): ⌘/Ctrl with +/- to zoom, N new chat, K palette,
 // comma settings, Q quit; Esc stops a streaming reply.
@@ -37,15 +39,17 @@ let KEY_S       = 83
 let KEY_ESCAPE  = 256
 
 
-// build_workspace lays out the default dock: Conversations | Chat | (Editor 1 / Editor 2) |
-// Inspector. Chat is the pinned anchor; every ratio is child A's fraction of its split.
+// build_workspace lays out the default dock: Conversations | Chat | (Editor 1 / [Editor 2 · Run]) |
+// Inspector. Chat is the pinned anchor; the bottom-centre leaf tabs Editor 2 with the Run panel (the
+// tape scrubber — the "time window"). Every ratio is child A's fraction of its split.
 fn build_workspace() -> flare.DockTree {
     var d = flare.dock_new()
     let chat_leaf = d.add_root("Chat")
     let _c = d.split_before(chat_leaf, "Conversations", true, 0.16)
     let e1 = d.split(chat_leaf, "Editor 1", true, 0.44)
     let _i = d.split(e1, "Inspector", true, 0.76)
-    let _e2 = d.split(e1, "Editor 2", false, 0.55)
+    let e2 = d.split(e1, "Editor 2", false, 0.55)
+    d.add_tab(e2, "Run")
     return d
 }
 
@@ -160,6 +164,15 @@ fn project_label() -> string {
 }
 
 
+// implement_prompt frames the editor's code as a contract-first request: implement the body so the
+// executable contracts hold. The reply flows through the Verified Loop, so a wrong implementation is
+// caught (and auto-fixed) against those very contracts — spec-driven development where the spec can't
+// drift, because it executes. The fenced ```ember block is what the loop extracts and checks.
+fn implement_prompt(code: string) -> string {
+    return "Here is Ingle code with a function signature and an executable contract (requires/ensures) that describes what it must do. Write the COMPLETE implementation so its contracts hold, keeping the signature and contract exactly as given. Return the full code as a single Ingle code block:\n\n```ember\n" + code + "\n```"
+}
+
+
 fn main() -> int {
     draw.window(1460, 880, "Inglenook")
     var f = flare.new()
@@ -175,6 +188,8 @@ fn main() -> int {
     var ch = chat.new_chat()
     var panes = editor.new_panes()
     var tree = files.new_tree()
+    var runner = run.new_runner()            // the tape scrubber (Run panel)
+    var linter = lint.new_linter()           // live diagnostics (editor squiggles)
     var dock = build_workspace()
     var dark = true
     var zoom = 80
@@ -244,6 +259,10 @@ fn main() -> int {
     let disco_resp_ch: Channel<string> = channel(2)
     let verify_req_ch: Channel<string> = channel(2)    // the Verified Loop: snippet → worker
     let verify_resp_ch: Channel<string> = channel(4)   // …its verdict JSON comes back here
+    let run_req_ch: Channel<string> = channel(2)       // the tape scrubber: file path → worker
+    let run_resp_ch: Channel<string> = channel(4)      // …its tape + output envelope comes back here
+    let lint_req_ch: Channel<string> = channel(2)      // live diagnostics: buffer text → worker
+    let lint_resp_ch: Channel<string> = channel(4)     // …the error lines (CSV) come back here
     let api_key = env("ANTHROPIC_API_KEY")
     let ollama_base = oll.default_base()
     nursery {
@@ -251,6 +270,8 @@ fn main() -> int {
     spawn oll.stream_worker(ollama_base, oll_req_ch, resp_ch, stop_ch)
     spawn oll.disco_worker(disco_base_ch, disco_resp_ch)
     spawn verify.verify_worker(verify_req_ch, verify_resp_ch)   // compiles+checks+runs agent code off-thread
+    spawn run.run_worker(run_req_ch, run_resp_ch)              // runs the editor file + captures its tape
+    spawn lint.lint_worker(lint_req_ch, lint_resp_ch)         // diagnostics on the live buffer (squiggles)
     if ch.provider == 1 {
         send(disco_base_ch, ollama_base)
         ch.discovering = true
@@ -264,9 +285,14 @@ fn main() -> int {
         }
         tick = tick + 1
         ch.begin_frame()
+        runner.begin_frame()
+        linter.begin_frame()
         ch.drain(resp_ch, req_ch, oll_req_ch)
         ch.drain_disco(disco_resp_ch)
         ch.drain_verify(verify_resp_ch)
+        runner.drain(run_resp_ch)
+        linter.drain(lint_resp_ch)
+        linter.note_buffer(panes.active_path(0), panes.active_text(0))   // debounced live-check of Editor 1
         var quit = false
         var want_disco = false
 
@@ -446,15 +472,21 @@ fn main() -> int {
             f.dock_panel_end()
         }
 
-        // --- Editor 1 / Editor 2: the stacked code windows ---
+        // --- Editor 1 / Editor 2: the stacked code windows (with tape spotlight + diagnostic squiggles) ---
         if f.dock_panel("Editor 1") {
             let cw1 = panel_cw(f, "Editor 1", 240, 3000)
-            panes.build(f, 0, cw1)
+            panes.build(f, 0, cw1, runner.hot_line(panes.active_path(0)), linter.lines_for(panes.active_path(0)))
             f.dock_panel_end()
         }
         if f.dock_panel("Editor 2") {
             let cw2 = panel_cw(f, "Editor 2", 240, 3000)
-            panes.build(f, 1, cw2)
+            panes.build(f, 1, cw2, runner.hot_line(panes.active_path(1)), linter.lines_for(panes.active_path(1)))
+            f.dock_panel_end()
+        }
+        // --- Run: the tape scrubber (the "time window") ---
+        if f.dock_panel("Run") {
+            let cwr = panel_cw(f, "Run", 200, 3000)
+            runner.build(f, panes.active_path(0), tick, cwr)
             f.dock_panel_end()
         }
 
@@ -639,7 +671,10 @@ fn main() -> int {
         ch.take_undo(f)
 
         // Idle frame-gating: nothing moving → block on OS events instead of re-rendering.
-        if had_input() || f.is_animating() || ch.pending || ch.discovering || ch.verifying {
+        // The linter's debounce fits inside the post-input coast (LINT_SETTLE 7 < coast 12), so typing's
+        // own had_input keeps enough frames running for a check to fire — only an IN-FLIGHT check
+        // (linter.checking) or a run needs to hold the loop awake beyond that.
+        if had_input() || f.is_animating() || ch.pending || ch.discovering || ch.verifying || runner.running || linter.checking {
             coast = 12
         } else if coast > 0 {
             coast = coast - 1
@@ -650,6 +685,12 @@ fn main() -> int {
         // ---- post-frame application (the checkout pattern: act only after layout) ----
         if ch.want_stop {
             send(stop_ch, true)
+        }
+        if panes.implement_code.len() > 0 && !ch.pending {   // contract-first Implement → ask the agent (before apply, so it sends this frame)
+            ch.ask(implement_prompt(panes.implement_code))
+            panes.implement_code = ""
+            side = 0                                          // surface the Chats tab so the reply is visible
+            f.scroll_to_bottom("transcript")
         }
         ch.apply(f, req_ch, oll_req_ch)
         if ch.want_settings {
@@ -679,6 +720,14 @@ fn main() -> int {
         }
         if ch.verify_code.len() > 0 {          // a reply carried Ingle code → verify it off-thread
             send(verify_req_ch, ch.verify_code)
+        }
+        if runner.run_code.len() > 0 {         // the Run button → run the file + capture its tape
+            runner.running = true
+            runner.ran_path = runner.run_code
+            send(run_req_ch, runner.run_code)
+        }
+        if linter.pend_code.len() > 0 {        // the editor buffer settled → live-check it for squiggles
+            send(lint_req_ch, linter.pend_code)
         }
         if tree.open_path.len() > 0 {          // a file-tree click → open in the chosen pane
             panes.open(tree.open_pane, tree.open_path)
@@ -729,6 +778,8 @@ fn main() -> int {
     close(oll_req_ch)
     close(disco_base_ch)
     close(verify_req_ch)   // wake the verify worker out of recv → None → it exits (nursery join)
+    close(run_req_ch)      // …and the tape-run worker
+    close(lint_req_ch)     // …and the live-diagnostics worker
     // M:N safety: tear graphics down on THIS thread (it owns the GL context) BEFORE the nursery
     // join below — see flare_chat for the full story.
     if tape_path.len() > 0 {
