@@ -5,6 +5,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>       // std/proc: EAGAIN/EINTR on the non-blocking pipe drain
+#include <fcntl.h>       // std/proc: O_NONBLOCK on the capture pipes
+#include <poll.h>        // std/proc: drain stdout+stderr concurrently (no pipe-buffer deadlock)
+#include <spawn.h>       // std/proc: posix_spawn a /bin/sh -c child (libc, no dependency)
+#include <unistd.h>      // std/proc: read/close/pipe/STDOUT_FILENO
+#include <sys/wait.h>    // std/proc: waitpid to reap + read the exit status
+extern char **environ;   // std/proc: hand the child our environment (inglec is an executable)
 
 #if EMBER_NET
 #include <curl/curl.h>   // opt-in HTTPS via libcurl (make net) — "execute C libraries from Ingle"
@@ -139,6 +146,180 @@ static int w_fclose(const Value *a, Value *o) {
         return 1;
     }
     o[0] = INT_VAL((int64_t)fclose(f));
+    return 1;
+}
+
+
+// --- child process (std/proc) — run a command line, capture stdout+stderr+exit -----------------
+// posix_spawn a `/bin/sh -c <cmd>` child with its stdout+stderr on pipes, DRAIN BOTH CONCURRENTLY
+// (poll — reading one stream to EOF before the other DEADLOCKS the moment the child fills the
+// second pipe's ~64KB kernel buffer), reap it, and stash the captured bytes + exit code in a
+// heap ProcResult. The Ingle-side `resource struct Run` reads it via proc_exit/proc_stdout/
+// proc_stderr and frees it on drop. libc only (posix_spawn/pipe/poll) — no dependency, so it
+// rides in the DEFAULT build like fopen; hosted-only (this whole TU is, cf. fopen above).
+typedef struct {
+    int   code;   // exit status (128 + signal if the child was killed by one; -1 if spawn failed)
+    char *out;    // captured stdout — malloc'd, NUL-terminated (never NULL after a run)
+    char *err;    // captured stderr — malloc'd, NUL-terminated
+} ProcResult;
+
+
+// pr_append grows *buf and appends n bytes of src, keeping it NUL-terminated. On realloc failure it
+// leaves the buffer as-is (the capture is truncated, never corrupt) — the caller stops draining.
+static int pr_append(char **buf, size_t *len, size_t *cap, const char *src, size_t n) {
+    if (*len + n + 1 > *cap) {
+        size_t nc = *cap == 0 ? 4096 : *cap;
+        while (*len + n + 1 > nc) {
+            nc *= 2;
+        }
+        char *nb = realloc(*buf, nc);
+        if (nb == NULL) {
+            return 0;
+        }
+        *buf = nb;
+        *cap = nc;
+    }
+    memcpy(*buf + *len, src, n);
+    *len += n;
+    (*buf)[*len] = '\0';
+    return 1;
+}
+
+
+// w_proc_run(cmd) -> Ptr. Runs `cmd` under /bin/sh, returns a ProcResult handle (a null Ptr only on
+// a calloc failure). The command line is BORROWED for the spawn; the result is owned by C until
+// proc_free. Errors (pipe/spawn failure) come back AS a ProcResult with a message on stderr and
+// code -1, so the Ingle surface always gets a Run to inspect rather than a null it must guard.
+static int w_proc_run(const Value *a, Value *o) {
+    const char *cmd = AS_CSTRING(a[0]);
+    ProcResult *r = calloc(1, sizeof *r);
+    if (r == NULL) {
+        o[0] = PTR_VAL(NULL);
+        return 1;
+    }
+    r->code = -1;
+    int op[2], ep[2];
+    if (pipe(op) != 0) {
+        r->out = strdup(""); r->err = strdup("proc: pipe() failed");
+        o[0] = PTR_VAL(r); return 1;
+    }
+    if (pipe(ep) != 0) {
+        close(op[0]); close(op[1]);
+        r->out = strdup(""); r->err = strdup("proc: pipe() failed");
+        o[0] = PTR_VAL(r); return 1;
+    }
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, op[1], STDOUT_FILENO);   // child stdout → op write end
+    posix_spawn_file_actions_adddup2(&fa, ep[1], STDERR_FILENO);   // child stderr → ep write end
+    posix_spawn_file_actions_addclose(&fa, op[0]);                 // child never touches the read ends
+    posix_spawn_file_actions_addclose(&fa, ep[0]);
+    posix_spawn_file_actions_addclose(&fa, op[1]);                 // …nor the now-duped write ends
+    posix_spawn_file_actions_addclose(&fa, ep[1]);
+    char sh[] = "/bin/sh";
+    char dashc[] = "-c";
+    char *argv[] = { sh, dashc, (char *)cmd, NULL };
+    pid_t pid = 0;
+    int rc = posix_spawn(&pid, sh, &fa, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    close(op[1]); close(ep[1]);                                    // parent keeps only the read ends
+    if (rc != 0) {
+        close(op[0]); close(ep[0]);
+        r->out = strdup(""); r->err = strdup("proc: posix_spawn failed");
+        o[0] = PTR_VAL(r); return 1;
+    }
+
+    // Concurrent drain: non-blocking read ends, poll both until each hits EOF (n == 0). Reading one
+    // to completion first would hang if the child fills the other pipe meanwhile.
+    fcntl(op[0], F_SETFL, O_NONBLOCK);
+    fcntl(ep[0], F_SETFL, O_NONBLOCK);
+    char  *obuf = NULL, *ebuf = NULL;
+    size_t ol = 0, oc = 0, el = 0, ec = 0;
+    int oo = 1, eo = 1;                                            // stdout / stderr still open?
+    struct pollfd fds[2];
+    fds[0].fd = op[0];
+    fds[1].fd = ep[0];
+    while (oo || eo) {
+        fds[0].events = oo ? POLLIN : 0;
+        fds[1].events = eo ? POLLIN : 0;
+        if (poll(fds, 2, -1) < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        char tmp[4096];
+        if (oo && (fds[0].revents & (POLLIN | POLLHUP)) != 0) {
+            ssize_t n = read(op[0], tmp, sizeof tmp);
+            if (n > 0) {
+                if (!pr_append(&obuf, &ol, &oc, tmp, (size_t)n)) { oo = 0; }
+            } else if (n == 0) {
+                oo = 0;
+            } else if (errno != EAGAIN && errno != EINTR) {
+                oo = 0;
+            }
+        }
+        if (eo && (fds[1].revents & (POLLIN | POLLHUP)) != 0) {
+            ssize_t n = read(ep[0], tmp, sizeof tmp);
+            if (n > 0) {
+                if (!pr_append(&ebuf, &el, &ec, tmp, (size_t)n)) { eo = 0; }
+            } else if (n == 0) {
+                eo = 0;
+            } else if (errno != EAGAIN && errno != EINTR) {
+                eo = 0;
+            }
+        }
+    }
+    close(op[0]); close(ep[0]);
+    int status = 0;
+    if (waitpid(pid, &status, 0) >= 0) {
+        if (WIFEXITED(status)) {
+            r->code = WEXITSTATUS(status);
+        } else if (WIFSIGNALED(status)) {
+            r->code = 128 + WTERMSIG(status);
+        }
+    }
+    r->out = obuf != NULL ? obuf : strdup("");
+    r->err = ebuf != NULL ? ebuf : strdup("");
+    o[0] = PTR_VAL(r);
+    return 1;
+}
+
+
+// proc_exit(h) -> int. The child's exit code (-1 if the handle is null or the spawn failed).
+static int w_proc_exit(const Value *a, Value *o) {
+    ProcResult *r = (ProcResult *)AS_CPTR(a[0]);
+    o[0] = INT_VAL(r != NULL ? (int64_t)r->code : (int64_t)-1);
+    return 1;
+}
+
+
+// proc_stdout(h) -> string. A fresh copy of the captured stdout (ret_is_string copies + frees it).
+static int w_proc_stdout(const Value *a, Value *o) {
+    ProcResult *r = (ProcResult *)AS_CPTR(a[0]);
+    o[0] = PTR_VAL(strdup(r != NULL && r->out != NULL ? r->out : ""));
+    return 1;
+}
+
+
+// proc_stderr(h) -> string. A fresh copy of the captured stderr.
+static int w_proc_stderr(const Value *a, Value *o) {
+    ProcResult *r = (ProcResult *)AS_CPTR(a[0]);
+    o[0] = PTR_VAL(strdup(r != NULL && r->err != NULL ? r->err : ""));
+    return 1;
+}
+
+
+// proc_free(move h) -> int. Releases the ProcResult and its captured buffers. `move` on the Ingle
+// side makes the compiler forbid any use of the handle after this, so it can never double-free.
+static int w_proc_free(const Value *a, Value *o) {
+    ProcResult *r = (ProcResult *)AS_CPTR(a[0]);
+    if (r != NULL) {
+        free(r->out);
+        free(r->err);
+        free(r);
+    }
+    o[0] = INT_VAL(0);
     return 1;
 }
 
@@ -650,6 +831,13 @@ static const CExternSig g_sigs[] = {
     { "fread",   3, { 'b', 'i', 'P' }, 1, { 'i' }, 0, 0 },
     { "fwrite",  3, { 'b', 'i', 'P' }, 1, { 'i' }, 0, 0 },
     { "fclose",  1, { 'P' },           1, { 'i' }, 0, 0 },
+    // child process (std/proc) — DEFAULT build (libc only). A ProcResult is an opaque 'P' handle;
+    // captured stdout/stderr cross the boundary copied-and-freed ('p' out, ret_is_string=1).
+    { "proc_run",    1, { 'p' }, 1, { 'P' }, 0, 0 },
+    { "proc_exit",   1, { 'P' }, 1, { 'i' }, 0, 0 },
+    { "proc_stdout", 1, { 'P' }, 1, { 'p' }, 0, 1 },
+    { "proc_stderr", 1, { 'P' }, 1, { 'p' }, 0, 1 },
+    { "proc_free",   1, { 'P' }, 1, { 'i' }, 0, 0 },
 #if EMBER_NET
     // HTTPS POST (make net): url, headers ('\n'-separated lines), body → response string.
     { "http_post", 3, { 'p', 'p', 'p' }, 1, { 'p' }, 0, 1 },
@@ -695,6 +883,7 @@ static const CExternFn g_fns[] = {
     w_log2, w_log10, w_sinh, w_cosh, w_tanh, w_cbrt, w_trunc, w_hypot, w_fmod,
     w_cvec2_len, w_cvec2_dot, w_cvec2_add, w_cvec2_scale,
     w_strlen, w_strncmp, w_fopen, w_fread, w_fwrite, w_fclose,
+    w_proc_run, w_proc_exit, w_proc_stdout, w_proc_stderr, w_proc_free,
 #if EMBER_NET
     w_http_post,
     w_http_get,

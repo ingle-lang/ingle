@@ -1,0 +1,4 @@
+out=hello code=0 ok=true
+err=boom code=5 ok=false
+argv=x-y ok=true
+=> 0
