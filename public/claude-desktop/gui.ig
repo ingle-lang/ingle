@@ -759,7 +759,7 @@ fn model_name(idx: int) -> string {
 
 fn model_label(idx: int) -> string {
     if idx == 1 {
-        return "Sonnet 4.6"
+        return "Sonnet 5"
     }
     if idx == 2 {
         return "Haiku 4.5"
@@ -1070,7 +1070,7 @@ fn draw_settings(s: Settings, th: Theme, size: int, win_w: int, win_h: int,
     ry = ry + 70
 
     draw_text("Model", lx, ry, size - 4, th.muted)
-    model_idx = segmented(lx, ry + 22, cw2, ctlh, ["Opus 4.8", "Sonnet 4.6", "Haiku 4.5"], model_idx, mx, my, click, size - 5, th)
+    model_idx = segmented(lx, ry + 22, cw2, ctlh, ["Opus 4.8", "Sonnet 5", "Haiku 4.5"], model_idx, mx, my, click, size - 5, th)
     ry = ry + 70
 
     draw_text("Max tokens", lx, ry, size - 4, th.muted)

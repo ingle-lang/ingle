@@ -60,20 +60,16 @@ struct Runner {
     }
 
 
-    // drain lands a finished run: decode the events + output + exit, park the scrubber at the start (or,
-    // for a fault, at the LAST event — where it stopped). Polled each frame off the worker channel.
-    fn drain(mut self, resp_ch: Channel<string>) {
-        match try_recv(resp_ch) {
-            case Some(js) {
-                self.decode(js)
-                self.running = false
-                self.ran = true
-                self.scrub = 0
-                if self.exit_code != 0 && self.events.len() > 0 {
-                    self.scrub = self.events.len() - 1   // a fault → jump to where it stopped
-                }
-            }
-            case None {}
+    // apply_tape lands a finished run (the tape JSON from the tooling worker): decode the events +
+    // output + exit, and park the scrubber at the start (or, for a fault, at the LAST event — where it
+    // stopped).
+    fn apply_tape(mut self, js: string) {
+        self.decode(js)
+        self.running = false
+        self.ran = true
+        self.scrub = 0
+        if self.exit_code != 0 && self.events.len() > 0 {
+            self.scrub = self.events.len() - 1   // a fault → jump to where it stopped
         }
     }
 
@@ -210,23 +206,14 @@ fn new_runner() -> Runner {
 }
 
 
-// run_worker is the fiber behind the scrubber: receive a file path, run it under `--emit=trace`, split
-// the tape events (lines starting with `{"fn":`) from the program's own stdout, and send back a compact
-// JSON envelope. Mirrors std/http's stream_worker; closing req_ch ends it (nursery join).
-fn run_worker(req_ch: Channel<string>, resp_ch: Channel<string>) {
-    loop {
-        match recv(req_ch) {
-            case Some(path) {
-                let cc = verify.inglec_path()
-                let q = proc.shell_quote(path)
-                let r = proc.run(cc + " --emit=trace " + q)
-                send(resp_ch, encode_trace(path, r.code(), r.out(), r.err()))
-            }
-            case None {
-                break
-            }
-        }
-    }
+// run_trace runs `path` under `--emit=trace`, splits the tape events (lines starting `{"fn":`) from the
+// program's own stdout, and returns the compact JSON envelope. Called on the shared tooling worker
+// fiber (tools.ig) — one tooling fiber instead of three, to ease worker-thread contention on the UI.
+fn run_trace(path: string) -> string {
+    let cc = verify.inglec_path()
+    let q = proc.shell_quote(path)
+    let r = proc.run(cc + " --emit=trace " + q)
+    return encode_trace(path, r.code(), r.out(), r.err())
 }
 
 

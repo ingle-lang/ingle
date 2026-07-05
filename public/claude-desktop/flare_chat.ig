@@ -209,7 +209,7 @@ fn model_id(idx: int) -> string {
 
 fn model_label(idx: int) -> string {
     if idx == 1 {
-        return "Sonnet 4.6"
+        return "Sonnet 5"
     }
     if idx == 2 {
         return "Haiku 4.5"
@@ -1640,7 +1640,7 @@ fn main() -> int {
                     f.text_muted("Pinned by ANTHROPIC_MODEL")
                 } else {
                     f.row(flare.START, flare.CENTER)
-                    let nm = f.dropdown("model", ["Opus 4.8", "Sonnet 4.6", "Haiku 4.5"], model_idx)
+                    let nm = f.dropdown("model", ["Opus 4.8", "Sonnet 5", "Haiku 4.5"], model_idx)
                     f.end()
                     if nm != model_idx {
                         model_idx = nm

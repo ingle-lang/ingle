@@ -88,15 +88,11 @@ struct Linter {
     }
 
 
-    // drain lands a finished check: store the error lines against the file that was checked.
-    fn drain(mut self, resp_ch: Channel<string>) {
-        match try_recv(resp_ch) {
-            case Some(csv) {
-                self.store(self.checking_path, csv)
-                self.checking = false
-            }
-            case None {}
-        }
+    // apply_result lands a finished check (the CSV of error lines from the tooling worker): store it
+    // against the file that was checked, and clear the in-flight flag.
+    fn apply_result(mut self, csv: string) {
+        self.store(self.checking_path, csv)
+        self.checking = false
     }
 
 
@@ -139,25 +135,16 @@ fn is_ingle(path: string) -> bool {
 }
 
 
-// lint_worker is the fiber behind the squiggles: receive buffer text, write it to a temp file, run the
-// compiler's machine-readable diagnostics over it, and send back the comma-joined error LINES (unique,
-// in order). Mirrors std/http's stream_worker; closing req_ch ends it (nursery join).
-fn lint_worker(req_ch: Channel<string>, resp_ch: Channel<string>) {
-    loop {
-        match recv(req_ch) {
-            case Some(code) {
-                let path = tmp_path()
-                write_file(path, code)
-                let cc = verify.inglec_path()
-                let q = proc.shell_quote(path)
-                let r = proc.run(cc + " --emit=bytecode --diagnostics=json " + q)
-                send(resp_ch, error_lines(r.err()))
-            }
-            case None {
-                break
-            }
-        }
-    }
+// run_lint writes the buffer to a temp file, runs the compiler's machine-readable diagnostics over it,
+// and returns the comma-joined error LINES (unique, in order). Called on the shared tooling worker
+// fiber (tools.ig) — one tooling fiber instead of three, to ease worker-thread contention on the UI.
+fn run_lint(code: string) -> string {
+    let path = tmp_path()
+    write_file(path, code)
+    let cc = verify.inglec_path()
+    let q = proc.shell_quote(path)
+    let r = proc.run(cc + " --emit=bytecode --diagnostics=json " + q)
+    return error_lines(r.err())
 }
 
 

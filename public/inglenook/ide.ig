@@ -23,6 +23,7 @@ import "files" as files
 import "verify" as verify
 import "run" as run
 import "lint" as lint
+import "tools" as tools
 
 // Keyboard shortcuts (raylib keycodes): ⌘/Ctrl with +/- to zoom, N new chat, K palette,
 // comma settings, Q quit; Esc stops a streaming reply.
@@ -257,21 +258,17 @@ fn main() -> int {
     let stop_ch: Channel<bool> = channel(2)
     let disco_base_ch: Channel<string> = channel(2)
     let disco_resp_ch: Channel<string> = channel(2)
-    let verify_req_ch: Channel<string> = channel(2)    // the Verified Loop: snippet → worker
-    let verify_resp_ch: Channel<string> = channel(4)   // …its verdict JSON comes back here
-    let run_req_ch: Channel<string> = channel(2)       // the tape scrubber: file path → worker
-    let run_resp_ch: Channel<string> = channel(4)      // …its tape + output envelope comes back here
-    let lint_req_ch: Channel<string> = channel(2)      // live diagnostics: buffer text → worker
-    let lint_resp_ch: Channel<string> = channel(4)     // …the error lines (CSV) come back here
+    // ONE tooling worker for verify + tape-run + lint (kind-tagged), so the app runs 4 worker fibers
+    // (api, ollama, discovery, tools) instead of 6 — less worker-thread contention on the render loop.
+    let tool_req_ch: Channel<string> = channel(4)      // tagged verify/run/lint requests → the tooling worker
+    let tool_resp_ch: Channel<string> = channel(8)     // …tagged results (verdict / tape / CSV) come back here
     let api_key = env("ANTHROPIC_API_KEY")
     let ollama_base = oll.default_base()
     nursery {
     spawn api.stream_worker(api_key, req_ch, resp_ch, stop_ch)
     spawn oll.stream_worker(ollama_base, oll_req_ch, resp_ch, stop_ch)
     spawn oll.disco_worker(disco_base_ch, disco_resp_ch)
-    spawn verify.verify_worker(verify_req_ch, verify_resp_ch)   // compiles+checks+runs agent code off-thread
-    spawn run.run_worker(run_req_ch, run_resp_ch)              // runs the editor file + captures its tape
-    spawn lint.lint_worker(lint_req_ch, lint_resp_ch)         // diagnostics on the live buffer (squiggles)
+    spawn tools.tool_worker(tool_req_ch, tool_resp_ch)          // verify + tape-run + lint, serialised off-thread
     if ch.provider == 1 {
         send(disco_base_ch, ollama_base)
         ch.discovering = true
@@ -289,9 +286,21 @@ fn main() -> int {
         linter.begin_frame()
         ch.drain(resp_ch, req_ch, oll_req_ch)
         ch.drain_disco(disco_resp_ch)
-        ch.drain_verify(verify_resp_ch)
-        runner.drain(run_resp_ch)
-        linter.drain(lint_resp_ch)
+        // One tooling-response drain, routed by the kind tag back to chat / runner / linter.
+        match try_recv(tool_resp_ch) {
+            case Some(m) {
+                let k = tools.kind_of(m)
+                let p = tools.payload_of(m)
+                if k == tools.KIND_VERIFY {
+                    ch.apply_verdict(p)
+                } else if k == tools.KIND_RUN {
+                    runner.apply_tape(p)
+                } else if k == tools.KIND_LINT {
+                    linter.apply_result(p)
+                }
+            }
+            case None {}
+        }
         linter.note_buffer(panes.active_path(0), panes.active_text(0))   // debounced live-check of Editor 1
         var quit = false
         var want_disco = false
@@ -719,15 +728,15 @@ fn main() -> int {
             ch.discovering = true
         }
         if ch.verify_code.len() > 0 {          // a reply carried Ingle code → verify it off-thread
-            send(verify_req_ch, ch.verify_code)
+            send(tool_req_ch, tools.verify_req(ch.verify_code))
         }
         if runner.run_code.len() > 0 {         // the Run button → run the file + capture its tape
             runner.running = true
             runner.ran_path = runner.run_code
-            send(run_req_ch, runner.run_code)
+            send(tool_req_ch, tools.run_req(runner.run_code))
         }
         if linter.pend_code.len() > 0 {        // the editor buffer settled → live-check it for squiggles
-            send(lint_req_ch, linter.pend_code)
+            send(tool_req_ch, tools.lint_req(linter.pend_code))
         }
         if tree.open_path.len() > 0 {          // a file-tree click → open in the chosen pane
             panes.open(tree.open_pane, tree.open_path)
@@ -777,9 +786,7 @@ fn main() -> int {
     close(req_ch)
     close(oll_req_ch)
     close(disco_base_ch)
-    close(verify_req_ch)   // wake the verify worker out of recv → None → it exits (nursery join)
-    close(run_req_ch)      // …and the tape-run worker
-    close(lint_req_ch)     // …and the live-diagnostics worker
+    close(tool_req_ch)     // wake the tooling worker out of recv → None → it exits (nursery join)
     // M:N safety: tear graphics down on THIS thread (it owns the GL context) BEFORE the nursery
     // join below — see flare_chat for the full story.
     if tape_path.len() > 0 {

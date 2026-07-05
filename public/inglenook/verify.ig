@@ -94,30 +94,21 @@ fn tmp_path() -> string {
 }
 
 
-// verify_worker is the fiber behind the loop: receive a snippet on req_ch, write it to a temp file,
-// run the compiler THREE ways (compile+run, then the prover), pack the verdict as JSON, send it on
-// resp_ch. Mirrors std/http's stream_worker — blocking work off the render thread. Closing req_ch
-// (recv → None) ends it, so the nursery join never deadlocks.
-fn verify_worker(req_ch: Channel<string>, resp_ch: Channel<string>) {
-    loop {
-        match recv(req_ch) {
-            case Some(code) {
-                let path = tmp_path()
-                write_file(path, code)
-                let cc = inglec_path()
-                let q = proc.shell_quote(path)
-                // 1. compile + run: exit 0 = compiles AND runs clean; on failure the stderr carries a
-                //    --diagnostics=json compile error OR a --faults=agent runtime fault.
-                let r_run = proc.run(cc + " --emit=run --diagnostics=json --faults=agent " + q)
-                // 2. the prover: --emit=check searches each contract for a counterexample (stdout).
-                let r_chk = proc.run(cc + " --emit=check " + q)
-                send(resp_ch, encode(r_run.ok(), r_run.err(), r_chk.out()))
-            }
-            case None {
-                break
-            }
-        }
-    }
+// run_verify does the actual verification: write the snippet to a temp file, run the compiler THREE
+// ways (compile+run, then the prover), and return the packed verdict JSON. Called on the shared tooling
+// worker fiber (tools.ig) — blocking work off the render thread. Kept a plain function (not its own
+// fiber) so Inglenook runs ONE tooling worker, not three (less worker-thread contention on the UI).
+fn run_verify(code: string) -> string {
+    let path = tmp_path()
+    write_file(path, code)
+    let cc = inglec_path()
+    let q = proc.shell_quote(path)
+    // 1. compile + run: exit 0 = compiles AND runs clean; on failure the stderr carries a
+    //    --diagnostics=json compile error OR a --faults=agent runtime fault.
+    let r_run = proc.run(cc + " --emit=run --diagnostics=json --faults=agent " + q)
+    // 2. the prover: --emit=check searches each contract for a counterexample (stdout).
+    let r_chk = proc.run(cc + " --emit=check " + q)
+    return encode(r_run.ok(), r_run.err(), r_chk.out())
 }
 
 

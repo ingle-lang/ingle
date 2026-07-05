@@ -48,7 +48,7 @@ Everything here is wired to real behaviour — it's meant to be a *usable* app, 
   - **Appearance** — Dark / Light theme (re‑themes the whole app).
   - **Provider** — Claude (API) / Ollama (local). Choosing Ollama discovers and lists the chat
     models installed on your machine; pick one (or **Refresh models**). See *Local models (Ollama)*.
-  - **Model** — Opus 4.8 / Sonnet 4.6 / Haiku 4.5 (the Anthropic `model`; replaced by the discovered
+  - **Model** — Opus 4.8 / Sonnet 5 / Haiku 4.5 (the Anthropic `model`; replaced by the discovered
     local‑model list when the provider is Ollama).
   - **Max tokens** — 1K / 2K / 4K / 8K (changes the request).
   - **Zoom** — 60–220% (scales the conversation text + column).

@@ -206,25 +206,20 @@ struct Chat {
     }
 
 
-    // drain_verify lands the Verified Loop's result: decode the verdict, then AUTO-ROUTE a red one
-    // back to the model — append the precise fault (or the prover's counterexample) as a new user
-    // turn and re-send, so the model fixes it and tries again, capped at verify.VERIFY_CAP rounds so
-    // a genuinely hard bug can't spiral. A green verdict resets the round counter. Polled each frame.
-    fn drain_verify(mut self, verify_resp_ch: Channel<string>) {
-        match try_recv(verify_resp_ch) {
-            case Some(vj) {
-                self.verdict = verify.decode(vj)
-                self.verifying = false
-                if verify.all_green(self.verdict) {
-                    self.verify_rounds = 0
-                } else if self.auto_verify && self.verify_rounds < verify.VERIFY_CAP && !self.pending {
-                    self.verify_rounds = self.verify_rounds + 1
-                    self.turns.append(api.mk_turn(0, verify.agent_feedback(self.verdict)))
-                    self.want_send = true
-                    self.dirty = true
-                }
-            }
-            case None {}
+    // apply_verdict lands the Verified Loop's result (the verdict JSON from the tooling worker): decode
+    // it, then AUTO-ROUTE a red one back to the model — append the precise fault (or the prover's
+    // counterexample) as a new user turn and re-send, so the model fixes it and tries again, capped at
+    // verify.VERIFY_CAP rounds so a genuinely hard bug can't spiral. A green verdict resets the counter.
+    fn apply_verdict(mut self, vj: string) {
+        self.verdict = verify.decode(vj)
+        self.verifying = false
+        if verify.all_green(self.verdict) {
+            self.verify_rounds = 0
+        } else if self.auto_verify && self.verify_rounds < verify.VERIFY_CAP && !self.pending {
+            self.verify_rounds = self.verify_rounds + 1
+            self.turns.append(api.mk_turn(0, verify.agent_feedback(self.verdict)))
+            self.want_send = true
+            self.dirty = true
         }
     }
 
@@ -275,7 +270,7 @@ struct Chat {
             return "(env)"
         }
         if self.model_idx == 1 {
-            return "Sonnet 4.6"
+            return "Sonnet 5"
         }
         if self.model_idx == 2 {
             return "Haiku 4.5"
@@ -663,7 +658,7 @@ struct Chat {
                 f.text_muted("Pinned by ANTHROPIC_MODEL")
             } else {
                 f.row(flare.START, flare.CENTER)
-                let nm = f.dropdown("model", ["Opus 4.8", "Sonnet 4.6", "Haiku 4.5"], self.model_idx)
+                let nm = f.dropdown("model", ["Opus 4.8", "Sonnet 5", "Haiku 4.5"], self.model_idx)
                 f.end()
                 if nm != self.model_idx {
                     self.model_idx = nm

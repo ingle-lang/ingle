@@ -17,7 +17,7 @@ import "std/string" as str
 // The current Claude model ids (knowledge cutoff: 2026-01). Use these instead of hardcoding
 // strings, so a model refresh is a one-line change here that every caller inherits.
 let MODEL_OPUS   = "claude-opus-4-8"
-let MODEL_SONNET = "claude-sonnet-4-6"
+let MODEL_SONNET = "claude-sonnet-5"
 let MODEL_HAIKU  = "claude-haiku-4-5-20251001"
 
 
