@@ -23,6 +23,20 @@ static Diag  *g_diags = NULL;
 static int    g_count = 0;
 static int    g_cap   = 0;
 static int    g_json  = 0;
+static int    g_mute  = 0;   // >0 → drop diagnostics (a speculative sub-parse whose errors we replace)
+
+
+// diag_mute nests: diag_mute(1) suppresses every diagnostic until a matching diag_mute(0). Used when
+// the parser SPECULATIVELY re-lexes/re-parses a fragment (a string-interpolation hole) and will emit
+// its own clean, correctly-located error instead of the fragment's mislocated ones. Works in BOTH
+// human mode (which prints immediately) and JSON mode (which buffers) — the mute is checked first.
+void diag_mute(int on) {
+    if (on) {
+        g_mute++;
+    } else if (g_mute > 0) {
+        g_mute--;
+    }
+}
 
 
 
@@ -89,6 +103,9 @@ static void print_human(const Diag *d) {
 
 void diag_error(const char *file, int line, int col,
                 const char *msg, const char *near, const char *help) {
+    if (g_mute > 0) {
+        return;                 // suppressed: a speculative sub-parse; the caller emits its own error
+    }
     if (!g_json) {
         // Human mode: print immediately, no bookkeeping — identical to before.
         Diag d = { (char *)file, line, col, (char *)msg, (char *)near,
@@ -119,6 +136,9 @@ void diag_error(const char *file, int line, int col,
 
 
 void diag_note(const char *file, int line, int col, const char *msg) {
+    if (g_mute > 0) {
+        return;
+    }
     if (!g_json || g_count == 0) {
         if (!g_json) {
             // Human mode: append the note line under the just-printed diagnostic.

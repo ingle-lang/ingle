@@ -756,10 +756,31 @@ static void build_string_parts(Parser *p, const Token *strtok, const char *raw,
                 error_at(p, strtok, "empty interpolation '{}'");
             } else if (np < MAX_STR_PARTS) {
                 const char *hole = arena_strndup(p->arena, raw + i + 1, holelen);
+                // The `{`'s true file position, for a well-located error (walk to raw[i]).
+                int brace_line = strtok->line;
+                int brace_col  = strtok->col + 1;         // file col of raw[0] (just past the opening ")
+                for (size_t k = 0; k < i; k++) {
+                    if (raw[k] == '\n') { brace_line++; brace_col = 1; } else { brace_col++; }
+                }
+                diag_mute(1);                             // the hole re-lex is SPECULATIVE — mute its diagnostics
                 TokenList sub = lexer_scan(hole, p->src_name);
-                // The hole was re-lexed standalone, so its tokens carry hole-relative positions
-                // (line 1, col from the hole start). Offset them to where the hole actually sits in
-                // the file, so tooling (hover, go-to-definition, semantic tokens) sees interpolated
+                diag_mute(0);
+                if (sub.had_error) {
+                    // The hole doesn't even LEX (e.g. it holds raw text like `\n  return 1`) — almost
+                    // always a literal brace that should have been escaped. The sub-lexer's hole-relative
+                    // diagnostics (bunched at line 1) were muted; point ONE clear error at the actual `{`
+                    // instead. (OFI-181: no more phantom "line 1 near '\'" cascades.)
+                    diag_error(p->src_name, brace_line, brace_col,
+                               "'{' begins a string interpolation, but its contents are not a valid expression",
+                               "{", "write '\\{' for a LITERAL brace, or put a valid expression in the hole");
+                    p->had_error = 1;
+                    token_list_free(&sub);
+                    i = j + 1;                            // skip the whole hole; carry on collecting errors
+                    continue;
+                }
+                // The hole re-lexed standalone, so its tokens carry hole-relative positions (line 1, col
+                // from the hole start). Offset them to where the hole actually sits in the file, so tooling
+                // (hover, go-to-definition, semantic tokens) — and any PARSE error below — sees interpolated
                 // identifiers at their true location instead of all bunched at line 1.
                 {
                     int hl = strtok->line;
@@ -1050,6 +1071,18 @@ static Expr *parse_primary(Parser *p) {
             return e;
         }
         default:
+            if (pk(p) == TOK_ERROR) {
+                // The lexer already reported this token (an unterminated string / bad character). Don't
+                // pile a second "expected an expression" on it — recover quietly, and enter panic so the
+                // follow-on "expected '}'" cascade is suppressed too (OFI-181). Panic clears at the next
+                // statement boundary, so real later errors are still reported.
+                p->had_error = 1;
+                p->panic     = 1;
+                if (!at_end(p)) {
+                    adv(p);
+                }
+                return NULL;
+            }
             error_at(p, cur(p), "expected an expression");
             if (!at_end(p)) {
                 adv(p); // guarantee progress

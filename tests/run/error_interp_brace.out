@@ -1,0 +1,2 @@
+tests/run/error_interp_brace.ig:6:20: error: '{' begins a string interpolation, but its contents are not a valid expression (near '{')
+tests/run/error_interp_brace.ig:6:20: help: write '\{' for a LITERAL brace, or put a valid expression in the hole

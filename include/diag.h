@@ -40,6 +40,7 @@ typedef struct {
     const char *msg;
 } DiagInfo;
 int diag_count(void);                  // number collected since the last reset
+void diag_mute(int on);                // nested: diag_mute(1)…diag_mute(0) suppresses diagnostics between
 int diag_at(int i, DiagInfo *out);     // fill *out for index i; 1 on success, 0 if out of range
 
 #endif // EMBER_DIAG_H
