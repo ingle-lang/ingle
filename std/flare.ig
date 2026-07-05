@@ -275,6 +275,46 @@ fn _gutter_w(nlines: int, cs: int, pad: int) -> int {
 }
 
 
+// _join_ints renders a line-number list as a comma-joined string (for stashing editor markers in the
+// string-keyed state map); _line_marked reads it back to test membership without materialising a list.
+fn _join_ints(xs: [int]) -> string {
+    var out = ""
+    var i = 0
+    loop {
+        if i == xs.len() {
+            break
+        }
+        if i > 0 {
+            out = out + ","
+        }
+        out = out + "{xs[i]}"
+        i = i + 1
+    }
+    return out
+}
+
+
+// _line_marked reports whether line number `n` appears in a comma-joined marks string (from _join_ints).
+fn _line_marked(marks: string, n: int) -> bool {
+    if marks.len() == 0 {
+        return false
+    }
+    let parts = marks.split(",")
+    let want = "{n}"
+    var i = 0
+    loop {
+        if i == parts.len() {
+            break
+        }
+        if parts[i] == want {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+
 // _trim drops leading and trailing spaces (for parsing table cells out of "| a | b |").
 fn _trim(s: string) -> string {
     let n = str.cp_count(s)
@@ -3287,18 +3327,32 @@ struct Flare {
     // highlighted and painted, so a thousand-line file costs the same as a screenful. Input runs now
     // against last frame's rect (mono font active for the hit-test); paint is deferred to the solved rect.
     fn code_editor(mut self, key: string, lang: string, value: string) -> string {
+        let none: [int] = []
+        return self.code_editor_marked(key, lang, value, none, 0 - 1)
+    }
+
+
+    // code_editor_marked is code_editor with two extra affordances the IDE needs: `marks` is a list of
+    // 1-based line numbers to flag with a red squiggle + gutter dot (compiler diagnostics), and `hot` is
+    // a 1-based line to spotlight with a full-width highlight band (the execution tape's current line as
+    // you scrub) — pass -1 for none. Both are stashed in encapsulated state for the painter to read at
+    // the solved rect; everything else is code_editor.
+    fn code_editor_marked(mut self, key: string, lang: string, value: string, marks: [int], hot: int) -> string {
         self._ensure_fonts()
         let id  = self.scope + key
+        let pid = "{lang}\n{id}"                         // paint-node id: lang (highlighter) + wkey (state/focus)
         let wid = self.ui.wid(key)
         let cs  = self.ui.style.text_size - 1
         let lh  = cs + cs / 2
         let pad = self.ui.style.pad
+        self.set_str(key + "/marks", _join_ints(marks))   // for the painter (read by wkey at paint time)
+        self.set_int(key + "/hot", hot)
         var voff = self.state_int(key + "/voff", 0)     // scroll persists per-editor (encapsulated state)
         var hoff = self.state_int(key + "/hoff", 0)
         var shown = value
         let nlines = value.split("\n").len()
         if !(self._modal && !self._in_modal) {          // inert while a modal covers the app
-            match self.rects.get(id) {
+            match self.rects.get(pid) {
                 case Some(r) {
                     var mslot = self.mono
                     if mslot < 0 {
@@ -3349,7 +3403,7 @@ struct Flare {
             }
         }
         let node = self.lo.leaf(0, lh * 3 + pad * 2, 1)   // STRETCH width, GROW to fill the slot's height
-        self._queue(node, _EDITOR, shown, id)
+        self._queue(node, _EDITOR, shown, pid)
         return shown
     }
 
@@ -3495,6 +3549,8 @@ struct Flare {
         }
         let voff = self.state_int(wkey + "/voff", 0)     // absolute id-key (scope is "" at paint) — see code_editor
         let hoff = self.state_int(wkey + "/hoff", 0)
+        let marks = self.state_str(wkey + "/marks", "")  // 1-based diagnostic lines (red squiggle + gutter dot)
+        let hot = self.state_int(wkey + "/hot", 0 - 1)   // 1-based execution line to spotlight (tape scrubber)
         let focused = self.ui.focus == hash(wkey)
         var lo = self.ui.sel_anchor
         var hi = self.ui.caret
@@ -3555,6 +3611,10 @@ struct Flare {
             if focused && self.ui.caret >= gbase && self.ui.caret <= gbase + cpn {
                 ncol = st.ink                            // the caret's line number brightens
             }
+            if _line_marked(marks, gi + 1) {             // a diagnostic on this line → a red gutter dot + red number
+                fill_circle(x + pad / 2 + 3, ty0 + gi * lh + lh / 2, 3, st.danger, 255)
+                ncol = st.danger
+            }
             draw_text(num, x + gutw - pad - nw, ty0 + gi * lh, cs, ncol)
             gbase = gbase + cpn + 1
             gi = gi + 1
@@ -3572,6 +3632,9 @@ struct Flare {
             let ly = ty0 + li * lh
             let cpn = str.cp_count(lines[li])
             let lend = base + cpn
+            if hot == li + 1 {                           // the execution tape's current line → a full-width spotlight
+                fill_round(x + gutw, ly, w - gutw, lh, 0, st.accent, 46)
+            }
             if has_sel && hi > base && lo <= lend {      // selection underlay for this line (the _paint_code logic)
                 var a = lo
                 if a < base {
@@ -3607,6 +3670,14 @@ struct Flare {
                 draw_text(sp[si].text, gx, ly, cs, self._code_color(sp[si].kind))
                 gx = gx + measure_text(sp[si].text, cs)
                 si = si + 1
+            }
+            if _line_marked(marks, li + 1) {             // a diagnostic on this line → a red underline under the code
+                let lw = measure_text(lines[li], cs)
+                var uw = lw
+                if uw < space_w {
+                    uw = space_w                         // an empty/blank marked line still shows a stub
+                }
+                fill_round(tx0, ly + lh - 2, uw, 2, 0, st.danger, 220)
             }
             base = base + cpn + 1
             li = li + 1
