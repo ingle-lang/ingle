@@ -227,7 +227,7 @@ struct Chat {
     // send_now dispatches the CURRENT transcript to the active provider's worker. Central so the
     // first send, the agentic re-send, and Retry can never drift in how they build a request.
     fn send_now(mut self, req_ch: Channel<string>, oll_req_ch: Channel<string>) {
-        let esys = effective_system(self.sys_prompt)
+        let esys = effective_system(self.sys_prompt, self.provider)
         var model = api.MODEL_OPUS
         if self.use_env {
             model = self.env_model
@@ -1057,20 +1057,31 @@ fn tool_defs() -> json.Json {
 }
 
 
-// default_system is the steering prompt sent when the user hasn't set their own. It names the
-// setting (an IDE written in Ingle), the tools, and the desktop-chat conventions that keep
-// tool_choice=auto from writing files just to show an example.
-fn default_system() -> string {
-    return "You are Claude working inside Inglenook, an IDE written in the Ingle programming language — its UI, HTTP stack, and this chat are all Ingle code. You have tools over the project the IDE was launched in: list_dir to browse directories, read_file to inspect files, write_file to create or overwrite a file (relative paths only). Read the relevant files before answering questions about them. Show code, commands, and examples INLINE in your reply as Markdown fenced code blocks; use write_file ONLY when the user explicitly asks you to save, create, or change a file on disk."
+// assistant_identity opens the steering prompt with a PROVIDER-ACCURATE identity: Claude on the
+// hosted Anthropic API, a neutral local-assistant line on Ollama. Sending "You are Claude" to a
+// local model (qwen etc.) makes it dutifully role-play as Claude — so only claim it when it's true.
+fn assistant_identity(provider: int) -> string {
+    if provider == 1 {
+        return "You are a helpful coding assistant running locally via Ollama"
+    }
+    return "You are Claude"
 }
 
 
-// effective_system returns the user's system prompt if set, else the default steering prompt.
-fn effective_system(user: string) -> string {
+// default_system is the steering prompt sent when the user hasn't set their own. It names the
+// setting (an IDE written in Ingle), the tools, and the desktop-chat conventions that keep
+// tool_choice=auto from writing files just to show an example. The identity is provider-accurate.
+fn default_system(provider: int) -> string {
+    return assistant_identity(provider) + " working inside Inglenook, an IDE written in the Ingle programming language — its UI, HTTP stack, and this chat are all Ingle code. You have tools over the project the IDE was launched in: list_dir to browse directories, read_file to inspect files, write_file to create or overwrite a file (relative paths only). Read the relevant files before answering questions about them. Show code, commands, and examples INLINE in your reply as Markdown fenced code blocks; use write_file ONLY when the user explicitly asks you to save, create, or change a file on disk."
+}
+
+
+// effective_system returns the user's system prompt if set, else the provider-accurate default.
+fn effective_system(user: string, provider: int) -> string {
     if user.len() > 0 {
         return user
     }
-    return default_system()
+    return default_system(provider)
 }
 
 

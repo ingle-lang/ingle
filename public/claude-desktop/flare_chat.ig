@@ -88,17 +88,28 @@ fn tool_defs() -> json.Json {
 // Without it the model, handed read_file/write_file with tool_choice=auto, reads "write ... code" literally and
 // SAVES a file instead of showing the example inline — so this pins the desktop-chat convention: code goes in
 // the reply as a fenced code block; the file tools are for EXPLICIT file requests only.
-fn default_system() -> string {
-    return "You are Claude, a helpful assistant in a desktop chat app. Show code, commands, and examples INLINE in your reply as Markdown fenced code blocks — never create or write a file just to show an example. Use the write_file tool ONLY when the user explicitly asks you to save or create a file on disk, and read_file only to inspect a file the user refers to."
+fn default_system(provider: int) -> string {
+    return assistant_identity(provider) + " in a desktop chat app. Show code, commands, and examples INLINE in your reply as Markdown fenced code blocks — never create or write a file just to show an example. Use the write_file tool ONLY when the user explicitly asks you to save or create a file on disk, and read_file only to inspect a file the user refers to."
 }
 
 
-// effective_system returns the user's system prompt if they set one, else the default steering prompt.
-fn effective_system(user: string) -> string {
+// assistant_identity opens the steering prompt with a PROVIDER-ACCURATE identity — Claude on the hosted
+// Anthropic API, a neutral line on Ollama. "You are Claude" handed to a local model (qwen etc.) makes it
+// role-play as Claude, so only claim it when it's actually the one answering.
+fn assistant_identity(provider: int) -> string {
+    if provider == 1 {
+        return "You are a helpful assistant"
+    }
+    return "You are Claude, a helpful assistant"
+}
+
+
+// effective_system returns the user's system prompt if they set one, else the provider-accurate default.
+fn effective_system(user: string, provider: int) -> string {
     if user.len() > 0 {
         return user
     }
-    return default_system()
+    return default_system(provider)
 }
 
 
@@ -275,7 +286,7 @@ fn provider_label(provider: int) -> string {
 // selected local model advertised the `tools` capability (OFI-135). Centralised so the first send, the
 // agentic re-send after a tool result, and Retry can never drift in how they build or route a request.
 fn send_turn(provider: int, anth_ch: Channel<string>, oll_ch: Channel<string>, anth_model: string, ollama_model: string, max_tokens: int, sys: string, turns: [api.Turn], oll_tools: bool) {
-    let esys = effective_system(sys)                         // fall back to the steering prompt when the user's is empty
+    let esys = effective_system(sys, provider)               // fall back to the provider-accurate steering prompt
     if provider == 1 {
         var tools = json.arr([])                             // no tools unless the local model supports them
         if oll_tools {
