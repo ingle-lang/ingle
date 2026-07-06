@@ -63,6 +63,19 @@ void register_object(EmberRt *ctx, Obj *o) {
 // later same-class request fits. Oversized objects fall through to exact malloc
 // (size_class -1) and are free()d on death.
 void *pooled_alloc(EmberRt *ctx, size_t size) {
+#ifdef EMBER_POOL_BYPASS
+    // Diagnostic: never recycle — every object is a real malloc/free so ASan tracks its true
+    // lifetime and catches double-frees/use-after-free the pool would otherwise hide (size_class
+    // -1 routes it to free() in pooled_free).
+    (void)ctx;
+    Obj *by = malloc(size);
+    if (by == NULL) {
+        fprintf(stderr, "inglec: out of memory allocating an object\n");
+        exit(70);
+    }
+    by->size_class = -1;
+    return by;
+#else
     size_t cls = (size + 15) >> 4;
     if (cls < POOL_CLASSES) {
         Obj *o = ctx->pool[cls];        // private arena → no lock
@@ -86,6 +99,7 @@ void *pooled_alloc(EmberRt *ctx, size_t size) {
     }
     big->size_class = -1;
     return big;
+#endif
 }
 
 

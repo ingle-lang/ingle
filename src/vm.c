@@ -1471,6 +1471,15 @@ static void *worker_entry(void *p) {
         a->result = VM_RUNTIME_ERROR;
         return NULL;
     }
+    memset(w, 0, sizeof *w);           // START FULLY ZEROED, like the main VM (vm_run). worker_entry sets
+                                       // only a handful of fields; the rest are CONTROL state whose garbage
+                                       // (from a raw malloc) corrupts execution intermittently — most
+                                       // sharply `reentry_floor` (OP_RETURN returns from run() at
+                                       // frame_count <= it: a junk floor either returned early mid-call,
+                                       // dropping the fiber's result, or ran past frame_count 0 into
+                                       // frames[-1]), plus nondet_mode / capturing / exit_requested /
+                                       // check_mode / route_hop_count. The value — and thus the failure —
+                                       // is heap-garbage dependent, which is exactly why it read as a race.
     w->heap         = a->heap;
     w->rt.objects      = NULL;            // this worker's private, lock-free arena
     for (int c = 0; c < POOL_CLASSES; c++) {
