@@ -390,7 +390,10 @@ static int w_http_post(const Value *a, Value *o) {
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, net_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &m);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "ingle-claude/0.1");
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);          // thread-safe timeouts (see http_get) — also makes
+                                                           // the connect timeout below actually fire for a hostname
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);   // bound the connect phase (DNS+TCP+TLS) so a
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);         // cold/blocked first connect fails in ~15s, not 300s
     CURLcode rc = curl_easy_perform(curl);
     curl_slist_free_all(hdrs);
     free(hcopy);
@@ -438,6 +441,10 @@ static int w_http_get(const Value *a, Value *o) {
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, net_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &m);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "ingle-http/0.1");
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);         // REQUIRED off the main thread: without it libcurl
+                                                          // bounds name resolution with SIGALRM, which is
+                                                          // unsafe in a threaded runtime and hangs a hostname
+                                                          // GET (e.g. localhost) until the total timeout
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 4L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
     CURLcode rc = curl_easy_perform(curl);
@@ -537,7 +544,11 @@ static int w_http_open(const Value *a, Value *o) {
     curl_easy_setopt(s->easy, CURLOPT_WRITEFUNCTION, hs_write_cb);
     curl_easy_setopt(s->easy, CURLOPT_WRITEDATA, s);
     curl_easy_setopt(s->easy, CURLOPT_USERAGENT, "ingle-http/0.1");
-    curl_easy_setopt(s->easy, CURLOPT_TIMEOUT, 300L);
+    curl_easy_setopt(s->easy, CURLOPT_NOSIGNAL, 1L);        // thread-safe timeouts (see http_get) — the stream
+                                                            // worker is a fiber, so signal-based timing is unsafe
+    curl_easy_setopt(s->easy, CURLOPT_CONNECTTIMEOUT, 15L); // bound the connect phase (DNS+TCP+TLS): a cold or
+    curl_easy_setopt(s->easy, CURLOPT_TIMEOUT, 300L);       // blocked first connect fails in ~15s so the worker
+                                                            // reaches its error path instead of spinning ~5min
     curl_multi_add_handle(s->multi, s->easy);
     s->running = 1;
     o[0] = PTR_VAL(s);
