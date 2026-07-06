@@ -4674,6 +4674,34 @@ struct DockTree {
     }
 
 
+    // rename_panel renames a docked tab in place (id `old` -> `new`), keeping its leaf, position, and
+    // active state. A no-op if `old` isn't docked. Used to migrate a persisted layout when a panel is
+    // renamed (e.g. "Run" -> "Tape") so an old workspace file keeps the panel instead of orphaning it.
+    fn rename_panel(mut self, old: string, new: string) {
+        var i = 0
+        loop {
+            if i == self.dk_kind.len() {
+                break
+            }
+            if self.dk_kind[i] == 1 {
+                var j = 0
+                loop {
+                    if j == self.dk_tabs[i].len() {
+                        break
+                    }
+                    if self.dk_tabs[i][j] == old {
+                        self.dk_tabs[i][j] = new
+                        self._sync_panel(i)
+                        return
+                    }
+                    j = j + 1
+                }
+            }
+            i = i + 1
+        }
+    }
+
+
     // _detach removes `panel` from wherever it is docked WITHOUT destroying its sibling tabs: if its leaf has
     // more than one tab, just that tab is dropped (the leaf survives, active index clamped); if it is the leaf's
     // only tab, the leaf is closed and its parent split collapses (like close()). Returns false on unknown panel.

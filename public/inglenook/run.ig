@@ -12,6 +12,7 @@ import "verify" as verify
 
 
 let TAPE_CAP = 6000     // max events kept (a huge trace is capped so the channel + scrubber stay snappy)
+let TIMELINE_CAP = 500  // max timeline ROWS rendered per frame (the slider still covers the whole tape)
 
 
 // TapeEvent is one executed step: the function, the opcode, and the SOURCE LINE it ran (1-based) —
@@ -20,6 +21,17 @@ struct TapeEvent {
     fn_name: string
     op: string
     line: int
+}
+
+
+// TapeRow is one collapsed timeline row: a run of consecutive steps on the SAME source line + function,
+// starting at step `step` and `count` steps long. Clicking it scrubs the tape to `step`.
+struct TapeRow {
+    step: int
+    fn_name: string
+    line: int
+    op: string
+    count: int
 }
 
 
@@ -35,6 +47,8 @@ struct Runner {
     events: [TapeEvent]
     scrub: int              // current event index (the slider position)
     run_code: string        // per-frame action: a path to dispatch to the worker ("" = none)
+    save_tape: bool         // when set, persist the execution tape to a file after each run
+    tape_path: string       // where to save it ("" = <source>.tape, next to the file that ran)
 
 
     fn begin_frame(mut self) {
@@ -71,6 +85,9 @@ struct Runner {
         if self.exit_code != 0 && self.events.len() > 0 {
             self.scrub = self.events.len() - 1   // a fault → jump to where it stopped
         }
+        if self.save_tape {
+            self.write_tape_file()               // persist the captured tape to disk (opt-in)
+        }
     }
 
 
@@ -105,6 +122,17 @@ struct Runner {
         }
         f.end()
 
+        // Save-tape option: persist the captured execution tape to a portable, replayable file after
+        // each run. The path defaults to <source>.tape next to the file — edit it to send it elsewhere.
+        self.save_tape = f.checkbox("savetape", "Save tape to file", self.save_tape)
+        if self.save_tape {
+            let np = f.text_field("tapepath", self.tape_path)
+            if np != self.tape_path {
+                self.tape_path = np
+            }
+            f.text_muted("→ {self.effective_tape_path(active_path)}")
+        }
+
         if !self.ran {
             f.text_muted("Run the file to capture its execution tape, then scrub the line that ran.")
             return
@@ -130,6 +158,36 @@ struct Runner {
                 self.scrub = ns
             }
             self.scrub = self.clamp_scrub()
+        }
+
+        // Timeline: every executed step as a clickable row, with consecutive steps on the same source
+        // line collapsed to one row (× count). Click a row to jump the scrubber there — which also
+        // spotlights that line in the editor. The slider above still covers the whole tape if capped.
+        if self.events.len() > 0 {
+            f.divider()
+            f.text_muted("Timeline — click a step to jump")
+            let rows = self.timeline_rows()
+            f.scroll_begin("timeline")
+            var r = 0
+            loop {
+                if r == rows.len() || r == TIMELINE_CAP {
+                    break
+                }
+                let row = rows[r]
+                var upper = self.events.len()
+                if r + 1 < rows.len() {
+                    upper = rows[r + 1].step
+                }
+                let active = self.scrub >= row.step && self.scrub < upper
+                if f.nav_item(row_label(row), active) {
+                    self.scrub = row.step
+                }
+                r = r + 1
+            }
+            f.scroll_end("timeline")
+            if rows.len() > TIMELINE_CAP {
+                f.text_muted("… {rows.len() - TIMELINE_CAP} more step-groups (use the slider for the rest)")
+            }
         }
 
         // Program output (stdout, minus the tape lines).
@@ -188,6 +246,97 @@ struct Runner {
             case Err(e) {}
         }
     }
+
+
+    // timeline_rows collapses the events into clickable rows: a run of consecutive steps on the SAME
+    // source line + function becomes ONE row (with a count), so the timeline stays scannable even when a
+    // line runs many times back-to-back. Order is preserved; `step` is the row's FIRST event index.
+    fn timeline_rows(self) -> [TapeRow] {
+        var rows: [TapeRow] = []
+        var i = 0
+        loop {
+            if i == self.events.len() {
+                break
+            }
+            let e = self.events[i]
+            var j = i + 1
+            loop {
+                if j == self.events.len() {
+                    break
+                }
+                if self.events[j].line != e.line || self.events[j].fn_name != e.fn_name {
+                    break
+                }
+                j = j + 1
+            }
+            rows.append(TapeRow {
+                step: i,
+                fn_name: e.fn_name,
+                line: e.line,
+                op: e.op,
+                count: j - i
+            })
+            i = j
+        }
+        return rows
+    }
+
+
+    // effective_tape_path is where a saved tape actually lands: the user's `tape_path` if set, else
+    // <src>.tape derived from the file being run/edited.
+    fn effective_tape_path(self, src: string) -> string {
+        if self.tape_path.len() > 0 {
+            return self.tape_path
+        }
+        return default_tape_path(src)
+    }
+
+
+    // write_tape_file reconstructs the execution tape as JSON Lines — one {"fn","op","line"} object per
+    // step, the same shape `inglec --emit=trace` emits — and writes it to effective_tape_path. A no-op
+    // with no events or no destination. The result is a portable, replayable record of the run.
+    fn write_tape_file(self) {
+        let path = self.effective_tape_path(self.ran_path)
+        if path.len() == 0 || self.events.len() == 0 {
+            return
+        }
+        var lines: [string] = []
+        var i = 0
+        loop {
+            if i == self.events.len() {
+                break
+            }
+            let ev = self.events[i]
+            let obj = json.obj([
+                json.member("fn", json.str(ev.fn_name)),
+                json.member("op", json.str(ev.op)),
+                json.member("line", json.num(ev.line))
+            ])
+            lines.append(json.stringify(obj))
+            i = i + 1
+        }
+        write_file(path, sstr.join(lines, "\n") + "\n")
+    }
+
+
+    // tape_settings_json / load_tape_settings persist the two save-tape controls across sessions,
+    // threaded into the workspace store alongside the chat / dock / editor state.
+    fn tape_settings_json(self) -> json.Json {
+        return json.obj([
+            json.member("save_tape", json.boolean(self.save_tape)),
+            json.member("tape_path", json.str(self.tape_path))
+        ])
+    }
+
+
+    fn load_tape_settings(mut self, j: json.Json) {
+        if !json.is_null(json.get(j, "save_tape")) {
+            self.save_tape = json.as_bool(json.get(j, "save_tape"))
+        }
+        if !json.is_null(json.get(j, "tape_path")) {
+            self.tape_path = json.as_str(json.get(j, "tape_path"))
+        }
+    }
 }
 
 
@@ -201,8 +350,34 @@ fn new_runner() -> Runner {
         truncated: false,
         events: [],
         scrub: 0,
-        run_code: ""
+        run_code: "",
+        save_tape: false,
+        tape_path: ""
     }
+}
+
+
+// row_label formats one timeline row for its clickable list entry: source line, function, op, and a
+// ×count when consecutive same-line steps were collapsed into it.
+fn row_label(r: TapeRow) -> string {
+    var s = "line {r.line}  ·  {r.fn_name}  ·  {r.op}"
+    if r.count > 1 {
+        s = s + "  ×{r.count}"
+    }
+    return s
+}
+
+
+// default_tape_path derives <src>.tape from the source path (dropping a trailing .ig/.em) — the default
+// destination when the user hasn't typed an explicit tape path. Falls back to $HOME for a path-less src.
+fn default_tape_path(src: string) -> string {
+    if src.len() == 0 {
+        return env("HOME") + "/inglenook.tape"
+    }
+    if sstr.ends_with(src, ".ig") || sstr.ends_with(src, ".em") {
+        return sstr.cp_slice(src, 0, src.char_count() - 3) + ".tape"
+    }
+    return src + ".tape"
 }
 
 

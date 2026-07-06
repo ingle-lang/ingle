@@ -50,7 +50,7 @@ fn build_workspace() -> flare.DockTree {
     let e1 = d.split(chat_leaf, "Editor 1", true, 0.44)
     let _i = d.split(e1, "Inspector", true, 0.76)
     let e2 = d.split(e1, "Editor 2", false, 0.55)
-    d.add_tab(e2, "Run")
+    d.add_tab(e2, "Tape")                        // the execution-tape window (default tab; Editor 2 behind it)
     return d
 }
 
@@ -127,7 +127,7 @@ fn store_path() -> string {
 // save_store writes the whole workspace as versioned JSON: the chat fragment (conversations +
 // chat settings), the dock layout, the editors' open tabs, the tree's expansions, and the
 // app-level looks (theme / zoom / sidebar tab).
-fn save_store(ch: chat.Chat, dock: flare.DockTree, panes: editor.Panes, expanded: [string], dark: bool, zoom: int, side: int) {
+fn save_store(ch: chat.Chat, dock: flare.DockTree, panes: editor.Panes, expanded: [string], dark: bool, zoom: int, side: int, run_json: json.Json) {
     var ej: [json.Json] = []
     var i = 0
     loop {
@@ -145,7 +145,8 @@ fn save_store(ch: chat.Chat, dock: flare.DockTree, panes: editor.Panes, expanded
         json.member("dock", dock.to_json()),
         json.member("chat", ch.to_json()),
         json.member("editors", panes.to_json()),
-        json.member("tree", json.arr(ej))
+        json.member("tree", json.arr(ej)),
+        json.member("run", run_json)
     ])
     write_file(store_path(), json.stringify(root))
 }
@@ -223,10 +224,14 @@ fn main() -> int {
                 }
                 let dockj = json.get(root, "dock")
                 if !json.is_null(dockj) {
-                    let saved_dock = flare.dock_from_json(dockj)
+                    var saved_dock = flare.dock_from_json(dockj)
+                    saved_dock.rename_panel("Run", "Tape")   // migrate a pre-Tape workspace layout
                     if saved_dock.leaf_of("Chat") >= 0 {   // only if the pinned anchor survived
                         dock = saved_dock
                     }
+                }
+                if !json.is_null(json.get(root, "run")) {
+                    runner.load_tape_settings(json.get(root, "run"))   // restore the save-tape controls
                 }
             }
             case Err(e) {}
@@ -492,9 +497,9 @@ fn main() -> int {
             panes.build(f, 1, cw2, runner.hot_line(panes.active_path(1)), linter.lines_for(panes.active_path(1)))
             f.dock_panel_end()
         }
-        // --- Run: the tape scrubber (the "time window") ---
-        if f.dock_panel("Run") {
-            let cwr = panel_cw(f, "Run", 200, 3000)
+        // --- Tape: the execution-tape window (run + scrub + timeline + save) ---
+        if f.dock_panel("Tape") {
+            let cwr = panel_cw(f, "Tape", 200, 3000)
             runner.build(f, panes.active_path(0), tick, cwr)
             f.dock_panel_end()
         }
@@ -777,7 +782,7 @@ fn main() -> int {
         prev_down = now_down
 
         if ch.dirty {
-            save_store(ch, dock, panes, tree.expanded, dark, f.zoom, side)
+            save_store(ch, dock, panes, tree.expanded, dark, f.zoom, side, runner.tape_settings_json())
         }
         if quit {
             break
