@@ -4202,6 +4202,29 @@ static SemType check_expr_inner(Checker *c, Expr *e) {
                 MethodInfo *mi = base >= 0
                     ? resolve_method(c, base, callee->as.get.name) : NULL;
                 if (base < 0) {
+                    // UFCS (Phase 3): `x.f(args)` on a NON-STRUCT receiver (an enum, scalar, string,
+                    // array…) where `f` is a free function — desugar to `f(x, args)` and re-check as a
+                    // plain call, so the generic-inference free-call path types it. Structs keep
+                    // methods-only (a method always wins), so this never introduces method/free
+                    // ambiguity. The rewrite mutates THIS call node once; the receiver becomes arg 0,
+                    // so codegen (which shares the AST) emits an ordinary call — no codegen change.
+                    int fi = (ot != TY_ERROR) ? resolve_signature(c, callee->as.get.name) : -1;
+                    if (fi >= 0 && c->fns[fi].param_count >= 1) {
+                        Expr *recv = callee->as.get.object;
+                        Expr *fid = arena_alloc(c->arena, sizeof(Expr));
+                        *fid = *callee;
+                        fid->kind     = EXPR_IDENT;
+                        fid->as.ident = callee->as.get.name;
+                        e->as.call.callee = fid;
+                        Expr **na = arena_alloc(c->arena, (size_t)(argc + 1) * sizeof(Expr *));
+                        na[0] = recv;
+                        for (int i = 0; i < argc; i++) {
+                            na[i + 1] = e->as.call.args[i];
+                        }
+                        e->as.call.args      = na;
+                        e->as.call.arg_count = (size_t)(argc + 1);
+                        return check_expr(c, e);   // now a plain free call
+                    }
                     if (ot != TY_ERROR) {
                         type_error(c, e->line, e->col,
                                    "method call requires a struct value");
