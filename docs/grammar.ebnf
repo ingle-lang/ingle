@@ -127,7 +127,12 @@ CasePattern   = Pattern , { "|" , Pattern } ;                (* an OR-pattern ma
 Pattern       = LiteralPat | VariantPat ;
 LiteralPat    = [ "-" ] , int | [ "-" ] , float | string | "true" | "false" ;  (* matches a scalar/string subject by value *)
 VariantPat    = ident , [ "." , ident ] ,                    (* a bare "_" ident is the wildcard; a bare *)
-                [ "(" , [ ident , { "," , ident } ] , ")" ] ; (* ident on a scalar subject is a value binding *)
+                [ "(" , [ BindingSlot , { "," , BindingSlot } ] , ")" ] ; (* ident on a scalar subject is a value binding *)
+BindingSlot   = ident                                        (* a plain field binding (`r` / `_`), OR a ONE-LEVEL *)
+              | ident , [ "." , ident ] ,                    (* nested pattern that destructures an all-scalar value-struct *)
+                "(" , [ ident , { "," , ident } ] , ")" ;    (* payload field (`Point(x, y)`). The inner bindings are plain *)
+                (* names only — nesting is one level deep; a literal (`Some(0)`) or a refutable enum inner
+                   pattern (`Some(Ok(v))`) is rejected (the latter: bind the payload + use a nested match). *)
 
 
 (* ----- expressions (lowest to highest precedence; all left-associative) ----- *)

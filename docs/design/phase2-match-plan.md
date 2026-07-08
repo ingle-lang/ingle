@@ -46,6 +46,19 @@ mirror in the *same* change; re-run `make selfhost` before moving on.
 - **2d — one-level nesting (EXPENSIVE):** parallel `binding_patterns[]`; parser recurses one level;
   checker recurses into the field type; both codegens recurse the extraction + failure-edge unwind.
   Reject depth>1 and literal-in-variant with a clear error.
+  - **2d-i — struct-inner DONE 2026-07-08** (Karl's scope: struct-inner first). `case Some(Point(x, y))`
+    destructures an all-scalar VALUE-STRUCT payload — irrefutable inner, so NO failure edge and NO
+    exhaustiveness change (the outer variant is still fully covered). `binding_pats[]` is additive
+    (NULL/kind-5-sentinel = plain name, else a recursive sub-pattern) → every existing pattern stays
+    byte-identical. VM = double `GET_FIELD` (identical to `payload.field_j`); cgen_c = `em_unbox_struct`
+    once + bind each inner name to an `em_s` Value field. Both C backends identical; `tests/run/
+    match_nested.ig` + `error_match_nested.ig`; `make verify` green. Selfhost PARSER byte-identical
+    (whole-corpus AST) + CHECKER accepts; nested codegen/cgen_c logic mirrored but NOT fixture-gated,
+    blocked on the pre-existing value-struct-enum-payload divergence (**OFI-203**). Rejections: literal-
+    in-variant + depth>1 (parser), refutable enum-inner + non-all-scalar + wrong struct name/arity (checker).
+  - **2d-ii — refutable enum-inner DEFERRED.** `case Some(Ok(v))` adds a real SECOND (with guards, third)
+    failure edge in the VM jump discipline + one-level nested exhaustiveness ("wildcard required unless
+    provably complete"). A nested `match` is the idiom until this lands.
 
 ## Cross-cutting: exhaustiveness
 One checker helper, extended per feature. Enum bitmap (today) → covered-value set (2a) → guarded arms

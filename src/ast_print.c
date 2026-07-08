@@ -246,7 +246,13 @@ static void print_pattern(const Pattern *pat) {
             if (i > 0) {
                 printf(", ");
             }
-            printf("%s", pat->bindings[i]);
+            // A nested binding slot prints its sub-pattern inline (`Some(Point(x, y))`),
+            // recursively; a plain slot prints its name. Keeps existing dumps unchanged.
+            if (pat->binding_pats != NULL && pat->binding_pats[i] != NULL) {
+                print_pattern(pat->binding_pats[i]);
+            } else {
+                printf("%s", pat->bindings[i]);
+            }
         }
         printf(")");
     }

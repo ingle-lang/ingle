@@ -1374,6 +1374,27 @@ match color {
 }
 ```
 
+**Nested destructuring** — a variant's payload field that is an **all-scalar value struct** can be
+destructured **one level** deep, binding its fields inline instead of binding the whole struct:
+`case Some(Point(x, y))` binds `x` and `y` directly. The inner pattern is irrefutable (a struct always
+matches), so it doesn't change exhaustiveness; it composes with guards and with a generic `Option<Point>`
+payload, and an inner `_` ignores a field (`case Cell(Point(_, y))`). Kept deliberately narrow for now:
+nesting is **one level** (`Some(Point(Wrap(z)))` is rejected), a **literal** inside a variant (`Some(0)`)
+is rejected, and a **refutable enum** inner pattern (`Some(Ok(v))`) is rejected — bind the payload and
+use a nested `match` for that.
+
+```ember
+struct Point { x: int  y: int }
+enum Shape { Cell(p: Point)  Empty }
+
+fn origin_dist(s: Shape) -> int {
+    match s {
+        case Cell(Point(x, y)) { return x * x + y * y }
+        case Empty             { return 0 }
+    }
+}
+```
+
 ```ember
 match color {
     case Red   { return 1 }

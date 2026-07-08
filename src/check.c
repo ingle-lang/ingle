@@ -6628,6 +6628,68 @@ static void check_stmt(Checker *c, Stmt *s) {
                                    (int)b < var->field_count; b++) {
                     SemType bt = inst != NULL ? subst(c, inst, var->fields[b])
                                               : var->fields[b];
+                    Pattern *sub = (pat->binding_pats != NULL) ? pat->binding_pats[b] : NULL;
+                    if (sub != NULL) {
+                        // A ONE-LEVEL nested pattern (`case Some(Point(x, y))`) destructures this
+                        // payload field. First cut: the field must be an ALL-SCALAR VALUE STRUCT
+                        // (irrefutable — a struct always matches). A refutable enum inner pattern
+                        // (`Some(Ok(v))`) is a nested `match` for now; other shapes are rejected.
+                        int is_enum_field = is_enum_type(bt) ||
+                                            (is_generic_inst(bt) && c->ginsts[bt - GENERIC_BASE].is_enum);
+                        int sid = array_inline_struct_id(c, bt);
+                        StructInfo *si = (sid >= 0) ? &c->structs[sid] : NULL;
+                        int ok = 0;
+                        if (is_enum_field) {
+                            type_error(c, sub->line, sub->col,
+                                       "nested enum patterns are not supported yet — bind the payload "
+                                       "and use a nested `match`");
+                        } else if (si == NULL) {
+                            type_error(c, sub->line, sub->col,
+                                       "a nested pattern can only destructure an all-scalar value struct");
+                        } else {
+                            // Require GENUINELY all-scalar fields: a nested binding aliases the unboxed
+                            // em_s field directly, safe only for Copy scalars — a refcounted (string/…)
+                            // field would need the retain-on-escape a normal `.field` read performs.
+                            int all_scalar = 1;
+                            for (int f = 0; f < si->field_count; f++) {
+                                if (is_refcounted(c, si->fields[f].type)) { all_scalar = 0; break; }
+                            }
+                            if (sub->type_name != NULL) {
+                                // The field's type already names the struct, so a module qualifier is
+                                // redundant (and unvalidated) — reject `case Some(Mod.Point(x, y))`.
+                                type_error(c, sub->line, sub->col,
+                                           "a nested struct pattern must be unqualified (the field's "
+                                           "type already names the struct)");
+                            } else if (!all_scalar) {
+                                type_error(c, sub->line, sub->col,
+                                           "a nested pattern can only destructure a struct of scalar "
+                                           "fields (a string/ref field is not supported yet — bind the "
+                                           "payload and read its fields)");
+                            } else if (strcmp(sub->variant, si->name) != 0) {
+                                type_error(c, sub->line, sub->col,
+                                           "nested pattern names a different struct than the field's type");
+                            } else if ((int)sub->binding_count != si->field_count) {
+                                type_error(c, sub->line, sub->col,
+                                           "nested pattern binds the wrong number of fields");
+                            } else {
+                                ok = 1;
+                                // Stamp the outer slot's struct id so the native backend unboxes the
+                                // payload into an em_s before binding its fields (the VM double-reads).
+                                if ((int)b < 16) {
+                                    pat->binding_struct[b] = sid;
+                                }
+                            }
+                        }
+                        // Declare each inner binding (a borrow of the struct's field) — with the real
+                        // field types when the pattern is valid, else TY_INFER for clean error recovery
+                        // (so the body's uses of the names don't cascade into "undefined variable").
+                        for (size_t j = 0; j < sub->binding_count; j++) {
+                            SemType ft = (ok && si != NULL && (int)j < si->field_count)
+                                             ? si->fields[j].type : TY_ERROR;
+                            declare_local(c, sub->line, sub->col, sub->bindings[j], 0, ft, 0);
+                        }
+                        continue;
+                    }
                     // A match binding borrows the scrutinee's payload (owned = 0),
                     // so a move-typed binding can't escape the match.
                     declare_local(c, pat->line, pat->col, pat->bindings[b], 0, bt, 0);

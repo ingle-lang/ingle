@@ -2574,6 +2574,23 @@ static int emit_arm_bindings(CgcGen *g, const MatchCase *mc, int sv) {
     for (size_t b = 0; b < mc->pattern.binding_count; b++) {
         int es = ((int)b < 16) ? mc->pattern.binding_struct[b] : -1;
         char bcn[24];
+        const Pattern *sub = (mc->pattern.binding_pats != NULL) ? mc->pattern.binding_pats[b] : NULL;
+        if (sub != NULL) {
+            // A ONE-LEVEL nested struct destructure (`case Some(Point(x, y))`): unbox the boxed
+            // value-struct payload into an em_s ONCE, then bind each inner name directly to the
+            // em_s's field — em_s fields ARE Values, so no re-boxing (a borrow of the struct copy).
+            int bv = g->next_var++;
+            cgc_indent(g);
+            fprintf(g->out, "em_s%d v%d; em_unbox_struct(&g_em, %d, "
+                            "em_enum_field(&g_em, v%d, %zu), (Value*)&v%d, %d);\n",
+                    es, bv, es, sv, b, bv, g->layouts[es].field_count);
+            for (size_t j = 0; j < sub->binding_count; j++) {
+                char icn[32];
+                snprintf(icn, sizeof icn, "v%d.f%zu", bv, j);
+                cgc_push(g, sub->bindings[j], icn, 0, -1);   // a Value field of the unboxed struct
+            }
+            continue;
+        }
         if (is_value_struct(g, es)) {
             // A value-struct payload is stored BOXED in the enum; unbox the bound copy into an
             // em_s so it can be used as a value struct (field reads, method receiver, …). The

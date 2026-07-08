@@ -101,6 +101,9 @@ struct Pattern {
     bindings: [string]
     lit: [Expr]                                     // PAT_LITERAL: a single constant Expr (else empty)
     alts: [Pattern]                                 // PAT_OR: the `a | b | c` alternatives (non-binding); else empty
+    binding_pats: [Pattern]                         // one-level nesting: empty (no slot nests) OR length == bindings, with
+                                                    // a kind-5 sentinel for a plain-name slot and a real sub-pattern for a
+                                                    // nested slot (`case Some(Point(x, y))`). Mirrors C `binding_pats` (NULL).
     wildcard: bool
 }
 
@@ -348,6 +351,14 @@ fn p_expr(e: Expr, depth: int) {
 }
 
 
+// none_pat is the kind-5 sentinel that fills a PLAIN-name slot in a variant pattern's parallel
+// `binding_pats` array (a nested slot holds a real sub-pattern instead). Selfhost-internal — it
+// mirrors C's NULL entry, and never reaches the AST dump or codegen as a real pattern.
+fn none_pat() -> Pattern {
+    return Pattern{ kind: 5, type_name: "", variant: "", bindings: [], lit: [], alts: [], binding_pats: [], wildcard: false }
+}
+
+
 fn p_pattern(p: Pattern) -> string {
     if p.wildcard {
         return "_"
@@ -367,7 +378,13 @@ fn p_pattern(p: Pattern) -> string {
             if i > 0 {
                 s = s + ", "
             }
-            s = s + p.bindings[i]
+            // A nested binding slot prints its sub-pattern inline (`Some(Point(x, y))`),
+            // recursively; a plain slot prints its name (mirrors src/ast_print.c print_pattern).
+            if p.binding_pats.len() > 0 && p.binding_pats[i].kind != 5 {
+                s = s + p_pattern(p.binding_pats[i])
+            } else {
+                s = s + p.bindings[i]
+            }
             i = i + 1
         }
         s = s + ")"
@@ -1808,7 +1825,7 @@ struct Parser {
                         break
                     }
                 }
-                pat = Pattern{ kind: 4, type_name: "", variant: "", bindings: [], lit: [], alts: alts, wildcard: false }
+                pat = Pattern{ kind: 4, type_name: "", variant: "", bindings: [], lit: [], alts: alts, binding_pats: [], wildcard: false }
             }
             // An optional `if <bool>` guard. parse_cond suppresses struct-literal syntax so the
             // trailing `{` reads as the arm body.
@@ -1830,11 +1847,11 @@ struct Parser {
         // constant expression; the checker matches it against a scalar/string subject by value.
         if lx.is_literal_start(self.peek_kind()) {
             let e = self.parse_unary()
-            return Pattern{ kind: 2, type_name: "", variant: "", bindings: [], lit: [e], alts: [], wildcard: false }
+            return Pattern{ kind: 2, type_name: "", variant: "", bindings: [], lit: [e], alts: [], binding_pats: [], wildcard: false }
         }
         let first = self.advance().text
         if first == "_" {
-            return Pattern{ kind: 1, type_name: "", variant: "_", bindings: [], lit: [], alts: [], wildcard: true }
+            return Pattern{ kind: 1, type_name: "", variant: "_", bindings: [], lit: [], alts: [], binding_pats: [], wildcard: true }
         }
         var type_name = ""
         var variant = first
@@ -1843,14 +1860,51 @@ struct Parser {
             type_name = first
             variant = self.advance().text
         }
+        // A binding slot is a plain name (`r` / `_`) or a ONE-LEVEL nested pattern that destructures
+        // the field (`Point(x, y)` / `Shape.Circle(r)`). `bindings` holds the slot names (a placeholder
+        // for a nested slot), `binding_pats` the parallel sub-patterns — a kind-5 sentinel for a plain
+        // slot, a real sub-pattern for a nested one; it stays empty unless some slot nests. Mirrors
+        // src/parser.c. (Malformed cases — literal-in-variant, depth>1 — are stage-0's to reject; the
+        // differential skips them, so this happy-path parse just needs the AST to match for valid input.)
         var bindings: [string] = []
+        var binding_pats: [Pattern] = []
+        var any_nested = false
         if self.at(TAG_LPAREN) {
             let _ = self.advance()
             loop {
                 if self.at(TAG_RPAREN) || self.is_eof() {
                     break
                 }
-                bindings.append(self.advance().text)
+                let name = self.advance().text
+                if self.at(TAG_LPAREN) || self.at(TAG_DOT) {
+                    var sub_tn = ""
+                    var sub_var = name
+                    if self.at(TAG_DOT) {
+                        let _ = self.advance()
+                        sub_tn = name
+                        sub_var = self.advance().text
+                    }
+                    let _ = self.expect(TAG_LPAREN)
+                    var ib: [string] = []
+                    loop {
+                        if self.at(TAG_RPAREN) || self.is_eof() {
+                            break
+                        }
+                        ib.append(self.advance().text)
+                        if self.at(TAG_COMMA) {
+                            let _ = self.advance()
+                        } else {
+                            break
+                        }
+                    }
+                    let _ = self.expect(TAG_RPAREN)
+                    binding_pats.append(Pattern{ kind: 0, type_name: sub_tn, variant: sub_var, bindings: ib, lit: [], alts: [], binding_pats: [], wildcard: false })
+                    bindings.append(name)
+                    any_nested = true
+                } else {
+                    bindings.append(name)
+                    binding_pats.append(none_pat())
+                }
                 if self.at(TAG_COMMA) {
                     let _ = self.advance()
                 } else {
@@ -1859,7 +1913,13 @@ struct Parser {
             }
             let _ = self.expect(TAG_RPAREN)
         }
-        return Pattern{ kind: 0, type_name: type_name, variant: variant, bindings: bindings, lit: [], alts: [], wildcard: false }
+        // Mirror C's NULL binding_pats when no slot nests: a struct-literal-field `[]` (byte-identical
+        // across backends, unlike a bare `binding_pats = []` reassignment — the selfhost defaults an
+        // empty array's element-kind byte to 4, where stage-0 derives it from the annotated type).
+        if any_nested == false {
+            return Pattern{ kind: 0, type_name: type_name, variant: variant, bindings: bindings, lit: [], alts: [], binding_pats: [], wildcard: false }
+        }
+        return Pattern{ kind: 0, type_name: type_name, variant: variant, bindings: bindings, lit: [], alts: [], binding_pats: binding_pats, wildcard: false }
     }
 
 

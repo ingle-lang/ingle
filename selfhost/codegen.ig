@@ -8909,6 +8909,28 @@ struct Chunk {
                             if b >= cases[ci].pattern.bindings.len() {
                                 break
                             }
+                            // A ONE-LEVEL nested struct destructure (`case Some(Point(x, y))`): the
+                            // payload field b is a boxed value struct; bind each inner field with a
+                            // second GET_FIELD. `GET_LOCAL subject; GET_FIELD b; GET_FIELD j` is exactly
+                            // what `payload.field_j` compiles to (irrefutable — no test). Mirrors codegen.c.
+                            if cases[ci].pattern.binding_pats.len() > 0 && cases[ci].pattern.binding_pats[b].kind != 5 {
+                                var ij = 0
+                                loop {
+                                    if ij >= cases[ci].pattern.binding_pats[b].bindings.len() {
+                                        break
+                                    }
+                                    self.emit(OP_GET_LOCAL)
+                                    self.emit_idx(subject)
+                                    self.emit(OP_GET_FIELD)
+                                    self.emit_idx(b)
+                                    self.emit(OP_GET_FIELD)
+                                    self.emit_idx(ij)
+                                    self.declare_binding(cases[ci].pattern.binding_pats[b].bindings[ij], 1, 0 - 1, false, false, false, false)   // a scalar field borrow
+                                    ij = ij + 1
+                                }
+                                b = b + 1
+                                continue
+                            }
                             self.emit(OP_GET_LOCAL)              // each binding borrows a payload field
                             self.emit_idx(subject)
                             self.emit(OP_GET_FIELD)

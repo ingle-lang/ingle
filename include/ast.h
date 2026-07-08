@@ -382,6 +382,11 @@ typedef struct Pattern {
                                 // lookup (which is no longer globally unique — OFI-073). -1 until set.
     const char **bindings;
     size_t       binding_count;
+    struct Pattern **binding_pats;    // one-level nesting (`case Some(Point(x, y))`): parallel to
+                                      // bindings[] — a NULL entry is a plain name binding, a non-NULL
+                                      // entry is a nested sub-pattern that destructures that field (an
+                                      // all-scalar value struct). The whole array is NULL when no slot
+                                      // nests; length == binding_count otherwise.
     int          binding_struct[16];  // checker-set per binding: an all-scalar value-struct payload's
                                       // struct id (the native backend unboxes it into an em_s); -1
                                       // for a scalar/boxed/non-flat binding (max 16 payload fields).

@@ -2190,6 +2190,23 @@ static void gen_stmt(Codegen *cg, const Stmt *s) {
                 // Bind the variant's fields positionally as case-local values.
                 int bind_base = cg->local_count;
                 for (size_t b = 0; b < pat->binding_count; b++) {
+                    Pattern *sub = (pat->binding_pats != NULL) ? pat->binding_pats[b] : NULL;
+                    if (sub != NULL) {
+                        // A ONE-LEVEL nested struct destructure (`case Some(Point(x, y))`): the
+                        // payload field b is a boxed value struct; bind each of its fields with a
+                        // second GET_FIELD. `GET_LOCAL subject; GET_FIELD b; GET_FIELD j` is exactly
+                        // what `payload.field_j` compiles to — the struct is irrefutable, so no test.
+                        for (size_t j = 0; j < sub->binding_count; j++) {
+                            emit(cg, OP_GET_LOCAL);
+                            emit_idx(cg, subject);
+                            emit(cg, OP_GET_FIELD);
+                            emit_idx(cg, b);
+                            emit(cg, OP_GET_FIELD);
+                            emit_idx(cg, j);
+                            cg_declare(cg, sub->bindings[j], 0, 1);   // a borrow of the struct's field
+                        }
+                        continue;
+                    }
                     emit(cg, OP_GET_LOCAL);
                     emit_idx(cg, subject);
                     emit(cg, OP_GET_FIELD);

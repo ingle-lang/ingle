@@ -4006,6 +4006,25 @@ struct CgcGen {
                             if bi >= cases[ci].pattern.bindings.len() {
                                 break
                             }
+                            // A ONE-LEVEL nested struct destructure (`case Some(Point(x, y))`): unbox the
+                            // boxed value-struct payload into an em_s ONCE, then bind each inner name to
+                            // its em_s field (em_s fields ARE Values — no re-boxing). Mirrors src/cgen_c.c.
+                            if cases[ci].pattern.binding_pats.len() > 0 && cases[ci].pattern.binding_pats[bi].kind != 5 {
+                                let psid = self.st.sid_of_ty(self.en.payload_ty(cases[ci].pattern.variant, bi))
+                                let fc = self.st.field_count(psid)
+                                let bv = self.fresh_var()
+                                println("{self.ind()}em_s{psid} v{bv}; em_unbox_struct(&g_em, {psid}, em_enum_field(&g_em, v{sv}, {bi}), (Value*)&v{bv}, {fc});")
+                                var ij = 0
+                                loop {
+                                    if ij >= cases[ci].pattern.binding_pats[bi].bindings.len() {
+                                        break
+                                    }
+                                    self.push(cases[ci].pattern.binding_pats[bi].bindings[ij], "v{bv}.f{ij}", 0 - 1, false, false, false, 0 - 1)   // a Value field of the unboxed struct
+                                    ij = ij + 1
+                                }
+                                bi = bi + 1
+                                continue
+                            }
                             let bv = self.fresh_var()
                             println("{self.ind()}Value v{bv} = em_enum_field(&g_em, v{sv}, {bi});")
                             let pa = self.en.payload_array(cases[ci].pattern.variant, bi)

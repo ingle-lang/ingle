@@ -1350,6 +1350,7 @@ static Pattern parse_pattern(Parser *p) {
     pat.variant       = NULL;
     pat.bindings      = NULL;
     pat.binding_count = 0;
+    pat.binding_pats  = NULL;
     pat.wildcard      = 0;
     pat.enum_id       = -1;   // checker stamps the resolved enum id + tag (0 is valid, so -1 default)
     pat.variant_index = -1;
@@ -1387,13 +1388,78 @@ static Pattern parse_pattern(Parser *p) {
     }
 
     if (match(p, TOK_LPAREN)) {
-        Vec binds;
+        // A binding slot is a plain name (`r` / `_`) or a ONE-LEVEL nested pattern that
+        // destructures the field (`Point(x, y)` / `Shape.Circle(r)`). `binds` holds the slot
+        // names (a placeholder for a nested slot), `bpats` the parallel sub-patterns (NULL for
+        // a plain slot). `binding_pats` stays NULL unless some slot nests (the common fast path).
+        Vec binds;   // const char *
+        Vec bpats;   // Pattern *
         vec_init(&binds, sizeof(const char *));
+        vec_init(&bpats, sizeof(Pattern *));
+        int any_nested = 0;
         if (!check(p, TOK_RPAREN)) {
             for (;;) {
+                // A literal here (`Some(0)`) is not a binding — reject it with a clear message.
+                TokenType st = pk(p);
+                if (st == TOK_INT || st == TOK_FLOAT || st == TOK_STRING ||
+                    st == TOK_TRUE || st == TOK_FALSE || st == TOK_MINUS) {
+                    error_at(p, cur(p),
+                             "a variant pattern binds names or nests a variant, not a literal");
+                }
                 const Token *b = expect(p, TOK_IDENT, "expected a binding name");
                 const char *name = tok_text(p, b);
+                Pattern *sub = NULL;
+                if (check(p, TOK_DOT) || check(p, TOK_LPAREN)) {
+                    // A NESTED sub-pattern destructures this field (a value struct). One level:
+                    // its own bindings are PLAIN names — a `(` inside them is rejected below.
+                    sub = arena_alloc(p->arena, sizeof(Pattern));
+                    sub->kind          = PAT_VARIANT;
+                    sub->alts          = NULL;
+                    sub->alt_count     = 0;
+                    sub->lit           = NULL;
+                    sub->type_name     = NULL;
+                    sub->variant       = name;
+                    sub->bindings      = NULL;
+                    sub->binding_count = 0;
+                    sub->binding_pats  = NULL;
+                    sub->wildcard      = 0;
+                    sub->enum_id       = -1;
+                    sub->variant_index = -1;
+                    sub->line          = b->line;
+                    sub->col           = b->col;
+                    for (int k = 0; k < 16; k++) {
+                        sub->binding_struct[k] = -1;
+                    }
+                    if (match(p, TOK_DOT)) {
+                        sub->type_name = name;
+                        const Token *v = expect(p, TOK_IDENT, "expected a name after '.'");
+                        sub->variant = tok_text(p, v);
+                    }
+                    expect(p, TOK_LPAREN, "expected '(' to destructure a nested pattern");
+                    Vec ib;
+                    vec_init(&ib, sizeof(const char *));
+                    if (!check(p, TOK_RPAREN)) {
+                        for (;;) {
+                            const Token *ibt = expect(p, TOK_IDENT, "expected a binding name");
+                            const char *iname = tok_text(p, ibt);
+                            // A `(` or `.` after an inner name is a SECOND level of nesting — rejected.
+                            if (check(p, TOK_LPAREN) || check(p, TOK_DOT)) {
+                                error_at(p, cur(p),
+                                         "nested patterns may nest only one level");
+                            }
+                            vec_push(&ib, &iname);
+                            if (match(p, TOK_COMMA)) {
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                    expect(p, TOK_RPAREN, "expected ')' to close a nested pattern");
+                    sub->bindings = vec_to_arena(p->arena, &ib, &sub->binding_count);
+                    any_nested = 1;
+                }
                 vec_push(&binds, &name);
+                vec_push(&bpats, &sub);
                 if (match(p, TOK_COMMA)) {
                     continue;
                 }
@@ -1402,6 +1468,10 @@ static Pattern parse_pattern(Parser *p) {
         }
         expect(p, TOK_RPAREN, "expected ')' to close pattern bindings");
         pat.bindings = vec_to_arena(p->arena, &binds, &pat.binding_count);
+        if (any_nested) {
+            size_t np;
+            pat.binding_pats = vec_to_arena(p->arena, &bpats, &np);
+        }
     }
     return pat;
 }
@@ -1605,6 +1675,7 @@ static Stmt *parse_statement(Parser *p) {
                     orp.variant       = NULL;
                     orp.bindings      = NULL;
                     orp.binding_count = 0;
+                    orp.binding_pats  = NULL;
                     orp.wildcard      = 0;
                     orp.enum_id       = -1;
                     orp.variant_index = -1;

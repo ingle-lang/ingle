@@ -2004,7 +2004,22 @@ struct Checker {
                         if bi >= cases[ci].pattern.bindings.len() {
                             break
                         }
-                        self.declare(cases[ci].pattern.bindings[bi], TY_INFER, false, false, false)   // a match binding is a borrow
+                        // A ONE-LEVEL nested slot (`case Some(Point(x, y))`) declares its INNER
+                        // bindings; a plain slot declares its own name. All are borrows typed lenient
+                        // (TY_INFER), like every match binding here. (The stricter shape checks the C
+                        // reference does are stage-0's to reject; the differential tolerates the gap.)
+                        if cases[ci].pattern.binding_pats.len() > 0 && cases[ci].pattern.binding_pats[bi].kind != 5 {
+                            var ij = 0
+                            loop {
+                                if ij >= cases[ci].pattern.binding_pats[bi].bindings.len() {
+                                    break
+                                }
+                                self.declare(cases[ci].pattern.binding_pats[bi].bindings[ij], TY_INFER, false, false, false)
+                                ij = ij + 1
+                            }
+                        } else {
+                            self.declare(cases[ci].pattern.bindings[bi], TY_INFER, false, false, false)   // a match binding is a borrow
+                        }
                         bi = bi + 1
                     }
                     if is_bind {
