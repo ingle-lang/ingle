@@ -1374,14 +1374,21 @@ match color {
 }
 ```
 
-**Nested destructuring** — a variant's payload field that is an **all-scalar value struct** can be
-destructured **one level** deep, binding its fields inline instead of binding the whole struct:
-`case Some(Point(x, y))` binds `x` and `y` directly. The inner pattern is irrefutable (a struct always
-matches), so it doesn't change exhaustiveness; it composes with guards and with a generic `Option<Point>`
-payload, and an inner `_` ignores a field (`case Cell(Point(_, y))`). Kept deliberately narrow for now:
-nesting is **one level** (`Some(Point(Wrap(z)))` is rejected), a **literal** inside a variant (`Some(0)`)
-is rejected, and a **refutable enum** inner pattern (`Some(Ok(v))`) is rejected — bind the payload and
-use a nested `match` for that.
+**Nested destructuring** — a variant's payload field can be destructured **one level** deep, binding
+its fields inline instead of binding the whole payload. Two shapes are supported:
+
+- A field that is an **all-scalar value struct** — `case Some(Point(x, y))` binds `x` and `y`
+  directly. The inner pattern is **irrefutable** (a struct always matches), so it doesn't change
+  exhaustiveness.
+- A field that is an **enum** — `case Some(Ok(v))` matches only when the inner variant does, so it is
+  **refutable**. Exhaustiveness is one level deep: an outer variant is covered when **all** of its
+  single enum payload's inner variants are (e.g. `Some(Ok(_))` + `Some(Err(_))` + `None`), or a plain
+  arm covers it (`Some(other)`). An enum-inner's own payload must be **scalar or string** for now.
+
+Both compose with guards and a plain fallback, and an inner `_` ignores a field
+(`case Cell(Point(_, y))`). Kept deliberately narrow: nesting is **one level** (`Some(Point(Wrap(z)))`
+is rejected), a **literal** inside a variant (`Some(0)`) is rejected, and an enum-inner whose payload
+is itself a struct/array (`Some(Ok(Point(x, y)))`) is rejected — bind that payload and nest a `match`.
 
 ```ember
 struct Point { x: int  y: int }
@@ -1389,8 +1396,16 @@ enum Shape { Cell(p: Point)  Empty }
 
 fn origin_dist(s: Shape) -> int {
     match s {
-        case Cell(Point(x, y)) { return x * x + y * y }
+        case Cell(Point(x, y)) { return x * x + y * y }   // struct-inner (irrefutable)
         case Empty             { return 0 }
+    }
+}
+
+fn unwrap_or(r: Option<Result<int, int>>) -> int {
+    match r {
+        case Some(Ok(v))  { return v }                    // enum-inner (refutable)
+        case Some(Err(e)) { return 0 - e }
+        case None         { return 0 }
     }
 }
 ```

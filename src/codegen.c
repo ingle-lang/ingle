@@ -2178,12 +2178,43 @@ static void gen_stmt(Codegen *cg, const Stmt *s) {
                     }
                     vtag = v->variant_index;
                 }
-                // if subject.tag == this variant:
+                // The refutable test is an AND of the outer variant tag and each REFUTABLE enum-inner
+                // slot's tag (`case Some(Ok(v))` — Phase 2d-ii). It short-circuits with JUMP_IF_FALSE
+                // (no OP_AND): each test but the last, if false, jumps to the shared convergence with
+                // its bool; if true, pops and emits the next test; the last test falls through with its
+                // bool — leaving exactly ONE bool for a single `next`. With NO enum-inner slot this is
+                // byte-identical to the plain single-tag test. A struct-inner slot is irrefutable (no
+                // test); its fields, like an enum-inner's, are bound by the double-GET_FIELD loop below.
                 emit(cg, OP_GET_LOCAL);
                 emit_idx(cg, subject);
                 emit(cg, OP_GET_TAG);
                 emit_const(cg, vtag);
                 emit(cg, OP_EQ);
+                int and_false[MAX_MATCH_CASES];
+                int and_count = 0;
+                for (size_t b = 0; b < pat->binding_count; b++) {
+                    Pattern *isub = (pat->binding_pats != NULL) ? pat->binding_pats[b] : NULL;
+                    if (isub == NULL || isub->variant_index < 0) {
+                        continue;   // plain / struct-inner slot — irrefutable, no tag test
+                    }
+                    // Short-circuit the test emitted so far, then test this inner variant's tag.
+                    if (and_count < MAX_MATCH_CASES) {
+                        and_false[and_count++] = emit_jump(cg, OP_JUMP_IF_FALSE);
+                    } else {
+                        internal_error(cg, "too many nested enum tests");
+                    }
+                    emit(cg, OP_POP);   // prior test true: pop it, test the inner tag
+                    emit(cg, OP_GET_LOCAL);
+                    emit_idx(cg, subject);
+                    emit(cg, OP_GET_FIELD);
+                    emit_idx(cg, b);            // the payload (a boxed enum)
+                    emit(cg, OP_GET_TAG);
+                    emit_const(cg, isub->variant_index);
+                    emit(cg, OP_EQ);
+                }
+                for (int k = 0; k < and_count; k++) {
+                    patch_jump(cg, and_false[k]);   // any false test converges here with its bool
+                }
                 int next = emit_jump(cg, OP_JUMP_IF_FALSE);
                 emit(cg, OP_POP);   // matched (true path)
 

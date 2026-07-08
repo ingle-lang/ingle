@@ -6449,6 +6449,18 @@ static void check_stmt(Checker *c, Stmt *s) {
             // zero, so clear it explicitly (the old fixed `covered[MAX_VARIANTS] = {0}` was zeroed).
             int *covered = arena_alloc(c->arena, (size_t)(ei->variant_count + 1) * sizeof(int));
             memset(covered, 0, (size_t)(ei->variant_count + 1) * sizeof(int));
+            // One-level NESTED-ENUM coverage (Phase 2d-ii): for an outer variant matched ONLY by
+            // refutable enum-inner arms (`case Some(Ok(v))`), the outer variant counts as covered iff
+            // ALL of its single enum-payload's variants are covered across those arms. `inner_cov[vi]`
+            // is that inner variant bitmap (NULL until the outer variant gets its first nested-enum
+            // arm), `inner_total[vi]` the inner enum's variant count (0 = none). No product matrix —
+            // only a SINGLE enum-inner slot per arm accumulates coverage (multi-slot stays conservative).
+            int **inner_cov  = arena_alloc(c->arena, (size_t)(ei->variant_count + 1) * sizeof(int *));
+            int  *inner_total = arena_alloc(c->arena, (size_t)(ei->variant_count + 1) * sizeof(int));
+            for (int v = 0; v <= ei->variant_count; v++) {
+                inner_cov[v]   = NULL;
+                inner_total[v] = 0;
+            }
             // Each arm starts from the same move-state; afterward a value is moved
             // if any arm moved it (the OR over arms).
             int entry_count = c->local_count;
@@ -6601,21 +6613,39 @@ static void check_stmt(Checker *c, Stmt *s) {
                                "this variant does not belong to the matched enum");
                     continue;
                 }
-                // Only an UNGUARDED arm covers its variant (a guarded arm may not fire) — so a
-                // guarded arm neither sets coverage nor counts as a duplicate (several guarded
-                // arms for one variant are fine, as is a guarded arm before the unguarded one).
-                if (mc->guard == NULL) {
-                    if (covered[vi]) {
-                        type_error(c, pat->line, pat->col, "duplicate case for a variant");
-                    }
-                    covered[vi] = 1;
-                }
                 VariantInfo *var = &ei->variants[vi];
                 pat->enum_id       = var->enum_id;        // codegen dispatches on THIS variant's tag,
                 pat->variant_index = var->variant_index;  // not a by-name lookup (OFI-073)
                 if ((int)pat->binding_count != var->field_count) {
                     type_error(c, pat->line, pat->col,
                                "pattern binds the wrong number of fields");
+                }
+                // Count REFUTABLE enum-inner slots (`Ok(v)` in `Some(Ok(v))`): a struct-inner is
+                // irrefutable, but an enum-inner arm matches only ONE inner variant, so it does NOT
+                // fully cover its outer variant — coverage is tracked per (outer, inner) below. A
+                // single enum-inner slot accumulates inner coverage; two-or-more stays conservative
+                // (no product matrix — the outer variant then needs a plain arm or `_`).
+                int enum_inner_count = 0;
+                int enum_inner_slot  = -1;
+                if (pat->binding_pats != NULL) {
+                    for (size_t b = 0; b < pat->binding_count && (int)b < var->field_count; b++) {
+                        if (pat->binding_pats[b] == NULL) { continue; }
+                        SemType fbt = inst != NULL ? subst(c, inst, var->fields[b]) : var->fields[b];
+                        if (is_enum_type(fbt) ||
+                            (is_generic_inst(fbt) && c->ginsts[fbt - GENERIC_BASE].is_enum)) {
+                            enum_inner_count++;
+                            enum_inner_slot = (int)b;
+                        }
+                    }
+                }
+                // Only an UNGUARDED arm with NO refutable enum-inner fully covers its variant (a
+                // guarded arm may not fire; an enum-inner arm covers one inner variant, handled in
+                // the binding loop). Such a covering arm also guards against a duplicate.
+                if (mc->guard == NULL && enum_inner_count == 0) {
+                    if (covered[vi]) {
+                        type_error(c, pat->line, pat->col, "duplicate case for a variant");
+                    }
+                    covered[vi] = 1;
                 }
                 // The bindings are locals scoped to this case body, typed by the
                 // variant's fields.
@@ -6629,21 +6659,94 @@ static void check_stmt(Checker *c, Stmt *s) {
                     SemType bt = inst != NULL ? subst(c, inst, var->fields[b])
                                               : var->fields[b];
                     Pattern *sub = (pat->binding_pats != NULL) ? pat->binding_pats[b] : NULL;
+                    if (sub != NULL && (is_enum_type(bt) ||
+                                        (is_generic_inst(bt) && c->ginsts[bt - GENERIC_BASE].is_enum))) {
+                        // A ONE-LEVEL REFUTABLE enum-inner pattern (`case Some(Ok(v))` — Phase 2d-ii).
+                        // Resolve the payload's enum + this inner variant, declare the inner bindings,
+                        // and stamp the sub-pattern's tag for codegen. Inner payloads must be single-
+                        // Value (scalar/string/enum) — a struct/array inner payload is deferred.
+                        const GenericInst *inst2 = NULL;
+                        int eid2;
+                        if (is_enum_type(bt)) {
+                            eid2 = enum_id_of(bt);
+                        } else {
+                            inst2 = &c->ginsts[bt - GENERIC_BASE];
+                            eid2  = inst2->base;
+                        }
+                        EnumInfo *ei2 = &c->enums[eid2];
+                        int ivj = -1;
+                        for (int v = 0; v < ei2->variant_count; v++) {
+                            if (strcmp(ei2->variants[v].name, sub->variant) == 0) { ivj = v; break; }
+                        }
+                        VariantInfo *var2 = (ivj >= 0) ? &ei2->variants[ivj] : NULL;
+                        int ok = 0;
+                        if (sub->type_name != NULL && strcmp(sub->type_name, ei2->name) != 0) {
+                            type_error(c, sub->line, sub->col,
+                                       "nested pattern names a different enum than the field's type");
+                        } else if (ivj < 0) {
+                            type_error(c, sub->line, sub->col,
+                                       "this variant does not belong to the field's enum");
+                        } else if ((int)sub->binding_count != var2->field_count) {
+                            type_error(c, sub->line, sub->col,
+                                       "nested pattern binds the wrong number of fields");
+                        } else {
+                            // Inner payloads limited to single-Value fields (the codegen binds them
+                            // via a plain em_enum_field / GET_FIELD) — a struct/array inner payload
+                            // needs the sid/elem tracking a top-level binding gets, deferred for now.
+                            int simple = 1;
+                            for (int f = 0; f < var2->field_count; f++) {
+                                SemType ift = inst2 != NULL ? subst(c, inst2, var2->fields[f])
+                                                            : var2->fields[f];
+                                if (is_struct_type(ift) || is_array_type(ift) || is_generic_inst(ift)) {
+                                    simple = 0; break;
+                                }
+                            }
+                            if (!simple) {
+                                type_error(c, sub->line, sub->col,
+                                           "a nested enum pattern can only bind scalar/string payloads "
+                                           "for now (bind the payload and use a nested `match`)");
+                            } else {
+                                ok = 1;
+                                sub->enum_id       = var2->enum_id;
+                                sub->variant_index = var2->variant_index;
+                                // One-level nested coverage: a SINGLE enum-inner slot (unguarded)
+                                // covers this outer variant's (inner) variant. When all inner variants
+                                // are covered, the outer variant is exhaustive (checked at the join).
+                                if (mc->guard == NULL && enum_inner_count == 1 &&
+                                    enum_inner_slot == (int)b) {
+                                    if (inner_total[vi] == 0) {
+                                        inner_total[vi] = ei2->variant_count;
+                                        inner_cov[vi] = arena_alloc(c->arena,
+                                            (size_t)(ei2->variant_count + 1) * sizeof(int));
+                                        memset(inner_cov[vi], 0,
+                                            (size_t)(ei2->variant_count + 1) * sizeof(int));
+                                    }
+                                    if (covered[vi] || inner_cov[vi][ivj]) {
+                                        type_error(c, sub->line, sub->col,
+                                                   "duplicate case for a variant");
+                                    } else {
+                                        inner_cov[vi][ivj] = 1;
+                                    }
+                                }
+                            }
+                        }
+                        for (size_t j = 0; j < sub->binding_count; j++) {
+                            SemType ft = TY_ERROR;
+                            if (ok && (int)j < var2->field_count) {
+                                ft = inst2 != NULL ? subst(c, inst2, var2->fields[j]) : var2->fields[j];
+                            }
+                            declare_local(c, sub->line, sub->col, sub->bindings[j], 0, ft, 0);
+                        }
+                        continue;
+                    }
                     if (sub != NULL) {
-                        // A ONE-LEVEL nested pattern (`case Some(Point(x, y))`) destructures this
-                        // payload field. First cut: the field must be an ALL-SCALAR VALUE STRUCT
-                        // (irrefutable — a struct always matches). A refutable enum inner pattern
-                        // (`Some(Ok(v))`) is a nested `match` for now; other shapes are rejected.
-                        int is_enum_field = is_enum_type(bt) ||
-                                            (is_generic_inst(bt) && c->ginsts[bt - GENERIC_BASE].is_enum);
+                        // A ONE-LEVEL IRREFUTABLE struct-inner pattern (`case Some(Point(x, y))` —
+                        // Phase 2d-i). The field must be an ALL-SCALAR VALUE STRUCT (a struct always
+                        // matches, so exhaustiveness is unchanged).
                         int sid = array_inline_struct_id(c, bt);
                         StructInfo *si = (sid >= 0) ? &c->structs[sid] : NULL;
                         int ok = 0;
-                        if (is_enum_field) {
-                            type_error(c, sub->line, sub->col,
-                                       "nested enum patterns are not supported yet — bind the payload "
-                                       "and use a nested `match`");
-                        } else if (si == NULL) {
+                        if (si == NULL) {
                             type_error(c, sub->line, sub->col,
                                        "a nested pattern can only destructure an all-scalar value struct");
                         } else {
@@ -6681,7 +6784,7 @@ static void check_stmt(Checker *c, Stmt *s) {
                             }
                         }
                         // Declare each inner binding (a borrow of the struct's field) — with the real
-                        // field types when the pattern is valid, else TY_INFER for clean error recovery
+                        // field types when the pattern is valid, else TY_ERROR for clean error recovery
                         // (so the body's uses of the names don't cascade into "undefined variable").
                         for (size_t j = 0; j < sub->binding_count; j++) {
                             SemType ft = (ok && si != NULL && (int)j < si->field_count)
@@ -6736,9 +6839,20 @@ static void check_stmt(Checker *c, Stmt *s) {
                     report_ptr_leak(c, i, s->line, s->col);
                 }
             }
-            // Exhaustiveness: every variant of the enum must be covered.
+            // Exhaustiveness: every variant of the enum must be covered — either fully (a plain /
+            // struct-inner / wildcard arm), or, for a variant matched only by refutable enum-inner
+            // arms (`Some(Ok)`/`Some(Err)`), by covering ALL of its single enum payload's inner
+            // variants (one-level nested completeness — Phase 2d-ii).
             for (int v = 0; v < ei->variant_count; v++) {
-                if (!covered[v]) {
+                if (covered[v]) { continue; }
+                int inner_complete = 0;
+                if (inner_total[v] > 0) {
+                    inner_complete = 1;
+                    for (int iv = 0; iv < inner_total[v]; iv++) {
+                        if (!inner_cov[v][iv]) { inner_complete = 0; break; }
+                    }
+                }
+                if (!inner_complete) {
                     type_error(c, s->line, s->col,
                                "non-exhaustive match: a variant is not handled");
                 }

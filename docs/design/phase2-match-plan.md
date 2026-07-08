@@ -56,9 +56,16 @@ mirror in the *same* change; re-run `make selfhost` before moving on.
     (whole-corpus AST) + CHECKER accepts; nested codegen/cgen_c logic mirrored but NOT fixture-gated,
     blocked on the pre-existing value-struct-enum-payload divergence (**OFI-203**). Rejections: literal-
     in-variant + depth>1 (parser), refutable enum-inner + non-all-scalar + wrong struct name/arity (checker).
-  - **2d-ii — refutable enum-inner DEFERRED.** `case Some(Ok(v))` adds a real SECOND (with guards, third)
-    failure edge in the VM jump discipline + one-level nested exhaustiveness ("wildcard required unless
-    provably complete"). A nested `match` is the idiom until this lands.
+  - **2d-ii — refutable enum-inner DONE 2026-07-08.** `case Some(Ok(v))` destructures an ENUM payload
+    (refutable). The second failure edge is NOT a new jump shape: the VM ANDs the outer tag with each
+    enum-inner tag via short-circuit JUMP_IF_FALSE into ONE bool, so the single-`next` arm-tail machinery
+    is reused unchanged (and it's byte-identical to the plain tag test when there's no enum-inner). cgen_c
+    ANDs `em_tag(em_enum_field(…)) == inner_tag` onto the condition. **Exhaustiveness is one level deep**:
+    an outer variant is covered by a plain/struct arm OR by covering ALL its single enum payload's inner
+    variants (no product matrix — a two-enum-inner arm stays conservative). Inner payloads limited to
+    scalar/string. Enum-inner has NO value struct, so it IS byte-identical-gated (unlike struct-inner):
+    `tests/selfhost/{codegen,cgen_c}/match_nested_enum.ig`; `make selfhost` 1402/0, `make verify` green.
+    **Phase 2 (OFI-186) COMPLETE.**
 
 ## Cross-cutting: exhaustiveness
 One checker helper, extended per feature. Enum bitmap (today) → covered-value set (2a) → guarded arms

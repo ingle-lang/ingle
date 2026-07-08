@@ -8901,6 +8901,43 @@ struct Chunk {
                         self.emit(OP_CONST)
                         self.emit_idx(tidx)
                         self.emit(OP_EQ)
+                        // AND each REFUTABLE enum-inner slot's tag (`case Some(Ok(v))` — Phase 2d-ii),
+                        // short-circuiting with JUMP_IF_FALSE: a false test jumps to the shared
+                        // convergence with its bool; the last falls through — one bool for one `next`.
+                        // An enum-inner is a nested slot whose variant name resolves to a variant; a
+                        // struct-inner does not (no test). With no enum-inner this is byte-identical.
+                        var and_false: [int] = []
+                        var eb = 0
+                        loop {
+                            if eb >= cases[ci].pattern.bindings.len() {
+                                break
+                            }
+                            if cases[ci].pattern.binding_pats.len() > 0 && cases[ci].pattern.binding_pats[eb].kind != 5 {
+                                let ivi = self.resolve_case_vi(cases[ci].pattern.binding_pats[eb].variant, 0 - 1)
+                                if ivi >= 0 {
+                                    and_false.append(self.emit_jump(OP_JUMP_IF_FALSE))
+                                    self.emit(OP_POP)               // prior test true: pop it, test the inner tag
+                                    self.emit(OP_GET_LOCAL)
+                                    self.emit_idx(subject)
+                                    self.emit(OP_GET_FIELD)
+                                    self.emit_idx(eb)               // the payload (a boxed enum)
+                                    self.emit(OP_GET_TAG)
+                                    let itidx = self.add_const_int(self.ev_tag[ivi])
+                                    self.emit(OP_CONST)
+                                    self.emit_idx(itidx)
+                                    self.emit(OP_EQ)
+                                }
+                            }
+                            eb = eb + 1
+                        }
+                        var afk = 0
+                        loop {
+                            if afk >= and_false.len() {
+                                break
+                            }
+                            self.patch_jump(and_false[afk])         // any false test converges here with its bool
+                            afk = afk + 1
+                        }
                         let next = self.emit_jump(OP_JUMP_IF_FALSE)
                         self.emit(OP_POP)                        // matched (true path): drop the test copy
                         let bind_base = self.locals.len()

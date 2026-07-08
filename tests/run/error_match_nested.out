@@ -1,1 +1,1 @@
-tests/run/error_match_nested.ig:9:19: error: nested enum patterns are not supported yet — bind the payload and use a nested `match`
+tests/run/error_match_nested.ig:11:19: error: a nested enum pattern can only bind scalar/string payloads for now (bind the payload and use a nested `match`)

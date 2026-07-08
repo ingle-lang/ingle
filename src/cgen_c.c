@@ -2575,8 +2575,23 @@ static int emit_arm_bindings(CgcGen *g, const MatchCase *mc, int sv) {
         int es = ((int)b < 16) ? mc->pattern.binding_struct[b] : -1;
         char bcn[24];
         const Pattern *sub = (mc->pattern.binding_pats != NULL) ? mc->pattern.binding_pats[b] : NULL;
+        if (sub != NULL && sub->variant_index >= 0) {
+            // A ONE-LEVEL REFUTABLE enum-inner (`case Some(Ok(v))` — Phase 2d-ii): the outer/inner
+            // tag tests already gated the condition, so just bind each inner (scalar/string) field
+            // via em_enum_field on the payload — a borrow of the inner enum's field.
+            for (size_t j = 0; j < sub->binding_count; j++) {
+                int bv = g->next_var++;
+                cgc_indent(g);
+                fprintf(g->out, "Value v%d = em_enum_field(&g_em, em_enum_field(&g_em, v%d, %zu), %zu);\n",
+                        bv, sv, b, j);
+                char icn[24];
+                snprintf(icn, sizeof icn, "v%d", bv);
+                cgc_push(g, sub->bindings[j], icn, 0, -1);   // a borrow of the inner enum's field
+            }
+            continue;
+        }
         if (sub != NULL) {
-            // A ONE-LEVEL nested struct destructure (`case Some(Point(x, y))`): unbox the boxed
+            // A ONE-LEVEL IRREFUTABLE struct-inner (`case Some(Point(x, y))`): unbox the boxed
             // value-struct payload into an em_s ONCE, then bind each inner name directly to the
             // em_s's field — em_s fields ARE Values, so no re-boxing (a borrow of the struct copy).
             int bv = g->next_var++;
@@ -2650,6 +2665,24 @@ static void emit_or_cond(CgcGen *g, const Pattern *pat, int sv, int tv) {
 }
 
 
+// emit_enum_inner_and appends ` && em_tag(payload_b) == <inner tag>` for each REFUTABLE enum-inner
+// slot of a variant pattern (`case Some(Ok(v))` — Phase 2d-ii), mirroring the VM's AND-of-tests
+// (outer tag AND each inner tag). A struct-inner slot is irrefutable and contributes no test.
+static void emit_enum_inner_and(CgcGen *g, const Pattern *pat, int sv) {
+    if (pat->binding_pats == NULL) {
+        return;
+    }
+    for (size_t b = 0; b < pat->binding_count; b++) {
+        const Pattern *sub = pat->binding_pats[b];
+        if (sub == NULL || sub->variant_index < 0) {
+            continue;   // a plain / struct-inner slot — no tag test
+        }
+        fprintf(g->out, " && em_tag(em_enum_field(&g_em, v%d, %zu)) == %d",
+                sv, b, sub->variant_index);
+    }
+}
+
+
 // emit_arm_cond_flagged writes a match arm's opening `if (…) {` for the GUARDED (flag-based)
 // lowering: independent `if (matched == 0 && <pattern>)` blocks (a guard that fails then leaves
 // `matched` 0, so the next arm is tried — the if/else-if chain can't fall through like that).
@@ -2682,7 +2715,9 @@ static void emit_arm_cond_flagged(CgcGen *g, const MatchCase *mc, int sv, int tv
                 cgc_error(g, pat->line, "native backend (M2): unresolved match variant");
             }
         }
-        fprintf(g->out, "v%d == %d) {\n", tv, vi);
+        fprintf(g->out, "v%d == %d", tv, vi);
+        emit_enum_inner_and(g, pat, sv);   // AND each refutable enum-inner slot's tag
+        fputs(") {\n", g->out);
     }
 }
 
@@ -2769,11 +2804,10 @@ static void emit_match(CgcGen *g, const Stmt *s) {
                         cgc_error(g, mc->pattern.line, "native backend (M2): unresolved match variant");
                     }
                 }
-                if (first) {
-                    fprintf(g->out, "if (v%d == %d) {\n", tv, vi);
-                } else {
-                    fprintf(g->out, "} else if (v%d == %d) {\n", tv, vi);
-                }
+                fputs(first ? "if (" : "} else if (", g->out);
+                fprintf(g->out, "v%d == %d", tv, vi);
+                emit_enum_inner_and(g, &mc->pattern, sv);   // AND each refutable enum-inner slot's tag
+                fputs(") {\n", g->out);
             }
             first = 0;
             g->indent++;

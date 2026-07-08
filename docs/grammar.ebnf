@@ -129,10 +129,11 @@ LiteralPat    = [ "-" ] , int | [ "-" ] , float | string | "true" | "false" ;  (
 VariantPat    = ident , [ "." , ident ] ,                    (* a bare "_" ident is the wildcard; a bare *)
                 [ "(" , [ BindingSlot , { "," , BindingSlot } ] , ")" ] ; (* ident on a scalar subject is a value binding *)
 BindingSlot   = ident                                        (* a plain field binding (`r` / `_`), OR a ONE-LEVEL *)
-              | ident , [ "." , ident ] ,                    (* nested pattern that destructures an all-scalar value-struct *)
-                "(" , [ ident , { "," , ident } ] , ")" ;    (* payload field (`Point(x, y)`). The inner bindings are plain *)
-                (* names only — nesting is one level deep; a literal (`Some(0)`) or a refutable enum inner
-                   pattern (`Some(Ok(v))`) is rejected (the latter: bind the payload + use a nested match). *)
+              | ident , [ "." , ident ] ,                    (* nested pattern that destructures a payload field: an *)
+                "(" , [ ident , { "," , ident } ] , ")" ;    (* all-scalar value-struct (`Point(x, y)`, irrefutable) or an *)
+                (* ENUM variant (`Ok(v)`, refutable). Inner bindings are plain names — nesting is one level
+                   deep; a literal (`Some(0)`), a deeper nest, or a struct/array-payloaded enum-inner
+                   (`Some(Ok(Point(x, y)))`) is rejected. Enum-inner exhaustiveness is one level deep. *)
 
 
 (* ----- expressions (lowest to highest precedence; all left-associative) ----- *)

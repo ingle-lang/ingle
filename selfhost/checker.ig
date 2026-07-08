@@ -1832,6 +1832,7 @@ struct Checker {
                 var vnames: [string] = []
                 var varity: [int] = []
                 var covered: [bool] = []
+                var nested_seen: [bool] = []   // a variant matched by ≥1 NESTED arm (2d) — so a later plain fallback for it isn't a duplicate
                 if known {
                     var k = 0
                     loop {
@@ -1842,6 +1843,7 @@ struct Checker {
                             vnames.append(self.ev_name[k])
                             varity.append(self.ev_arity[k])
                             covered.append(false)
+                            nested_seen.append(false)
                         }
                         k = k + 1
                     }
@@ -1901,10 +1903,23 @@ struct Checker {
                                 self.error("this variant does not belong to the matched enum")
                             } else {
                                 if ag == false {
-                                    if covered[vi] {
-                                        self.error("duplicate case for a variant")
+                                    if cases[ci].pattern.binding_pats.len() > 0 {
+                                        // A NESTED arm (struct- or enum-inner, Phase 2d): treat the outer
+                                        // variant as covered WITHOUT a duplicate check — a struct-inner is
+                                        // irrefutable (covers), an enum-inner (`Some(Ok)`/`Some(Err)`) is
+                                        // accepted leniently (inner completeness is stage-0's to verify;
+                                        // the differential tolerates the gap — no false-reject).
+                                        nested_seen[vi] = true
+                                        covered[vi] = true
+                                    } else {
+                                        // A PLAIN arm is a duplicate only if a prior PLAIN arm already
+                                        // covered it — a plain fallback AFTER nested arms (`Hold(A(n)) …
+                                        // Hold(other)`) is legitimate, so nested-covered doesn't count.
+                                        if covered[vi] && nested_seen[vi] == false {
+                                            self.error("duplicate case for a variant")
+                                        }
+                                        covered[vi] = true
                                     }
-                                    covered[vi] = true
                                 }
                                 if cases[ci].pattern.bindings.len() != varity[vi] {
                                     self.error("pattern binds the wrong number of fields")

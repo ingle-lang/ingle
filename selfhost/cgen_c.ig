@@ -3672,6 +3672,29 @@ struct CgcGen {
     }
 
 
+    // emit_enum_inner_and returns ` && em_tag(payload_b) == <inner tag>` for each REFUTABLE enum-inner
+    // slot of a variant pattern (`case Some(Ok(v))` — Phase 2d-ii), mirroring the VM's AND-of-tests
+    // (outer tag AND each inner tag). An enum-inner is a nested slot whose variant name resolves to a
+    // known variant; a struct-inner does not, and contributes no test. Mirrors src/cgen_c.c.
+    fn emit_enum_inner_and(self, pat: ps.Pattern, sv: int) -> string {
+        var s = ""
+        var b = 0
+        loop {
+            if b >= pat.binding_pats.len() {
+                break
+            }
+            if pat.binding_pats[b].kind != 5 {
+                let ivf = self.en.variant_flat(pat.binding_pats[b].variant)
+                if ivf >= 0 {
+                    s = s + " && em_tag(em_enum_field(&g_em, v{sv}, {b})) == {self.en.v_tag[ivf]}"
+                }
+            }
+            b = b + 1
+        }
+        return s
+    }
+
+
     fn emit_stmt(mut self, s: ps.Stmt) {
         match s {
             case SReturn(value, line) {
@@ -3960,7 +3983,8 @@ struct CgcGen {
                             println("{self.ind()}if (v{mv} == 0 && {cond}) \{")
                         } else {
                             let tag = self.en.v_tag[self.en.variant_flat(cases[ci].pattern.variant)]
-                            println("{self.ind()}if (v{mv} == 0 && v{tv} == {tag}) \{")
+                            let inner = self.emit_enum_inner_and(cases[ci].pattern, sv)
+                            println("{self.ind()}if (v{mv} == 0 && v{tv} == {tag}{inner}) \{")
                         }
                     } else {
                         if cases[ci].pattern.wildcard || vb {
@@ -3986,10 +4010,11 @@ struct CgcGen {
                             }
                         } else {
                             let tag = self.en.v_tag[self.en.variant_flat(cases[ci].pattern.variant)]
+                            let inner = self.emit_enum_inner_and(cases[ci].pattern, sv)
                             if first {
-                                println("{self.ind()}if (v{tv} == {tag}) \{")
+                                println("{self.ind()}if (v{tv} == {tag}{inner}) \{")
                             } else {
-                                println("{self.ind()}\} else if (v{tv} == {tag}) \{")
+                                println("{self.ind()}\} else if (v{tv} == {tag}{inner}) \{")
                             }
                         }
                     }
@@ -4005,6 +4030,26 @@ struct CgcGen {
                         loop {
                             if bi >= cases[ci].pattern.bindings.len() {
                                 break
+                            }
+                            // A ONE-LEVEL REFUTABLE enum-inner (`case Some(Ok(v))` — Phase 2d-ii): the
+                            // outer/inner tag tests already gated the condition, so bind each inner
+                            // (scalar/string) field via em_enum_field on the payload. Mirrors src/cgen_c.c.
+                            if cases[ci].pattern.binding_pats.len() > 0 && cases[ci].pattern.binding_pats[bi].kind != 5 && self.en.variant_flat(cases[ci].pattern.binding_pats[bi].variant) >= 0 {
+                                var ij = 0
+                                loop {
+                                    if ij >= cases[ci].pattern.binding_pats[bi].bindings.len() {
+                                        break
+                                    }
+                                    let bv = self.fresh_var()
+                                    println("{self.ind()}Value v{bv} = em_enum_field(&g_em, em_enum_field(&g_em, v{sv}, {bi}), {ij});")
+                                    self.push(cases[ci].pattern.binding_pats[bi].bindings[ij], "v{bv}", 0 - 1, false, false, false, 0 - 1)   // a borrow of the inner enum's field
+                                    if self.en.payload_refc(cases[ci].pattern.binding_pats[bi].variant, ij) {
+                                        self.set_last_refc(true)      // a refcounted (string/enum) inner payload → own_into_slot on consume
+                                    }
+                                    ij = ij + 1
+                                }
+                                bi = bi + 1
+                                continue
                             }
                             // A ONE-LEVEL nested struct destructure (`case Some(Point(x, y))`): unbox the
                             // boxed value-struct payload into an em_s ONCE, then bind each inner name to
