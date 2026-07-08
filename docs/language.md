@@ -264,6 +264,20 @@ fn main() {            // main may be unit; implicit result is 0
 }
 ```
 
+**Method-call syntax for free functions (UFCS).** A free function whose first parameter matches a
+value can be called method-style: `x.f(a, b)` is the same as `f(x, a, b)`. This applies to any
+**non-struct** receiver — an enum, scalar, string, or array — and is what makes the `Option`/`Result`
+helpers read naturally (`opt.unwrap_or(0)`, `r.map(f).unwrap_or(0)`). A struct keeps methods-only: a
+real method always wins, so there is never method/free ambiguity. It is a pure call-site convenience —
+`x.f(a)` and `f(x, a)` compile identically — so generic inference, closures, and chaining all work.
+
+```ember
+fn doubled(o: Option<int>) -> Option<int> { … }
+fn unwrap_or(o: Option<int>, d: int) -> int { … }
+
+let n = value.doubled().unwrap_or(0)   // == unwrap_or(doubled(value), 0)
+```
+
 ---
 
 ## Contracts — [runs]

@@ -5264,6 +5264,50 @@ struct Chunk {
     }
 
 
+    // gen_ufcs emits `object.f(args)` as the free call `f(object, args)` — UFCS (Phase 3). The
+    // receiver is prepended as arg 0 and the whole thing routes through the SAME free-call machinery
+    // as a bare `f(object, args)` (mirrors src/check.c's AST rewrite → byte-identical to stage-0).
+    // Only reached when the receiver is a NON-STRUCT value and `f` resolves to a free function.
+    fn gen_ufcs(mut self, object: ps.Expr, mname: string, args: [ps.Expr], line: int) {
+        var uargs: [ps.Expr] = []
+        uargs.append(object)                         // the receiver becomes arg 0
+        var ua = 0
+        loop {
+            if ua >= args.len() {
+                break
+            }
+            uargs.append(args[ua])
+            ua = ua + 1
+        }
+        if cg_index_of(self.gb_fn, mname) >= 0 {
+            self.gen_bounded_call(mname, uargs, line)   // a BOUNDED generic combinator
+            self.expected_key = ""
+            return
+        }
+        var fi = self.resolve_free_fn(mname)
+        let gi = cg_index_of(self.generic_fns, mname)
+        let is_gen = gi >= 0
+        var pq = ""
+        if is_gen {
+            pq = self.generic_pquals[gi]
+            // A GENERIC combinator retargets to its monomorphized instance, keyed on arg 0 (the receiver).
+            if self.at_base_generic == false && uargs.len() > 0 {
+                let ix = cg_index_of(self.fn_inst_keys, "{mname}<{mono_arg_key(uargs[0])}>")
+                if ix >= 0 {
+                    fi = self.inst_base + ix
+                }
+            } else if self.at_base_generic == false && self.expected_key.len() > 0 {
+                let ix = cg_index_of(self.fn_inst_keys, "{mname}<{self.expected_key}>")
+                if ix >= 0 {
+                    fi = self.inst_base + ix
+                }
+            }
+        }
+        self.expected_key = ""
+        self.gen_user_call(fi, uargs, line, is_gen, pq)
+    }
+
+
     fn gen_method_call(mut self, object: ps.Expr, mname: string, args: [ps.Expr], line: int) {
         // A method call on an INTERFACE-value receiver (`s.area()` where s: Shape) dispatches DYNAMICALLY: push
         // the receiver + args (borrows), then CALL_DYN <method's vtable slot> <arg count>. The VM reads the
@@ -5388,6 +5432,11 @@ struct Chunk {
                 }
                 let sid = self.slot_struct[slot]
                 if sid < 0 {
+                    // A NON-STRUCT value receiver (an enum like Option, …). If `mname` is a free
+                    // function, this is a UFCS call `mname(object, args)` (Phase 3); else nothing.
+                    if self.resolve_free_fn(mname) >= 0 || cg_index_of(self.gb_fn, mname) >= 0 {
+                        self.gen_ufcs(object, mname, args, line)
+                    }
                     return
                 }
                 let midx = self.resolve_method_index(recv, self.st_names[sid], mname)
@@ -5523,6 +5572,12 @@ struct Chunk {
                         self.emit_idx(midx)
                         self.emit_idx(1 + n)
                         self.emit_drop_unders(plan.keep)
+                    }
+                } else {
+                    // A NON-struct/string/array value receiver (e.g. an enum result of `mk().unwrap_or(0)`
+                    // or a chain `a.map(f).unwrap_or(0)`). UFCS if `mname` is a free function (Phase 3).
+                    if self.resolve_free_fn(mname) >= 0 || cg_index_of(self.gb_fn, mname) >= 0 {
+                        self.gen_ufcs(object, mname, args, line)
                     }
                 }
             }

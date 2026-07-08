@@ -2988,6 +2988,23 @@ struct CgcGen {
                         return s + ")"
                     }
                 }
+                // UFCS (Phase 3): a NON-STRUCT value receiver (an enum like Option, …) whose method
+                // name is a free function → emit the free call `mname(object, args)` with the receiver
+                // prepended as arg 0 (mirrors src/check.c's AST rewrite → byte-identical to stage-0).
+                let ufi = self.fn_index(mname)
+                if ufi >= 0 {
+                    var uargs: [ps.Expr] = []
+                    uargs.append(object.value)
+                    var ua = 0
+                    loop {
+                        if ua >= args.len() {
+                            break
+                        }
+                        uargs.append(args[ua])
+                        ua = ua + 1
+                    }
+                    return self.emit_free_call(ufi, uargs)
+                }
             }
             case _ {
             }
