@@ -1397,6 +1397,63 @@ struct EnumTab {
     }
 
 
+    // prelude_variant_tag returns the tag of a PRELUDE enum variant (Some/Ok = 0, None/Err = 1), or -1.
+    // The prelude Option/Result are NOT in the C-emit variant table (construction has its own path), so a
+    // `match` on a generic Option/Result PARAMETER can't resolve Some/Ok/… via variant_flat — this fallback
+    // lets the match classify + tag them like stage-0, WITHOUT disturbing the enum table (OFI-204).
+    fn prelude_variant_tag(self, name: string) -> int {
+        if name == "Some" {
+            return 0
+        }
+        if name == "Ok" {
+            return 0
+        }
+        if name == "None" {
+            return 1
+        }
+        if name == "Err" {
+            return 1
+        }
+        return 0 - 1
+    }
+
+
+    // prelude_enum_id returns the enum id a PRELUDE Option/Result variant CONSTRUCTS into: the user-enum
+    // count for Option (Some/None), +1 for Result (Ok/Err) — matching stage-0's DECL_ENUM numbering
+    // (user enums first, then prelude Option, then Result). -1 if `name` is not a prelude variant.
+    fn prelude_enum_id(self, name: string) -> int {
+        if name == "Some" {
+            return self.names.len()
+        }
+        if name == "None" {
+            return self.names.len()
+        }
+        if name == "Ok" {
+            return self.names.len() + 1
+        }
+        if name == "Err" {
+            return self.names.len() + 1
+        }
+        return 0 - 1
+    }
+
+
+    // is_case_variant reports whether a case name is a real variant (user enum, or a prelude Some/Ok/…).
+    fn is_case_variant(self, name: string) -> bool {
+        return self.variant_flat(name) >= 0 || self.prelude_variant_tag(name) >= 0
+    }
+
+
+    // case_tag returns a case's variant tag — from the user enum table, or the prelude fallback.
+    fn case_tag(self, name: string) -> int {
+        let f = self.variant_flat(name)
+        if f >= 0 {
+            return self.v_tag[f]
+        }
+        return self.prelude_variant_tag(name)
+    }
+
+
     fn is_variant(self, name: string) -> bool {
         return self.variant_flat(name) >= 0
     }
@@ -1431,6 +1488,9 @@ struct EnumTab {
     fn payload_refc(self, vname: string, idx: int) -> bool {
         let f = self.payload_flat(vname, idx)
         if f < 0 {
+            // A generic prelude payload (Some/Ok/Err's T/E) is possibly-refcounted-of-unknown-type: it is
+            // NOT known-refcounted (which would emit own_into_slot), so leave it non-refc — the return
+            // retain-dance then emits the runtime IS_OBJ wrapper, matching stage-0 (OFI-204).
             return false
         }
         return self.pf_refc[f]
@@ -1463,6 +1523,13 @@ struct EnumTab {
     fn payload_ty(self, vname: string, idx: int) -> ps.Ty {
         let f = self.payload_flat(vname, idx)
         return self.pf_ty[f]
+    }
+
+
+    // has_payload_field reports whether variant `vname`'s `idx`-th payload is in the field table — false
+    // for a generic prelude payload (Some/Ok/Err's T/E, OFI-163), so a caller must not read payload_ty then.
+    fn has_payload_field(self, vname: string, idx: int) -> bool {
+        return self.payload_flat(vname, idx) >= 0
     }
 
 
@@ -2087,9 +2154,9 @@ struct CgcGen {
                 return "FLOAT_VAL({v})"
             }
             case EIdent(name) {
-                if self.en.is_variant(name) && self.lookup_cname(name) == "" {
+                if self.en.is_case_variant(name) && self.lookup_cname(name) == "" {
                     var no_args: [ps.Expr] = []
-                    return self.emit_enum_ctor(name, no_args)   // a bare (zero-payload) enum variant `Dot`
+                    return self.emit_enum_ctor(name, no_args)   // a bare (zero-payload) enum variant `Dot` / prelude `None`
                 }
                 if self.lookup_cname(name) == "" {
                     let ci = self.consts.lookup_idx(name)   // a module-level folded constant `TAG_IDENT` → its literal
@@ -2356,9 +2423,22 @@ struct CgcGen {
     // (a left-to-right loop — OFI-166). A fresh em_enum is an OWNED refcounted value.
     fn emit_enum_ctor(mut self, name: string, args: [ps.Expr]) -> string {
         let flat = self.en.variant_flat(name)
-        let eid = self.en.v_owner[flat]
-        let tag = self.en.v_tag[flat]
-        let arity = self.en.v_arity[flat]
+        var eid = 0
+        var tag = 0
+        var arity = 0
+        if flat >= 0 {
+            eid = self.en.v_owner[flat]
+            tag = self.en.v_tag[flat]
+            arity = self.en.v_arity[flat]
+        } else {
+            // A PRELUDE Option/Result variant (Some/None/Ok/Err) — absent from the user enum table
+            // (OFI-203/204). Its enum id is the user-enum count for Option or +1 for Result, its tag is
+            // Some/Ok=0 / None/Err=1, and its arity is the construction payload count — all matching
+            // stage-0's DECL_ENUM order (user enums, then prelude Option, then Result).
+            eid = self.en.prelude_enum_id(name)
+            tag = self.en.prelude_variant_tag(name)
+            arity = args.len()
+        }
         var s = "em_enum(&g_em, {eid}, {tag}, {arity}"
         var i = 0
         loop {
@@ -2436,13 +2516,13 @@ struct CgcGen {
     fn is_enum_expr(self, e: ps.Expr) -> bool {
         match e {
             case EIdent(name) {
-                return self.en.is_variant(name) && self.lookup_cname(name) == ""
+                return self.en.is_case_variant(name) && self.lookup_cname(name) == ""
             }
             case ECall(callee, args) {
                 match callee.value {
                     case EIdent(name) {
-                        if self.en.is_variant(name) {
-                            return true                       // a payload variant construction `Circle(4)`
+                        if self.en.is_case_variant(name) {
+                            return true                       // a payload variant construction `Circle(4)` / prelude `Some(5)`
                         }
                         let fi = self.fn_index(name)
                         if fi >= 0 {
@@ -2852,8 +2932,8 @@ struct CgcGen {
                     let opn = byte_slice(name, 9, name.len())   // drop the "wrapping_" prefix → add / sub / mul
                     return "em_wrap_{opn}({self.emit_expr(args[0])}, {self.emit_expr(args[1])}, 0)"
                 }
-                if self.en.is_variant(name) {
-                    return self.emit_enum_ctor(name, args)   // an enum-variant construction `Circle(4)`
+                if self.en.is_case_variant(name) {
+                    return self.emit_enum_ctor(name, args)   // an enum-variant construction `Circle(4)` / prelude `Some(5)`
                 }
                 let nid = native_id_for_name(name)
                 if is_em_native_id(nid) {
@@ -3928,7 +4008,7 @@ struct CgcGen {
                     }
                     // A REAL variant arm (a bare/qualified name the enum table resolves). A bare name it
                     // does NOT resolve is a scalar value binding (`case n` — Phase 2b), which needs no tag.
-                    let hv_real = cases[hvi].pattern.wildcard == false && cases[hvi].pattern.kind == 0 && self.en.variant_flat(cases[hvi].pattern.variant) >= 0
+                    let hv_real = cases[hvi].pattern.wildcard == false && cases[hvi].pattern.kind == 0 && self.en.is_case_variant(cases[hvi].pattern.variant)
                     if hv_real {
                         has_variant = true
                     }
@@ -3986,7 +4066,7 @@ struct CgcGen {
                         break
                     }
                     // A bare name the enum table does NOT resolve is a scalar VALUE binding (`case n`, 2b).
-                    let vb = cases[ci].pattern.wildcard == false && cases[ci].pattern.kind == 0 && self.en.variant_flat(cases[ci].pattern.variant) < 0
+                    let vb = cases[ci].pattern.wildcard == false && cases[ci].pattern.kind == 0 && self.en.is_case_variant(cases[ci].pattern.variant) == false
                     // --- condition ---
                     if has_guard {
                         if cases[ci].pattern.wildcard || vb {
@@ -3999,7 +4079,7 @@ struct CgcGen {
                             let cond = self.emit_or_cond(cases[ci].pattern.alts, sv, tv)
                             println("{self.ind()}if (v{mv} == 0 && {cond}) \{")
                         } else {
-                            let tag = self.en.v_tag[self.en.variant_flat(cases[ci].pattern.variant)]
+                            let tag = self.en.case_tag(cases[ci].pattern.variant)
                             let inner = self.emit_enum_inner_and(cases[ci].pattern, sv)
                             println("{self.ind()}if (v{mv} == 0 && v{tv} == {tag}{inner}) \{")
                         }
@@ -4026,7 +4106,7 @@ struct CgcGen {
                                 println("{self.ind()}\} else if ({cond}) \{")
                             }
                         } else {
-                            let tag = self.en.v_tag[self.en.variant_flat(cases[ci].pattern.variant)]
+                            let tag = self.en.case_tag(cases[ci].pattern.variant)
                             let inner = self.emit_enum_inner_and(cases[ci].pattern, sv)
                             if first {
                                 println("{self.ind()}if (v{tv} == {tag}{inner}) \{")
@@ -4106,7 +4186,7 @@ struct CgcGen {
                                 if pes >= 0 {
                                     self.set_last_elem_struct(pes)
                                 }
-                            } else {
+                            } else if self.en.has_payload_field(cases[ci].pattern.variant, bi) {
                                 let pty = self.en.payload_ty(cases[ci].pattern.variant, bi)
                                 let psid = self.st.sid_of_ty(pty)
                                 if psid >= 0 {
@@ -4117,6 +4197,8 @@ struct CgcGen {
                                     self.set_last_render(rk)         // a scalar float/bool/sized payload: `{v}` renders at its kind
                                 }
                             }
+                            // else: a generic prelude payload (Some/Ok/Err's T/E) — a plain Value binding,
+                            // no struct sid / render kind (the return retain-dance emits the IS_OBJ wrapper).
                             bi = bi + 1
                         }
                     }
@@ -4469,22 +4551,39 @@ fn numeric_typename_kind(name: string) -> int {
 
 // is_enum_ty reports whether a type annotation names a declared enum (an OWNED refcounted value — an enum
 // param / local / return is dropped at scope exit and moved into a call, exactly like a string).
+fn enum_name_known(name: string, en: EnumTab) -> bool {
+    // The prelude Option/Result are enums but aren't in the C-emit enum table (construction has its own
+    // path), so recognise them by name (OFI-204) — an `o: Option<int>` param/return is an owned enum.
+    if name == "Option" {
+        return true
+    }
+    if name == "Result" {
+        return true
+    }
+    var i = 0
+    loop {
+        if i >= en.names.len() {
+            break
+        }
+        if en.names[i] == name {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+
 fn is_enum_ty(ty: ps.Ty, en: EnumTab) -> bool {
     match ty {
         case TyName(qual, name) {
             // The qualifier is the module alias (`lx.Tk`); the merged enum table registers each enum by its
             // BARE name (like ast_print drops the qualifier), so match on `name` regardless of `qual`.
-            var i = 0
-            loop {
-                if i >= en.names.len() {
-                    break
-                }
-                if en.names[i] == name {
-                    return true
-                }
-                i = i + 1
-            }
-            return false
+            return enum_name_known(name, en)
+        }
+        case TyGeneric(qual, name, args) {
+            // A generic-enum instance (`Option<int>`, `Result<T, E>`, a user generic enum) is also an enum.
+            return enum_name_known(name, en)
         }
         case _ {
             return false
