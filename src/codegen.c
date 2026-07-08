@@ -1844,6 +1844,51 @@ static void gen_array_append_writeback(Codegen *cg, const Expr *call) {
 
 
 
+static void gen_stmt(Codegen *cg, const Stmt *s);
+
+// emit_match_arm_tail emits the shared tail of a match arm once its pattern has matched and its
+// bindings (if any) are declared at `bind_base`: an optional guard test, the body, binding cleanup,
+// and the jump to the match end. `next` is the pattern's own JUMP_IF_FALSE (or -1 for an irrefutable
+// wildcard/value-binding arm). For an UNGUARDED arm this is byte-identical to the old inline emit.
+// A GUARDED arm's guard-false path pops the guard bool, unwinds the bindings, and — for a refutable
+// arm — jumps PAST the pattern-false POP so both failure paths converge at the next arm with a clean
+// stack (the dual false-path discipline; gate with `make opcheck`).
+static void emit_match_arm_tail(Codegen *cg, const MatchCase *mc, int bind_base, int next,
+                                int *end_jumps, int *end_count) {
+    int gfail = -1;
+    if (mc->guard != NULL) {
+        gen_expr(cg, mc->guard);
+        gfail = emit_jump(cg, OP_JUMP_IF_FALSE);
+        emit(cg, OP_POP);   // guard true: pop the guard bool
+    }
+    for (size_t i = 0; i < mc->body.count; i++) {
+        gen_stmt(cg, mc->body.stmts[i]);
+    }
+    emit_drops_and_pops(cg, bind_base);
+    cg_unwind(cg, bind_base);
+    if (*end_count < MAX_MATCH_CASES) {
+        end_jumps[(*end_count)++] = emit_jump(cg, OP_JUMP);
+    }
+    int gfdone = -1;
+    if (gfail >= 0) {
+        patch_jump(cg, gfail);
+        emit(cg, OP_POP);   // guard false: pop the guard bool
+        emit_drops_and_pops(cg, bind_base);
+        cg_unwind(cg, bind_base);
+        if (next >= 0) {
+            gfdone = emit_jump(cg, OP_JUMP);   // skip the pattern-false POP; converge at the next arm
+        }
+    }
+    if (next >= 0) {
+        patch_jump(cg, next);
+        emit(cg, OP_POP);   // pattern false: pop the test bool
+    }
+    if (gfdone >= 0) {
+        patch_jump(cg, gfdone);
+    }
+}
+
+
 static void gen_stmt(Codegen *cg, const Stmt *s) {
     cg->current_line = s->line;
     cg->current_col  = s->col;
@@ -2036,25 +2081,97 @@ static void gen_stmt(Codegen *cg, const Stmt *s) {
             int end_count = 0;
             for (size_t k = 0; k < s->as.match.case_count; k++) {
                 MatchCase *mc = &s->as.match.cases[k];
-                if (mc->pattern.wildcard) {
-                    // A catch-all always matches: no tag test. Reaching here means
-                    // no earlier case matched, so run the body and jump to the end.
+                Pattern *pat = &mc->pattern;
+                if (pat->wildcard) {
+                    // A catch-all: no pattern test (irrefutable when unguarded). The tail runs the
+                    // guard (if any) + body.
                     int wbase = cg->local_count;
-                    for (size_t i = 0; i < mc->body.count; i++) {
-                        gen_stmt(cg, mc->body.stmts[i]);
+                    emit_match_arm_tail(cg, mc, wbase, -1, end_jumps, &end_count);
+                    continue;
+                }
+                if (pat->kind == PAT_BIND) {
+                    // A scalar VALUE binding (`case n`): bind the subject's value as a case-local
+                    // borrow — irrefutable, so no test; a guard (if any) is handled by the tail.
+                    emit(cg, OP_GET_LOCAL);
+                    emit_idx(cg, subject);
+                    int bbase = cg->local_count;
+                    cg_declare(cg, pat->variant, 0, 1);
+                    emit_match_arm_tail(cg, mc, bbase, -1, end_jumps, &end_count);
+                    continue;
+                }
+                if (pat->kind == PAT_LITERAL) {
+                    // A scalar/string subject: `if subject == <literal>` by value. The
+                    // GET_LOCAL/gen_expr/OP_EQ sequence is exactly what `subject == <literal>`
+                    // compiles to, so its refcount handling is inherited.
+                    emit(cg, OP_GET_LOCAL);
+                    emit_idx(cg, subject);
+                    gen_expr(cg, pat->lit);
+                    emit(cg, OP_EQ);
+                    int lnext = emit_jump(cg, OP_JUMP_IF_FALSE);
+                    emit(cg, OP_POP);   // matched (true path): drop the test bool
+                    int lbase = cg->local_count;
+                    emit_match_arm_tail(cg, mc, lbase, lnext, end_jumps, &end_count);
+                    continue;
+                }
+                if (pat->kind == PAT_OR) {
+                    // `case a | b | c`: an OR-of-tests. Each alternative is tested against the
+                    // subject in turn; the FIRST to match jumps forward to the shared body
+                    // ("matched"); if NONE match, control falls to `onext` (the pattern-false
+                    // path). The VM has no OP_OR / JUMP_IF_TRUE, so the OR is expressed purely
+                    // with JUMP_IF_FALSE + jumps, each test popping its own bool so the stack is
+                    // clean at every join. Or-patterns are non-binding, so there are no case
+                    // locals; the last alt's JUMP_IF_FALSE is `next` for emit_match_arm_tail, so
+                    // a guard's dual-false-path convergence is inherited unchanged.
+                    int or_jumps[MAX_MATCH_CASES];   // alt-matched forward jumps → matched
+                    int or_count = 0;
+                    int onext = -1;
+                    for (size_t a = 0; a < pat->alt_count; a++) {
+                        Pattern *alt = &pat->alts[a];
+                        emit(cg, OP_GET_LOCAL);
+                        emit_idx(cg, subject);
+                        if (alt->kind == PAT_LITERAL) {
+                            gen_expr(cg, alt->lit);   // `subject == <literal>` by value
+                        } else {
+                            emit(cg, OP_GET_TAG);     // `subject.tag == <variant tag>`
+                            int avtag = alt->variant_index;
+                            if (avtag < 0) {
+                                const CgVariant *v = resolve_cgvariant(cg, alt->variant);
+                                if (v == NULL) {
+                                    internal_error(cg, "an unresolved or-pattern variant");
+                                    continue;
+                                }
+                                avtag = v->variant_index;
+                            }
+                            emit_const(cg, avtag);
+                        }
+                        emit(cg, OP_EQ);
+                        if (a + 1 < pat->alt_count) {
+                            int jf = emit_jump(cg, OP_JUMP_IF_FALSE);
+                            emit(cg, OP_POP);   // this alt matched: pop the test bool
+                            if (or_count < MAX_MATCH_CASES) {
+                                or_jumps[or_count++] = emit_jump(cg, OP_JUMP);   // → matched
+                            } else {
+                                internal_error(cg, "too many or-pattern alternatives");
+                            }
+                            patch_jump(cg, jf);
+                            emit(cg, OP_POP);   // this alt failed: pop the test bool, try the next
+                        } else {
+                            onext = emit_jump(cg, OP_JUMP_IF_FALSE);   // none matched → pattern-false
+                            emit(cg, OP_POP);   // last alt matched: pop the test bool, fall to matched
+                        }
                     }
-                    emit_drops_and_pops(cg, wbase);
-                    cg_unwind(cg, wbase);
-                    if (end_count < MAX_MATCH_CASES) {
-                        end_jumps[end_count++] = emit_jump(cg, OP_JUMP);
+                    for (int j = 0; j < or_count; j++) {
+                        patch_jump(cg, or_jumps[j]);   // matched: every alt-true jump converges here
                     }
+                    int obase = cg->local_count;
+                    emit_match_arm_tail(cg, mc, obase, onext, end_jumps, &end_count);
                     continue;
                 }
                 // Dispatch on the checker-resolved tag (scrutinee-directed; not a by-name lookup
                 // that could hit a same-named variant of another enum — OFI-073).
-                int vtag = mc->pattern.variant_index;
+                int vtag = pat->variant_index;
                 if (vtag < 0) {
-                    const CgVariant *v = resolve_cgvariant(cg, mc->pattern.variant);
+                    const CgVariant *v = resolve_cgvariant(cg, pat->variant);
                     if (v == NULL) {
                         internal_error(cg, "an unresolved match variant");
                         continue;
@@ -2072,27 +2189,16 @@ static void gen_stmt(Codegen *cg, const Stmt *s) {
 
                 // Bind the variant's fields positionally as case-local values.
                 int bind_base = cg->local_count;
-                for (size_t b = 0; b < mc->pattern.binding_count; b++) {
+                for (size_t b = 0; b < pat->binding_count; b++) {
                     emit(cg, OP_GET_LOCAL);
                     emit_idx(cg, subject);
                     emit(cg, OP_GET_FIELD);
                     emit_idx(cg, b);
                     // A pattern binding borrows a field of the subject (which still
                     // owns it) — never freed here, else it double-frees.
-                    cg_declare(cg, mc->pattern.bindings[b], 0, 1);
+                    cg_declare(cg, pat->bindings[b], 0, 1);
                 }
-                for (size_t i = 0; i < mc->body.count; i++) {
-                    gen_stmt(cg, mc->body.stmts[i]);
-                }
-                // Release and pop the pattern bindings and any case-body locals.
-                emit_drops_and_pops(cg, bind_base);
-                cg_unwind(cg, bind_base);
-
-                if (end_count < MAX_MATCH_CASES) {
-                    end_jumps[end_count++] = emit_jump(cg, OP_JUMP);
-                }
-                patch_jump(cg, next);
-                emit(cg, OP_POP);   // matched (false path)
+                emit_match_arm_tail(cg, mc, bind_base, next, end_jumps, &end_count);
             }
             for (int j = 0; j < end_count; j++) {
                 patch_jump(cg, end_jumps[j]);

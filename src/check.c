@@ -6290,6 +6290,144 @@ static void check_stmt(Checker *c, Stmt *s) {
             // A scrutinee that is a fresh refcounted temporary (e.g. `match
             // recv(ch)`) owns its reference; release it when the match ends.
             s->as.match.subject_drop = is_owning_temp(c, s->as.match.value, st);
+
+            // A scalar / string / bool subject matches on LITERAL patterns by value (`case 0`,
+            // `case "x"`, `case true` — Phase 2a). This branch is self-contained; the enum path
+            // below (the tested variant-dispatch machinery) is left untouched. The move/consume
+            // fold mirrors the enum path exactly: moved = OR over arms, consumed = AND over
+            // reaching arms (OFI-049), each arm re-based to the pre-match state.
+            if (st == TY_BOOL || st == TY_STRING || is_integer_type(st)) {
+                int entry_count = c->local_count;
+                int *pre   = arena_alloc(c->arena, (size_t)(entry_count + 1) * sizeof(int));
+                int *acc   = arena_alloc(c->arena, (size_t)(entry_count + 1) * sizeof(int));
+                int *pre_c = arena_alloc(c->arena, (size_t)(entry_count + 1) * sizeof(int));
+                int *acc_c = arena_alloc(c->arena, (size_t)(entry_count + 1) * sizeof(int));
+                int *any_c = arena_alloc(c->arena, (size_t)(entry_count + 1) * sizeof(int));
+                snapshot_moved(c, pre);
+                snapshot_consumed(c, pre_c);
+                for (int i = 0; i < entry_count; i++) {
+                    acc[i]   = pre[i];
+                    acc_c[i] = 1;
+                    any_c[i] = 0;
+                }
+                int has_wildcard = 0, seen_true = 0, seen_false = 0;
+                for (size_t k = 0; k < s->as.match.case_count; k++) {
+                    MatchCase *mc = &s->as.match.cases[k];
+                    Pattern *pat = &mc->pattern;
+                    int is_bind = 0;
+                    if (pat->kind == PAT_VARIANT) {
+                        // On a scalar/string subject a bare identifier binds the VALUE (an
+                        // irrefutable value-binding pattern — `case n if n > 0`); a qualified or
+                        // parenthesised variant pattern is meaningless here. Stamp PAT_BIND for codegen.
+                        if (pat->type_name != NULL || pat->binding_count > 0) {
+                            type_error(c, pat->line, pat->col,
+                                       "a variant pattern cannot match a scalar/string value; use a "
+                                       "literal (e.g. `case 0`), a value binding (`case n`), or `_`");
+                        } else if (resolve_variant(c, pat->variant) != NULL) {
+                            // The name resolves to an enum variant — treat it AS a variant (a compile
+                            // error on a scalar subject), not a value binding. This keeps the checker's
+                            // decision in step with the self-hosted codegen, which classifies a bind vs a
+                            // variant by exactly this by-name resolution (no silent miscompile — OFI-201).
+                            type_error(c, pat->line, pat->col,
+                                       "a variant pattern cannot match a scalar/string value; a value "
+                                       "binding cannot reuse an enum variant name — rename it");
+                        } else {
+                            pat->kind = PAT_BIND;
+                            is_bind = 1;
+                        }
+                    } else if (pat->kind == PAT_LITERAL) {
+                        SemType lt = check_expr(c, pat->lit);
+                        int compat = (st == TY_BOOL)   ? (lt == TY_BOOL)
+                                   : (st == TY_STRING) ? (lt == TY_STRING)
+                                   : is_integer_type(lt);
+                        if (lt != TY_ERROR && !compat) {
+                            type_error(c, pat->line, pat->col,
+                                       "this literal's type does not match the match subject");
+                        }
+                        // A guarded arm may not fire, so it never contributes to coverage.
+                        if (mc->guard == NULL && st == TY_BOOL && pat->lit->kind == EXPR_BOOL) {
+                            if (pat->lit->as.bool_lit) { seen_true = 1; } else { seen_false = 1; }
+                        }
+                    } else if (pat->kind == PAT_OR) {
+                        // `case 1 | 2 | 3` — every alternative is a literal (non-binding); each
+                        // contributes to coverage exactly as a bare literal arm would.
+                        for (size_t a = 0; a < pat->alt_count; a++) {
+                            Pattern *alt = &pat->alts[a];
+                            if (alt->kind != PAT_LITERAL) {
+                                type_error(c, alt->line, alt->col,
+                                           "an or-pattern on a scalar/string value may only combine "
+                                           "literals (e.g. `case 1 | 2`)");
+                                continue;
+                            }
+                            SemType lt = check_expr(c, alt->lit);
+                            int compat = (st == TY_BOOL)   ? (lt == TY_BOOL)
+                                       : (st == TY_STRING) ? (lt == TY_STRING)
+                                       : is_integer_type(lt);
+                            if (lt != TY_ERROR && !compat) {
+                                type_error(c, alt->line, alt->col,
+                                           "this literal's type does not match the match subject");
+                            }
+                            if (mc->guard == NULL && st == TY_BOOL && alt->lit->kind == EXPR_BOOL) {
+                                if (alt->lit->as.bool_lit) { seen_true = 1; } else { seen_false = 1; }
+                            }
+                        }
+                    }
+                    // else PAT_WILDCARD — coverage handled below.
+                    restore_moved(c, pre);
+                    restore_consumed(c, pre_c);
+                    c->scope_depth++;
+                    int saved = c->local_count;
+                    int arm_unreach = c->unreachable;
+                    if (is_bind) {
+                        // The value binding borrows the subject (owned = 0): a scalar is Copy; a
+                        // string binding can't outlive the match.
+                        declare_local(c, pat->line, pat->col, pat->variant, 0, st, 0);
+                    }
+                    if (mc->guard != NULL) {
+                        SemType gt = check_expr(c, mc->guard);
+                        if (gt != TY_ERROR && gt != TY_BOOL) {
+                            type_error(c, mc->guard->line, mc->guard->col,
+                                       "a match guard must be a `bool`");
+                        }
+                    }
+                    // An UNGUARDED wildcard or value binding is irrefutable — it covers the rest.
+                    if (mc->guard == NULL && (pat->kind == PAT_WILDCARD || is_bind)) {
+                        has_wildcard = 1;
+                    }
+                    for (size_t i = 0; i < mc->body.count; i++) {
+                        check_stmt(c, mc->body.stmts[i]);
+                        if (stmt_diverges(mc->body.stmts[i])) { c->unreachable = 1; }
+                    }
+                    c->unreachable = arm_unreach;
+                    if (!block_diverges(&mc->body)) {
+                        for (int i = 0; i < entry_count; i++) {
+                            if (c->locals[i].moved) { acc[i] = 1; }
+                            if (c->locals[i].consumed) { any_c[i] = 1; } else { acc_c[i] = 0; }
+                        }
+                    }
+                    drop_locals(c, saved);
+                    c->local_count = saved;
+                    c->scope_depth--;
+                }
+                for (int i = 0; i < entry_count; i++) {
+                    c->locals[i].moved    = acc[i];
+                    c->locals[i].consumed = acc_c[i];
+                    Local *l = &c->locals[i];
+                    if (l->owned && l->type == TY_PTR && !l->leaked && any_c[i] && !acc_c[i]) {
+                        report_ptr_leak(c, i, s->line, s->col);
+                    }
+                }
+                if (st == TY_BOOL) {
+                    if (!has_wildcard && !(seen_true && seen_false)) {
+                        type_error(c, s->line, s->col,
+                                   "non-exhaustive match on bool: handle both true and false, or add a `_` arm");
+                    }
+                } else if (!has_wildcard) {
+                    type_error(c, s->line, s->col,
+                               "non-exhaustive match: add a `_` arm (int and string values are unbounded)");
+                }
+                break;
+            }
             // The subject may be a plain enum or a generic enum instantiation;
             // for the latter, `inst` supplies the args to substitute into bindings.
             int enum_id;
@@ -6337,16 +6475,25 @@ static void check_stmt(Checker *c, Stmt *s) {
                 MatchCase *mc = &s->as.match.cases[k];
                 Pattern *pat = &mc->pattern;
                 if (pat->wildcard) {
-                    // A catch-all arm covers every variant not handled above and
-                    // binds nothing. Check its body from the pre-match state.
-                    for (int v = 0; v < ei->variant_count; v++) {
-                        covered[v] = 1;
+                    // A catch-all arm covers every variant not handled above and binds nothing —
+                    // but an UNGUARDED one only: `case _ if g` may not fire, so it never covers.
+                    if (mc->guard == NULL) {
+                        for (int v = 0; v < ei->variant_count; v++) {
+                            covered[v] = 1;
+                        }
                     }
                     restore_moved(c, pre);
                     restore_consumed(c, pre_c);
                     c->scope_depth++;
                     int wsaved = c->local_count;
                     int wunreach = c->unreachable;
+                    if (mc->guard != NULL) {
+                        SemType gt = check_expr(c, mc->guard);
+                        if (gt != TY_ERROR && gt != TY_BOOL) {
+                            type_error(c, mc->guard->line, mc->guard->col,
+                                       "a match guard must be a `bool`");
+                        }
+                    }
                     for (size_t i = 0; i < mc->body.count; i++) {
                         check_stmt(c, mc->body.stmts[i]);
                         if (stmt_diverges(mc->body.stmts[i])) { c->unreachable = 1; }
@@ -6363,6 +6510,78 @@ static void check_stmt(Checker *c, Stmt *s) {
                     drop_locals(c, wsaved);
                     c->local_count = wsaved;
                     c->scope_depth--;
+                    continue;
+                }
+                if (pat->kind == PAT_OR) {
+                    // `case Red | Green | Blue` — each alternative is a NULLARY variant of this
+                    // enum (non-binding), each covers its own variant. Stamp every alt's resolved
+                    // tag for codegen (OFI-073), then check the shared body once in a bare scope.
+                    for (size_t a = 0; a < pat->alt_count; a++) {
+                        Pattern *alt = &pat->alts[a];
+                        if (alt->kind == PAT_LITERAL) {
+                            type_error(c, alt->line, alt->col,
+                                       "a literal cannot match an enum value; use a variant pattern");
+                            continue;
+                        }
+                        if (alt->type_name != NULL && strcmp(alt->type_name, ei->name) != 0) {
+                            type_error(c, alt->line, alt->col,
+                                       "pattern names a different enum than the match subject");
+                        }
+                        int avi = -1;
+                        for (int v = 0; v < ei->variant_count; v++) {
+                            if (strcmp(ei->variants[v].name, alt->variant) == 0) { avi = v; break; }
+                        }
+                        if (avi < 0) {
+                            type_error(c, alt->line, alt->col,
+                                       "this variant does not belong to the matched enum");
+                            continue;
+                        }
+                        VariantInfo *avar = &ei->variants[avi];
+                        if (avar->field_count != 0 || alt->binding_count > 0) {
+                            type_error(c, alt->line, alt->col,
+                                       "an or-pattern alternative must be a variant with no payload");
+                            continue;
+                        }
+                        alt->enum_id       = avar->enum_id;
+                        alt->variant_index = avar->variant_index;
+                        if (mc->guard == NULL) {
+                            if (covered[avi]) {
+                                type_error(c, alt->line, alt->col, "duplicate case for a variant");
+                            }
+                            covered[avi] = 1;
+                        }
+                    }
+                    restore_moved(c, pre);
+                    restore_consumed(c, pre_c);
+                    c->scope_depth++;
+                    int osaved = c->local_count;
+                    int ounreach = c->unreachable;
+                    if (mc->guard != NULL) {
+                        SemType gt = check_expr(c, mc->guard);
+                        if (gt != TY_ERROR && gt != TY_BOOL) {
+                            type_error(c, mc->guard->line, mc->guard->col,
+                                       "a match guard must be a `bool`");
+                        }
+                    }
+                    for (size_t i = 0; i < mc->body.count; i++) {
+                        check_stmt(c, mc->body.stmts[i]);
+                        if (stmt_diverges(mc->body.stmts[i])) { c->unreachable = 1; }
+                    }
+                    c->unreachable = ounreach;
+                    if (!block_diverges(&mc->body)) {
+                        for (int i = 0; i < entry_count; i++) {
+                            if (c->locals[i].moved) { acc[i] = 1; }
+                            if (c->locals[i].consumed) { any_c[i] = 1; } else { acc_c[i] = 0; }
+                        }
+                    }
+                    drop_locals(c, osaved);
+                    c->local_count = osaved;
+                    c->scope_depth--;
+                    continue;
+                }
+                if (pat->kind == PAT_LITERAL) {
+                    type_error(c, pat->line, pat->col,
+                               "a literal cannot match an enum value; use a variant pattern or `_`");
                     continue;
                 }
                 if (pat->type_name != NULL && strcmp(pat->type_name, ei->name) != 0) {
@@ -6382,10 +6601,15 @@ static void check_stmt(Checker *c, Stmt *s) {
                                "this variant does not belong to the matched enum");
                     continue;
                 }
-                if (covered[vi]) {
-                    type_error(c, pat->line, pat->col, "duplicate case for a variant");
+                // Only an UNGUARDED arm covers its variant (a guarded arm may not fire) — so a
+                // guarded arm neither sets coverage nor counts as a duplicate (several guarded
+                // arms for one variant are fine, as is a guarded arm before the unguarded one).
+                if (mc->guard == NULL) {
+                    if (covered[vi]) {
+                        type_error(c, pat->line, pat->col, "duplicate case for a variant");
+                    }
+                    covered[vi] = 1;
                 }
-                covered[vi] = 1;
                 VariantInfo *var = &ei->variants[vi];
                 pat->enum_id       = var->enum_id;        // codegen dispatches on THIS variant's tag,
                 pat->variant_index = var->variant_index;  // not a by-name lookup (OFI-073)
@@ -6411,6 +6635,14 @@ static void check_stmt(Checker *c, Stmt *s) {
                     // its struct id so the native backend unboxes the bound copy into an em_s.
                     if ((int)b < 16) {
                         pat->binding_struct[b] = array_inline_struct_id(c, bt);
+                    }
+                }
+                // The guard is checked in the arm scope, AFTER the bindings, so it can read them.
+                if (mc->guard != NULL) {
+                    SemType gt = check_expr(c, mc->guard);
+                    if (gt != TY_ERROR && gt != TY_BOOL) {
+                        type_error(c, mc->guard->line, mc->guard->col,
+                                   "a match guard must be a `bool`");
                     }
                 }
                 for (size_t i = 0; i < mc->body.count; i++) {

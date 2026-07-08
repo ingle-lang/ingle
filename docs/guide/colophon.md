@@ -46,6 +46,10 @@ said to need `Copy` and Flare's inline Markdown still described as unrendered). 
 Opportunities For Improvement rather than copied, which is exactly the bargain this book makes
 with itself.
 
+A July 2026 pass re-ran the book's error examples against the current compiler — three that
+still showed the old single-line `runtime error:` now show the structured **fault** the VM
+produces today — and settled the reader-facing text on the **Ingle** name.
+
 Ingle will have grown since you read this. Treat the *spirit* — safe by default, simple by
 default, fast to build, honest about its edges — as the durable part, and check the current
 spec and examples for the details. The fire's only just been lit.

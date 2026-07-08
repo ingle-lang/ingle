@@ -519,7 +519,7 @@ fn main() -> int {
 ```
 
 ```
-inglec: runtime error: integer overflow
+error[integer_overflow]: integer overflow
 ```
 
 This is a deliberate safety choice. A silent wrap is one of the great sources of
@@ -1220,13 +1220,13 @@ type Email  = string
 
 fn main() -> int {
     let id: UserId  = UserId(42)
-    let mail: Email = Email("ada@ember.dev")
+    let mail: Email = Email("ada@ingle.dev")
     println("user {id} <{mail}>")
     return 0
 }
 ```
 ```
-user 42 <ada@ember.dev>
+user 42 <ada@ingle.dev>
 => 0
 ```
 
@@ -2175,14 +2175,14 @@ What's there today:
 import "std/string" as str
 
 fn main() -> int {
-    let name = str.trim("  ember  ")
-    println("Hello, " + str.to_upper(name) + "!")   // Hello, EMBER!
+    let name = str.trim("  ingle  ")
+    println("Hello, " + str.to_upper(name) + "!")   // Hello, INGLE!
     return str.index_of("hello", "ll")              // 2
 }
 ```
 
 ```
-Hello, EMBER!
+Hello, INGLE!
 => 2
 ```
 
@@ -2426,7 +2426,7 @@ extern "c" {
 ```
 
 ```
-wrote 5 bytes to /tmp/ingle_ffi_demo.bin
+wrote 5 bytes to /tmp/ember_ffi_demo.bin
 read back 5 bytes: EMBER
 strlen("EMBER") = 5
 => 5
@@ -2551,7 +2551,7 @@ fn main() -> int { return pos(-5) }
 ```
 
 ```
-inglec: runtime error: precondition failed in 'pos' (requires, line 1)
+error[precondition_failed]: precondition failed in 'pos' (requires, line 2)
 ```
 
 A contract is just a `bool` expression, so the full language is available — including calling
@@ -3228,7 +3228,7 @@ Run it on the VM and the contract fires before `main` ever reaches the `println`
 inglec --emit=run bad.ig
 ```
 ```
-inglec: runtime error: postcondition failed in 'bad' (ensures, line 2)
+error[postcondition_failed]: postcondition failed in 'bad' (ensures, line 2)
 ```
 
 Compile the very same program to native, and it runs straight through — the spec isn't in there
@@ -3971,6 +3971,10 @@ no prelude, a stale note on which generic bounds were allowed — and, this pass
 said to need `Copy` and Flare's inline Markdown still described as unrendered). Those were noted and filed as
 Opportunities For Improvement rather than copied, which is exactly the bargain this book makes
 with itself.
+
+A July 2026 pass re-ran the book's error examples against the current compiler — three that
+still showed the old single-line `runtime error:` now show the structured **fault** the VM
+produces today — and settled the reader-facing text on the **Ingle** name.
 
 Ingle will have grown since you read this. Treat the *spirit* — safe by default, simple by
 default, fast to build, honest about its edges — as the durable part, and check the current

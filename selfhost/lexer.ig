@@ -86,6 +86,14 @@ enum Tk {
     TTilde
     TShl
     TShr
+    TPlusAssign
+    TMinusAssign
+    TStarAssign
+    TSlashAssign
+    TPercentAssign
+    TAmpAssign
+    TPipeAssign
+    TCaretAssign
 }
 
 
@@ -172,6 +180,14 @@ fn kind_name(k: Tk) -> string {
         case TTilde { return "TILDE" }
         case TShl { return "SHL" }
         case TShr { return "SHR" }
+        case TPlusAssign { return "PLUS_ASSIGN" }
+        case TMinusAssign { return "MINUS_ASSIGN" }
+        case TStarAssign { return "STAR_ASSIGN" }
+        case TSlashAssign { return "SLASH_ASSIGN" }
+        case TPercentAssign { return "PERCENT_ASSIGN" }
+        case TAmpAssign { return "AMP_ASSIGN" }
+        case TPipeAssign { return "PIPE_ASSIGN" }
+        case TCaretAssign { return "CARET_ASSIGN" }
     }
 }
 
@@ -249,6 +265,69 @@ fn is_alpha_b(c: int) -> bool {
 
 fn is_alnum_b(c: int) -> bool {
     return is_alpha_b(c) || is_digit_b(c)
+}
+
+
+// is_base_digit_b reports whether byte `c` is a digit in the given radix (2, 8, 10, or 16).
+fn is_base_digit_b(c: int, base: int) -> bool {
+    if base == 16 {
+        return is_digit_b(c) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70)
+    }
+    if base == 8 {
+        return c >= 48 && c <= 55
+    }
+    if base == 2 {
+        return c == 48 || c == 49
+    }
+    return is_digit_b(c)
+}
+
+
+// is_literal_start reports whether `k` can begin a literal `case` pattern — an int/float/string/bool
+// literal, or a leading `-` for a negative numeric literal (`case -1`). Mirrors src/parser.c.
+fn is_literal_start(k: Tk) -> bool {
+    match k {
+        case TInt { return true }
+        case TFloat { return true }
+        case TString { return true }
+        case TTrue { return true }
+        case TFalse { return true }
+        case TMinus { return true }
+        case _ { return false }
+    }
+}
+
+
+// is_compound_assign reports whether `k` is a compound-assignment token (`+=`, `&=`, …).
+fn is_compound_assign(k: Tk) -> bool {
+    match k {
+        case TPlusAssign { return true }
+        case TMinusAssign { return true }
+        case TStarAssign { return true }
+        case TSlashAssign { return true }
+        case TPercentAssign { return true }
+        case TAmpAssign { return true }
+        case TPipeAssign { return true }
+        case TCaretAssign { return true }
+        case _ { return false }
+    }
+}
+
+
+// binop_of_compound maps a compound-assignment token to the binary operator it desugars to (the same
+// Tk the precedence parser stores for the infix form). TEof for a non-compound token — never used.
+fn binop_of_compound(k: Tk) -> Tk {
+    match k {
+        case TPlusAssign { return TPlus }
+        case TMinusAssign { return TMinus }
+        case TStarAssign { return TStar }
+        case TSlashAssign { return TSlash }
+        case TPercentAssign { return TPercent }
+        case TAmpAssign { return TAmp }
+        case TPipeAssign { return TPipe }
+        case TCaretAssign { return TCaret }
+        case _ { return TEof }
+    }
 }
 
 
@@ -333,12 +412,48 @@ struct Lexer {
     }
 
 
-    // scan_number assumes the first digit was already consumed. It reads the rest of the integer, an
-    // optional fractional part (a '.' that is immediately followed by a digit), and an optional integer
-    // width suffix [iu][0-9]+. Decimal only — no hex/binary/exponent/underscores, matching stage 0.
-    fn scan_number(mut self) -> Tk {
+    // scan_number assumes the first digit (`first`) was already consumed. A leading '0' plus a base
+    // marker (0x/0b/0o) and a base digit selects hex/binary/octal; otherwise decimal. `_` separators
+    // are permitted between digits. A '.' immediately followed by a digit promotes to a float, and an
+    // optional integer width suffix [iu][0-9]+ may follow. Mirrors stage-0 src/lexer.c scan_number.
+    fn scan_number(mut self, first: int) -> Tk {
+        if first == 48 {
+            let m = self.peek()
+            var base = 0
+            if m == 120 || m == 88 {
+                base = 16
+            } else if m == 111 || m == 79 {
+                base = 8
+            } else if m == 98 || m == 66 {
+                base = 2
+            }
+            if base != 0 && is_base_digit_b(self.peek2(), base) {
+                let _ = self.advance()          // consume the base marker
+                loop {
+                    let d = self.peek()
+                    if is_base_digit_b(d, base) || d == 95 {
+                        let _ = self.advance()
+                    } else {
+                        break
+                    }
+                }
+                let ps = self.peek()
+                if (ps == 105 || ps == 117) && is_digit_b(self.peek2()) {
+                    let _ = self.advance()
+                    loop {
+                        if is_digit_b(self.peek()) {
+                            let _ = self.advance()
+                        } else {
+                            break
+                        }
+                    }
+                }
+                return TInt
+            }
+        }
         loop {
-            if is_digit_b(self.peek()) {
+            let d = self.peek()
+            if is_digit_b(d) || d == 95 {
                 let _ = self.advance()
             } else {
                 break
@@ -347,7 +462,8 @@ struct Lexer {
         if self.peek() == 46 && is_digit_b(self.peek2()) {
             let _ = self.advance()
             loop {
-                if is_digit_b(self.peek()) {
+                let d = self.peek()
+                if is_digit_b(d) || d == 95 {
                     let _ = self.advance()
                 } else {
                     break
@@ -452,7 +568,7 @@ struct Lexer {
             return keyword_kind(byte_slice(self.src, start, self.pos))
         }
         if is_digit_b(c) {
-            return self.scan_number()
+            return self.scan_number(c)
         }
         if c == 34 {
             return self.scan_string()
@@ -466,11 +582,26 @@ struct Lexer {
         if c == 44 { return TComma }
         if c == 58 { return TColon }
         if c == 63 { return TQuestion }
-        if c == 43 { return TPlus }
-        if c == 42 { return TStar }
-        if c == 47 { return TSlash }
-        if c == 37 { return TPercent }
-        if c == 94 { return TCaret }
+        if c == 43 {
+            if self.match_byte(61) { return TPlusAssign }
+            return TPlus
+        }
+        if c == 42 {
+            if self.match_byte(61) { return TStarAssign }
+            return TStar
+        }
+        if c == 47 {
+            if self.match_byte(61) { return TSlashAssign }
+            return TSlash
+        }
+        if c == 37 {
+            if self.match_byte(61) { return TPercentAssign }
+            return TPercent
+        }
+        if c == 94 {
+            if self.match_byte(61) { return TCaretAssign }
+            return TCaret
+        }
         if c == 126 { return TTilde }
         if c == 46 {
             if self.match_byte(46) { return TDotDot }
@@ -478,6 +609,7 @@ struct Lexer {
         }
         if c == 45 {
             if self.match_byte(62) { return TArrow }
+            if self.match_byte(61) { return TMinusAssign }
             return TMinus
         }
         if c == 61 {
@@ -500,10 +632,12 @@ struct Lexer {
         }
         if c == 38 {
             if self.match_byte(38) { return TAnd }
+            if self.match_byte(61) { return TAmpAssign }
             return TAmp
         }
         if c == 124 {
             if self.match_byte(124) { return TOr }
+            if self.match_byte(61) { return TPipeAssign }
             return TPipe
         }
         return TError

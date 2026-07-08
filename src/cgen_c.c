@@ -2557,6 +2557,119 @@ static void emit_if_inline(CgcGen *g, const Stmt *s) {
 // as BORROWS (em_enum_field — the subject keeps ownership), runs the body, and breaks; a
 // `case _` is the `default`. The subject is dropped at the end iff it was a fresh
 // refcounted temporary (subject_drop) — and on a return inside a case via its drop flag.
+// emit_arm_bindings declares a match arm's bindings as case-local C vars — all BORROWS of the
+// subject `sv` (never dropped): a value binding for PAT_BIND (`case n`), or the variant's payload
+// fields positionally. Returns the scope mark to restore after the arm body.
+static int emit_arm_bindings(CgcGen *g, const MatchCase *mc, int sv) {
+    int cmark = g->scope_len;
+    if (mc->pattern.kind == PAT_BIND) {
+        int bv = g->next_var++;
+        cgc_indent(g);
+        fprintf(g->out, "Value v%d = v%d;\n", bv, sv);   // bind the subject's value
+        char bcn[24];
+        snprintf(bcn, sizeof bcn, "v%d", bv);
+        cgc_push(g, mc->pattern.variant, bcn, 0, -1);    // a borrow of the subject
+        return cmark;
+    }
+    for (size_t b = 0; b < mc->pattern.binding_count; b++) {
+        int es = ((int)b < 16) ? mc->pattern.binding_struct[b] : -1;
+        char bcn[24];
+        if (is_value_struct(g, es)) {
+            // A value-struct payload is stored BOXED in the enum; unbox the bound copy into an
+            // em_s so it can be used as a value struct (field reads, method receiver, …). The
+            // box is the enum's (a borrow), so we do NOT drop it — only copy out (all-scalar).
+            int bv = g->next_var++;
+            cgc_indent(g);
+            fprintf(g->out, "em_s%d v%d; em_unbox_struct(&g_em, %d, "
+                            "em_enum_field(&g_em, v%d, %zu), (Value*)&v%d, %d);\n",
+                    es, bv, es, sv, b, bv, g->layouts[es].field_count);
+            snprintf(bcn, sizeof bcn, "v%d", bv);
+            cgc_push(g, mc->pattern.bindings[b], bcn, 0, es);   // an em_s value-struct binding
+        } else {
+            int bv = g->next_var++;
+            cgc_indent(g);
+            fprintf(g->out, "Value v%d = em_enum_field(&g_em, v%d, %zu);\n", bv, sv, b);
+            snprintf(bcn, sizeof bcn, "v%d", bv);
+            cgc_push(g, mc->pattern.bindings[b], bcn, 0, -1);   // borrows a subject field
+        }
+    }
+    return cmark;
+}
+
+
+// emit_or_cond writes the parenthesised C disjunction for an or-pattern `case a | b | c`: each
+// alternative is a variant-tag test (`tag == vi`) or a literal equality (`em_eq_op`), OR'd with
+// `||`. Non-binding, so the alternatives contribute a boolean and nothing else. The `||` short-
+// circuits exactly like the VM's OR-of-tests, so both backends agree.
+static void emit_or_cond(CgcGen *g, const Pattern *pat, int sv, int tv) {
+    fputc('(', g->out);
+    for (size_t a = 0; a < pat->alt_count; a++) {
+        const Pattern *alt = &pat->alts[a];
+        if (a > 0) {
+            fputs(" || ", g->out);
+        }
+        if (alt->kind == PAT_LITERAL) {
+            // `subject == <literal>`; em_eq_op drops both operands, so retain the borrowed
+            // subject (IS_OBJ no-ops it for int/bool); the literal is passed directly.
+            int rv = g->next_var++;
+            fprintf(g->out, "em_truthy(em_eq_op(&g_em, ({ Value v%d = v%d; "
+                            "if (IS_OBJ(v%d)) OBJ_RETAIN(AS_OBJ(v%d)); v%d; }), ",
+                    rv, sv, rv, rv, rv);
+            emit_expr(g, alt->lit);
+            fputs("))", g->out);
+        } else {
+            int vi = alt->variant_index;
+            if (vi < 0) {
+                const CgcVariant *v = resolve_variant(g, alt->variant);
+                vi = v != NULL ? v->variant_index : -1;
+                if (v == NULL) {
+                    cgc_error(g, alt->line, "native backend (M2): unresolved or-pattern variant");
+                }
+            }
+            fprintf(g->out, "v%d == %d", tv, vi);
+        }
+    }
+    fputc(')', g->out);
+}
+
+
+// emit_arm_cond_flagged writes a match arm's opening `if (…) {` for the GUARDED (flag-based)
+// lowering: independent `if (matched == 0 && <pattern>)` blocks (a guard that fails then leaves
+// `matched` 0, so the next arm is tried — the if/else-if chain can't fall through like that).
+static void emit_arm_cond_flagged(CgcGen *g, const MatchCase *mc, int sv, int tv, int mv) {
+    const Pattern *pat = &mc->pattern;
+    fprintf(g->out, "if (v%d == 0", mv);
+    if (pat->wildcard || pat->kind == PAT_BIND) {
+        fputs(") {\n", g->out);   // irrefutable
+        return;
+    }
+    fputs(" && ", g->out);
+    if (pat->kind == PAT_LITERAL) {
+        // `subject == <literal>`; em_eq_op drops both operands, so retain the borrowed subject
+        // (IS_OBJ no-ops it for int/bool); the literal is passed directly.
+        int rv = g->next_var++;
+        fprintf(g->out, "em_truthy(em_eq_op(&g_em, ({ Value v%d = v%d; "
+                        "if (IS_OBJ(v%d)) OBJ_RETAIN(AS_OBJ(v%d)); v%d; }), ",
+                rv, sv, rv, rv, rv);
+        emit_expr(g, pat->lit);
+        fputs("))) {\n", g->out);
+    } else if (pat->kind == PAT_OR) {
+        emit_or_cond(g, pat, sv, tv);
+        fputs(") {\n", g->out);
+    } else {
+        int vi = pat->variant_index;
+        if (vi < 0) {
+            const CgcVariant *v = resolve_variant(g, pat->variant);
+            vi = v != NULL ? v->variant_index : -1;
+            if (v == NULL) {
+                cgc_error(g, pat->line, "native backend (M2): unresolved match variant");
+            }
+        }
+        fprintf(g->out, "v%d == %d) {\n", tv, vi);
+    }
+}
+
+
 static void emit_match(CgcGen *g, const Stmt *s) {
     cgc_indent(g);
     fputs("{\n", g->out);
@@ -2576,66 +2689,127 @@ static void emit_match(CgcGen *g, const Stmt *s) {
     // `break`/`continue` in a case body must target the enclosing loop, but a C `switch` would
     // swallow `break` (e.g. `loop { match recv(c) { case None { break } } }` — the channel-drain
     // idiom). The chain has no switch to swallow it.
-    int tv = g->next_var++;
-    cgc_indent(g);
-    fprintf(g->out, "int v%d = em_tag(v%d);\n", tv, sv);
-    int first = 1;
+    // The tag header is only needed for variant arms; a scalar/string subject (all-literal
+    // arms) has no tag, so emitting em_tag on it would be dead and ill-typed.
+    int has_variant = 0;
     for (size_t k = 0; k < s->as.match.case_count; k++) {
-        const MatchCase *mc = &s->as.match.cases[k];
+        const Pattern *p = &s->as.match.cases[k].pattern;
+        if (p->kind == PAT_VARIANT) {
+            has_variant = 1;
+            break;
+        }
+        if (p->kind == PAT_OR) {
+            // An or-pattern needs the tag header iff any alternative is a variant (not a literal).
+            for (size_t a = 0; a < p->alt_count; a++) {
+                if (p->alts[a].kind != PAT_LITERAL) { has_variant = 1; break; }
+            }
+            if (has_variant) { break; }
+        }
+    }
+    int tv = -1;
+    if (has_variant) {
+        tv = g->next_var++;
         cgc_indent(g);
-        if (mc->pattern.wildcard) {
-            fputs(first ? "if (1) {\n" : "} else {\n", g->out);
-        } else {
-            // Dispatch on the checker-resolved tag, not a by-name lookup (OFI-073).
-            int vi = mc->pattern.variant_index;
-            if (vi < 0) {
-                const CgcVariant *v = resolve_variant(g, mc->pattern.variant);
-                vi = v != NULL ? v->variant_index : -1;
-                if (v == NULL) {
-                    cgc_error(g, mc->pattern.line, "native backend (M2): unresolved match variant");
+        fprintf(g->out, "int v%d = em_tag(v%d);\n", tv, sv);
+    }
+    // Guards break the if/else-if chain — a failed guard must fall through, which `else if` can't
+    // do — so a match with ANY guard uses a `matched` flag + independent `if` blocks instead.
+    int has_guard = 0;
+    for (size_t k = 0; k < s->as.match.case_count; k++) {
+        if (s->as.match.cases[k].guard != NULL) {
+            has_guard = 1;
+            break;
+        }
+    }
+    if (!has_guard) {
+        int first = 1;
+        for (size_t k = 0; k < s->as.match.case_count; k++) {
+            const MatchCase *mc = &s->as.match.cases[k];
+            cgc_indent(g);
+            if (mc->pattern.wildcard || mc->pattern.kind == PAT_BIND) {
+                fputs(first ? "if (1) {\n" : "} else {\n", g->out);   // irrefutable
+            } else if (mc->pattern.kind == PAT_LITERAL) {
+                // `subject == <literal>`. em_eq_op drops both operands, so retain the subject (a
+                // borrow that must survive) — IS_OBJ makes it a no-op for int/bool.
+                fputs(first ? "if (" : "} else if (", g->out);
+                int rv = g->next_var++;
+                fprintf(g->out, "em_truthy(em_eq_op(&g_em, ({ Value v%d = v%d; "
+                                "if (IS_OBJ(v%d)) OBJ_RETAIN(AS_OBJ(v%d)); v%d; }), ",
+                        rv, sv, rv, rv, rv);
+                emit_expr(g, mc->pattern.lit);
+                fputs("))) {\n", g->out);
+            } else if (mc->pattern.kind == PAT_OR) {
+                fputs(first ? "if (" : "} else if (", g->out);
+                emit_or_cond(g, &mc->pattern, sv, tv);
+                fputs(") {\n", g->out);
+            } else {
+                // Dispatch on the checker-resolved tag, not a by-name lookup (OFI-073).
+                int vi = mc->pattern.variant_index;
+                if (vi < 0) {
+                    const CgcVariant *v = resolve_variant(g, mc->pattern.variant);
+                    vi = v != NULL ? v->variant_index : -1;
+                    if (v == NULL) {
+                        cgc_error(g, mc->pattern.line, "native backend (M2): unresolved match variant");
+                    }
+                }
+                if (first) {
+                    fprintf(g->out, "if (v%d == %d) {\n", tv, vi);
+                } else {
+                    fprintf(g->out, "} else if (v%d == %d) {\n", tv, vi);
                 }
             }
-            if (first) {
-                fprintf(g->out, "if (v%d == %d) {\n", tv, vi);
-            } else {
-                fprintf(g->out, "} else if (v%d == %d) {\n", tv, vi);
+            first = 0;
+            g->indent++;
+            int cmark = emit_arm_bindings(g, mc, sv);
+            for (size_t i = 0; i < mc->body.count; i++) {
+                emit_stmt(g, mc->body.stmts[i]);
             }
+            emit_drops(g, cmark);   // release any case-body owned locals
+            g->scope_len = cmark;
+            g->indent--;
         }
-        first = 0;
-        g->indent++;
-        int cmark = g->scope_len;
-        for (size_t b = 0; b < mc->pattern.binding_count; b++) {
-            int es = ((int)b < 16) ? mc->pattern.binding_struct[b] : -1;
-            char bcn[24];
-            if (is_value_struct(g, es)) {
-                // A value-struct payload is stored BOXED in the enum; unbox the bound copy into an
-                // em_s so it can be used as a value struct (field reads, method receiver, …). The
-                // box is the enum's (a borrow), so we do NOT drop it — only copy out (all-scalar).
-                int bv = g->next_var++;
-                cgc_indent(g);
-                fprintf(g->out, "em_s%d v%d; em_unbox_struct(&g_em, %d, "
-                                "em_enum_field(&g_em, v%d, %zu), (Value*)&v%d, %d);\n",
-                        es, bv, es, sv, b, bv, g->layouts[es].field_count);
-                snprintf(bcn, sizeof bcn, "v%d", bv);
-                cgc_push(g, mc->pattern.bindings[b], bcn, 0, es);   // an em_s value-struct binding
-            } else {
-                int bv = g->next_var++;
-                cgc_indent(g);
-                fprintf(g->out, "Value v%d = em_enum_field(&g_em, v%d, %zu);\n", bv, sv, b);
-                snprintf(bcn, sizeof bcn, "v%d", bv);
-                cgc_push(g, mc->pattern.bindings[b], bcn, 0, -1);   // borrows a subject field
-            }
+        if (!first) {
+            cgc_indent(g);
+            fputs("}\n", g->out);
         }
-        for (size_t i = 0; i < mc->body.count; i++) {
-            emit_stmt(g, mc->body.stmts[i]);
-        }
-        emit_drops(g, cmark);   // release any case-body owned locals
-        g->scope_len = cmark;
-        g->indent--;
-    }
-    if (!first) {
+    } else {
+        int mv = g->next_var++;
         cgc_indent(g);
-        fputs("}\n", g->out);
+        fprintf(g->out, "int v%d = 0;\n", mv);   // matched flag
+        for (size_t k = 0; k < s->as.match.case_count; k++) {
+            const MatchCase *mc = &s->as.match.cases[k];
+            cgc_indent(g);
+            emit_arm_cond_flagged(g, mc, sv, tv, mv);
+            g->indent++;
+            int cmark = emit_arm_bindings(g, mc, sv);
+            if (mc->guard != NULL) {
+                cgc_indent(g);
+                fputs("if (em_truthy(", g->out);
+                emit_expr(g, mc->guard);
+                fputs(")) {\n", g->out);
+                g->indent++;
+                cgc_indent(g);
+                fprintf(g->out, "v%d = 1;\n", mv);
+                for (size_t i = 0; i < mc->body.count; i++) {
+                    emit_stmt(g, mc->body.stmts[i]);
+                }
+                emit_drops(g, cmark);
+                g->indent--;
+                cgc_indent(g);
+                fputs("}\n", g->out);
+            } else {
+                cgc_indent(g);
+                fprintf(g->out, "v%d = 1;\n", mv);
+                for (size_t i = 0; i < mc->body.count; i++) {
+                    emit_stmt(g, mc->body.stmts[i]);
+                }
+                emit_drops(g, cmark);
+            }
+            g->scope_len = cmark;
+            g->indent--;
+            cgc_indent(g);
+            fputs("}\n", g->out);
+        }
     }
 
     emit_drops(g, mark);   // drop the subject iff it was a fresh temporary

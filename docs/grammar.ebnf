@@ -40,9 +40,17 @@
 
 (* ----- terminals ----- *)
 ident   = letter , { letter | digit | "_" } ;       (* also leading "_" *)
-int     = digit , { digit } ;
-float   = digit , { digit } , "." , digit , { digit } ;
+int     = ( decint | hexint | binint | octint ) , [ widthsuffix ] ;
+decint  = digit , { digit | "_" } ;
+hexint  = "0" , ( "x" | "X" ) , hexdigit , { hexdigit | "_" } ;
+binint  = "0" , ( "b" | "B" ) , bindigit , { bindigit | "_" } ;
+octint  = "0" , ( "o" | "O" ) , octdigit , { octdigit | "_" } ;
+widthsuffix = ( "i" | "u" ) , digit , { digit } ; (* i8 … u64 *)
+float   = digit , { digit | "_" } , "." , digit , { digit | "_" } ;
 string  = '"' , { character } , '"' ;               (* may contain {interpolation} *)
+hexdigit = digit | "a".."f" | "A".."F" ;
+octdigit = "0".."7" ;
+bindigit = "0" | "1" ;
 
 
 (* ----- top level ----- *)
@@ -98,18 +106,28 @@ ReturnStmt    = "return" , [ Expr ] ;
 IfStmt        = "if" , Expr , Block , [ "else" , ( IfStmt | Block ) ] ;  (* (S) *)
 ForStmt       = "for" , ident , "in" , Expr , Block ;                    (* (S) *)
 LoopStmt      = "loop" , Block ;
-MatchStmt     = "match" , Expr , "{" , { "case" , Pattern , Block } , "}" ; (* (S)(N) *)
+MatchStmt     = "match" , Expr , "{" , { "case" , CasePattern , [ "if" , Expr ] , Block } , "}" ; (* (S)(N) *)
                 (* The checker requires the cases to be EXHAUSTIVE: every variant of the
-                   scrutinee's enum is handled, or a wildcard `case _` covers the rest. *)
+                   scrutinee's enum is handled, or a wildcard `case _` covers the rest. An
+                   `if <bool>` GUARD makes an arm conditional — a guarded arm never counts
+                   toward exhaustiveness (it may not fire), so control falls to a later arm. *)
 SpawnStmt     = "spawn" , Expr ;
 NurseryStmt   = "nursery" , Block ;
 
 (* An assignment's target must be an lvalue (ident / field / index); this is
-   enforced by the checker, not the grammar. *)
-AssignOrExpr  = Expr , [ "=" , Expr ] ;
+   enforced by the checker, not the grammar. A compound assignment `p OP= v` is
+   desugared by the parser to `p = p OP v` (OP one of + - * / % & | ^). *)
+AssignOrExpr  = Expr , [ ( "=" | CompoundAssign ) , Expr ] ;
+CompoundAssign = "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" ;
 
-Pattern       = ident , [ "." , ident ] ,                    (* a bare "_" ident is the wildcard *)
-                [ "(" , [ ident , { "," , ident } ] , ")" ] ;
+CasePattern   = Pattern , { "|" , Pattern } ;                (* an OR-pattern matches if ANY alternative does; *)
+                (* the "|" in a case position is unambiguous — never the bitwise-or operator. Or-pattern
+                   alternatives are NON-BINDING: each must be a literal or a nullary variant (no field
+                   bindings, no value binding), and each contributes to exhaustiveness on its own. *)
+Pattern       = LiteralPat | VariantPat ;
+LiteralPat    = [ "-" ] , int | [ "-" ] , float | string | "true" | "false" ;  (* matches a scalar/string subject by value *)
+VariantPat    = ident , [ "." , ident ] ,                    (* a bare "_" ident is the wildcard; a bare *)
+                [ "(" , [ ident , { "," , ident } ] , ")" ] ; (* ident on a scalar subject is a value binding *)
 
 
 (* ----- expressions (lowest to highest precedence; all left-associative) ----- *)

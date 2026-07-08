@@ -95,15 +95,19 @@ enum Stmt {
 
 
 struct Pattern {
+    kind: int                                       // 0 = PAT_VARIANT, 1 = PAT_WILDCARD, 2 = PAT_LITERAL, 4 = PAT_OR (mirrors C PatternKind)
     type_name: string                               // "" if unqualified
     variant: string
     bindings: [string]
+    lit: [Expr]                                     // PAT_LITERAL: a single constant Expr (else empty)
+    alts: [Pattern]                                 // PAT_OR: the `a | b | c` alternatives (non-binding); else empty
     wildcard: bool
 }
 
 
 struct Case {
     pattern: Pattern
+    guard: [Expr]                                   // an `if <bool>` guard (0 or 1 element); empty = none
     body: [Stmt]
 }
 
@@ -454,7 +458,35 @@ fn p_stmt(s: Stmt, depth: int) {
                 if i >= cases.len() {
                     break
                 }
-                println("{ind(depth + 1)}case {p_pattern(cases[i].pattern)}")
+                if cases[i].pattern.kind == 2 {
+                    // A literal pattern prints as a nested expr sub-tree (mirrors src/ast_print.c),
+                    // reusing the byte-identical expr printer so the dump matches for free.
+                    println("{ind(depth + 1)}case (literal)")
+                    p_expr(cases[i].pattern.lit[0], depth + 2)
+                } else if cases[i].pattern.kind == 4 {
+                    // An or-pattern: each alternative as its own sub-node (a literal alt reuses the
+                    // expr printer), so parser parity is checked structurally (mirrors ast_print.c).
+                    println("{ind(depth + 1)}case (or)")
+                    var a = 0
+                    loop {
+                        if a >= cases[i].pattern.alts.len() {
+                            break
+                        }
+                        if cases[i].pattern.alts[a].kind == 2 {
+                            println("{ind(depth + 2)}alt (literal)")
+                            p_expr(cases[i].pattern.alts[a].lit[0], depth + 3)
+                        } else {
+                            println("{ind(depth + 2)}alt {p_pattern(cases[i].pattern.alts[a])}")
+                        }
+                        a = a + 1
+                    }
+                } else {
+                    println("{ind(depth + 1)}case {p_pattern(cases[i].pattern)}")
+                }
+                if cases[i].guard.len() > 0 {
+                    println("{ind(depth + 2)}guard:")
+                    p_expr(cases[i].guard[0], depth + 3)
+                }
                 p_block(cases[i].body, depth + 2)
                 i = i + 1
             }
@@ -676,26 +708,106 @@ fn dump(decls: [Decl]) {
 
 // ---- Parser: recursive descent + precedence climbing over the lexer's [Token] -----------------------
 
-// parse_int_lit reads the leading decimal digits of an integer lexeme (dropping any iN/uN width suffix).
-// It uses WRAPPING arithmetic so an out-of-int64-range literal (a u64 like 9223372036854775808, or u64
-// max) wraps to its signed reinterpretation — exactly what stage-0's strtoll-based parse stores, so the
-// AST dump matches (`Int -9223372036854775808`). The default `* +` would trap on overflow.
+// hex_digit_val returns the value 0–15 of a decimal/hex digit byte, or -1 if `c` is not one — the
+// loop terminator that marks the start of a base literal's width suffix (mirrors src/parser.c).
+fn hex_digit_val(c: int) -> int {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 97 + 10
+    }
+    if c >= 65 && c <= 70 {
+        return c - 65 + 10
+    }
+    return -1
+}
+
+
+// lit_base returns the radix of an integer lexeme (0x=16, 0b=2, 0o=8, else 10) and, via the digit
+// count it implies, where the digits start — the `i` offset past the base prefix. Mirrors src/parser.c.
+fn lit_base(bs: [u8]) -> int {
+    if bs.len() >= 2 && int(bs[0]) == 48 {
+        let m = int(bs[1])
+        if m == 120 || m == 88 {
+            return 16
+        }
+        if m == 111 || m == 79 {
+            return 8
+        }
+        if m == 98 || m == 66 {
+            return 2
+        }
+    }
+    return 10
+}
+
+
+// parse_int_lit reads an integer lexeme's magnitude, honouring a 0x/0b/0o base prefix and `_` digit
+// separators (dropping any iN/uN width suffix). It uses WRAPPING arithmetic so an out-of-int64-range
+// literal (a u64 like 9223372036854775808, or u64 max) wraps to its signed reinterpretation — exactly
+// what stage-0's accumulator stores, so the AST dump matches. The default `* +` would trap on overflow.
 fn parse_int_lit(text: string) -> int {
     let bs = text.bytes()
+    let base = lit_base(bs)
     var v = 0
     var i = 0
+    if base != 10 {
+        i = 2
+    }
     loop {
         if i >= bs.len() {
             break
         }
         let c = int(bs[i])
-        if c < 48 || c > 57 {
+        if c == 95 {
+            i = i + 1
+            continue
+        }
+        let d = hex_digit_val(c)
+        if d < 0 || d >= base {
             break
         }
-        v = wrapping_add(wrapping_mul(v, 10), c - 48)
+        v = wrapping_add(wrapping_mul(v, base), d)
         i = i + 1
     }
     return v
+}
+
+
+// has_underscore reports whether the lexeme contains a `_` digit separator.
+fn has_underscore(text: string) -> bool {
+    let bs = text.bytes()
+    var i = 0
+    loop {
+        if i >= bs.len() {
+            break
+        }
+        if int(bs[i]) == 95 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+
+// strip_underscores returns `text` with every `_` digit separator removed, for feeding a clean
+// lexeme to parse_float (which, like strtod, does not skip separators).
+fn strip_underscores(text: string) -> string {
+    let bs = text.bytes()
+    var out: [u8] = []
+    var i = 0
+    loop {
+        if i >= bs.len() {
+            break
+        }
+        if int(bs[i]) != 95 {
+            out.append(bs[i])
+        }
+        i = i + 1
+    }
+    return from_bytes(out)
 }
 
 
@@ -705,13 +817,22 @@ fn parse_int_lit(text: string) -> int {
 // parser drops the suffix from the VALUE (parse_int_lit) but the KIND must survive on the EInt node.
 fn int_suffix_kind(text: string) -> int {
     let bs = text.bytes()
+    let base = lit_base(bs)
     var i = 0
+    if base != 10 {
+        i = 2
+    }
     loop {
         if i >= bs.len() {
             break
         }
         let c = int(bs[i])
-        if c < 48 || c > 57 {
+        if c == 95 {
+            i = i + 1
+            continue
+        }
+        let d = hex_digit_val(c)
+        if d < 0 || d >= base {
             break
         }
         i = i + 1
@@ -1554,7 +1675,13 @@ struct Parser {
             case TLBrace { return SBlock(self.parse_block()) }
             case _ {
                 let estart = self.peek().line
+                let mark = self.pos
+                let mns = self.no_struct
+                let mgt = self.pending_gt
                 let e = self.parse_expr()
+                if lx.is_compound_assign(self.peek_kind()) {
+                    return self.parse_compound_assign(e, mark, mns, mgt, estart, lx.binop_of_compound(self.peek_kind()))
+                }
                 if self.at(TAG_ASSIGN) {
                     let _ = self.advance()
                     let vstart = self.peek().line
@@ -1564,6 +1691,25 @@ struct Parser {
                 return SExpr(Box<Expr>{ value: e, line: estart })
             }
         }
+    }
+
+
+    // parse_compound_assign desugars `p OP= v` into `p = p OP v`. Ownership forbids reusing the parsed
+    // target `e` as the binary's left operand, so it re-parses the LHS from `mark` under the same parser
+    // flags (mns/mgt) — an identical token range + flag state yields a structurally identical subtree,
+    // mirroring stage-0's pointer-shared target/left. `op` is the infix Tk (`+`, `&`, …).
+    fn parse_compound_assign(mut self, e: Expr, mark: int, mns: bool, mgt: int, estart: int, op: lx.Tk) -> Stmt {
+        let after = self.pos
+        self.pos = mark
+        self.no_struct = mns
+        self.pending_gt = mgt
+        let eleft = self.parse_expr()
+        self.pos = after
+        let _ = self.advance()                      // consume the compound-assign operator
+        let vstart = self.peek().line
+        let v = self.parse_expr()
+        let bin = EBinary(op, Box<Expr>{ value: eleft, line: estart }, Box<Expr>{ value: v, line: vstart })
+        return SAssign(Box<Expr>{ value: e, line: estart }, Box<Expr>{ value: bin, line: vstart })
     }
 
 
@@ -1648,9 +1794,31 @@ struct Parser {
                 break
             }
             let _ = self.advance()                  // case
-            let pat = self.parse_pattern()
+            var pat = self.parse_pattern()
+            // An or-pattern — `case a | b | c` — matches if ANY alternative does. A case position
+            // takes a pattern (never an expression), so `|` here is unambiguously the or-separator,
+            // not the bitwise-or operator. Alternatives are non-binding.
+            if self.at(TAG_PIPE) {
+                var alts: [Pattern] = [pat]         // moves the first pattern into the alt list; pat reassigned below
+                loop {
+                    if self.at(TAG_PIPE) {
+                        let _ = self.advance()          // |
+                        alts.append(self.parse_pattern())
+                    } else {
+                        break
+                    }
+                }
+                pat = Pattern{ kind: 4, type_name: "", variant: "", bindings: [], lit: [], alts: alts, wildcard: false }
+            }
+            // An optional `if <bool>` guard. parse_cond suppresses struct-literal syntax so the
+            // trailing `{` reads as the arm body.
+            var guard: [Expr] = []
+            if self.at(TAG_IF) {
+                let _ = self.advance()              // if
+                guard.append(self.parse_cond())
+            }
             let body = self.parse_block()
-            cases.append(Case{ pattern: pat, body: body })
+            cases.append(Case{ pattern: pat, guard: guard, body: body })
         }
         let _ = self.expect(TAG_RBRACE)
         return SMatch(Box<Expr>{ value: value, line: vstart }, cases)
@@ -1658,9 +1826,15 @@ struct Parser {
 
 
     fn parse_pattern(mut self) -> Pattern {
+        // A literal pattern — `case 0` / `case "x"` / `case true` / `case -1` (Phase 2a). Parsed as a
+        // constant expression; the checker matches it against a scalar/string subject by value.
+        if lx.is_literal_start(self.peek_kind()) {
+            let e = self.parse_unary()
+            return Pattern{ kind: 2, type_name: "", variant: "", bindings: [], lit: [e], alts: [], wildcard: false }
+        }
         let first = self.advance().text
         if first == "_" {
-            return Pattern{ type_name: "", variant: "_", bindings: [], wildcard: true }
+            return Pattern{ kind: 1, type_name: "", variant: "_", bindings: [], lit: [], alts: [], wildcard: true }
         }
         var type_name = ""
         var variant = first
@@ -1685,7 +1859,7 @@ struct Parser {
             }
             let _ = self.expect(TAG_RPAREN)
         }
-        return Pattern{ type_name: type_name, variant: variant, bindings: bindings, wildcard: false }
+        return Pattern{ kind: 0, type_name: type_name, variant: variant, bindings: bindings, lit: [], alts: [], wildcard: false }
     }
 
 
@@ -1815,10 +1989,14 @@ struct Parser {
             }
             case TFloat {
                 let t = self.advance()
-                // stage-0 does strtod(token-start), which OVER-READS the raw source past the lexeme — so a
-                // contiguous exponent like `1.5e3` (lexed FLOAT "1.5" + IDENT "e3") evaluates to 1500.
-                // parse_float is strtod-based, so feeding it the source from the float's byte offset
-                // reproduces that over-read exactly (it stops at the first non-float byte).
+                // With `_` digit separators, stage-0 strips them and parses the exact lexeme, so mirror
+                // that: strip and parse `t.text`. Otherwise stage-0 does strtod(token-start), which
+                // OVER-READS the raw source past the lexeme — a contiguous exponent like `1.5e3` (lexed
+                // FLOAT "1.5" + IDENT "e3") evaluates to 1500. Feeding parse_float the source from the
+                // float's byte offset reproduces that over-read exactly (it stops at the first non-float byte).
+                if has_underscore(t.text) {
+                    return EFloat(parse_float(strip_underscores(t.text)))
+                }
                 return EFloat(parse_float(byte_slice(self.src, t.byte, self.src.len())))
             }
             case TTrue {

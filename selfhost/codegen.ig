@@ -8287,6 +8287,54 @@ struct Chunk {
     }
 
 
+    // gen_arm_tail emits the shared tail of a match arm once its pattern matched and its bindings (if
+    // any) are declared at `bind_base`: an optional guard test, the body, binding cleanup, and the jump
+    // to the match end (returned for the caller to collect). `next` is the pattern's own JUMP_IF_FALSE,
+    // or -1 for an irrefutable wildcard / value-binding arm. A GUARDED arm's guard-false path pops the
+    // guard bool, unwinds the bindings, and — for a refutable arm — jumps PAST the pattern-false POP so
+    // both failure paths converge at the next arm with a clean stack (the dual false-path discipline).
+    fn gen_arm_tail(mut self, guard: [ps.Expr], body: [ps.Stmt], bind_base: int, next: int, gline: int, can_end: bool) -> int {
+        var gfail = 0 - 1
+        if guard.len() > 0 {
+            self.gen_expr(guard[0], gline)
+            gfail = self.emit_jump(OP_JUMP_IF_FALSE)
+            self.emit(OP_POP)                        // guard true: pop the guard bool
+        }
+        var si = 0
+        loop {
+            if si >= body.len() {
+                break
+            }
+            self.gen_stmt(body[si])
+            si = si + 1
+        }
+        self.unwind_to(bind_base)
+        // The end jump is emitted only under the end-jump cap (stage-0 caps at MAX_MATCH_CASES; a match
+        // over the cap lets a matched body fall through, a pre-existing shared limitation). -1 = none.
+        var ej = 0 - 1
+        if can_end {
+            ej = self.emit_jump(OP_JUMP)
+        }
+        var gfdone = 0 - 1
+        if gfail >= 0 {
+            self.patch_jump(gfail)
+            self.emit(OP_POP)                        // guard false: pop the guard bool
+            self.unwind_to(bind_base)
+            if next >= 0 {
+                gfdone = self.emit_jump(OP_JUMP)     // skip the pattern-false POP; converge at the next arm
+            }
+        }
+        if next >= 0 {
+            self.patch_jump(next)
+            self.emit(OP_POP)                        // pattern false: pop the test bool
+        }
+        if gfdone >= 0 {
+            self.patch_jump(gfdone)
+        }
+        return ej
+    }
+
+
     fn gen_stmt(mut self, s: ps.Stmt) {
         match s {
             case SLet(is_var, name, ty, value) {
@@ -8740,10 +8788,102 @@ struct Chunk {
                     if ci >= cases.len() {
                         break
                     }
+                    // A bare name that does NOT resolve to a variant (per-arm, like the cgen_c backend)
+                    // is a scalar value binding (`case n`) — regardless of whether the match as a whole
+                    // has an owner enum (an Option/Result/generic match may resolve to -1 owner but its
+                    // arms are still real variants).
+                    let vb = cases[ci].pattern.wildcard == false && cases[ci].pattern.kind == 0 && self.resolve_case_vi(cases[ci].pattern.variant, match_enum) < 0
                     if cases[ci].pattern.wildcard {
-                        self.gen_block(cases[ci].body)           // catch-all: no tag test, body + unwind
-                        if end_jumps.len() < 64 {
-                            end_jumps.append(self.emit_jump(OP_JUMP))
+                        if cases[ci].guard.len() == 0 {
+                            self.gen_block(cases[ci].body)       // unguarded catch-all: no test, body + unwind
+                            if end_jumps.len() < 64 {
+                                end_jumps.append(self.emit_jump(OP_JUMP))
+                            }
+                        } else {
+                            let wbase = self.locals.len()
+                            let ej = self.gen_arm_tail(cases[ci].guard, cases[ci].body, wbase, 0 - 1, value.line, end_jumps.len() < 64)
+                            if ej >= 0 {
+                                end_jumps.append(ej)
+                            }
+                        }
+                    } else if vb {
+                        // A scalar VALUE binding (`case n`): bind the subject value (a borrow), irrefutable.
+                        self.emit(OP_GET_LOCAL)
+                        self.emit_idx(subject)
+                        let bbase = self.locals.len()
+                        self.declare_binding(cases[ci].pattern.variant, 1, -1, false, false, false, false)
+                        let ej = self.gen_arm_tail(cases[ci].guard, cases[ci].body, bbase, 0 - 1, value.line, end_jumps.len() < 64)
+                        if ej >= 0 {
+                            end_jumps.append(ej)
+                        }
+                    } else if cases[ci].pattern.kind == 2 {
+                        // `if subject == <literal>` — a scalar/string subject: value compare (OP_EQ).
+                        self.emit(OP_GET_LOCAL)
+                        self.emit_idx(subject)
+                        self.gen_expr(cases[ci].pattern.lit[0], value.line)
+                        self.emit(OP_EQ)
+                        let lnext = self.emit_jump(OP_JUMP_IF_FALSE)
+                        self.emit(OP_POP)                        // matched (true path)
+                        let lbase = self.locals.len()            // a literal arm binds nothing
+                        let ej = self.gen_arm_tail(cases[ci].guard, cases[ci].body, lbase, lnext, value.line, end_jumps.len() < 64)
+                        if ej >= 0 {
+                            end_jumps.append(ej)
+                        }
+                    } else if cases[ci].pattern.kind == 4 {
+                        // `case a | b | c`: an OR-of-tests. Each alternative is tested in turn; the
+                        // FIRST to match jumps forward to the shared body ("matched"); if NONE match,
+                        // control falls to `onext` (the pattern-false path). The VM has no OP_OR /
+                        // JUMP_IF_TRUE, so the OR is JUMP_IF_FALSE + jumps, each test popping its own
+                        // bool so the stack is clean at every join. Non-binding (no case locals); the
+                        // last alt's JUMP_IF_FALSE is `next` for gen_arm_tail, so a guard's dual-false-
+                        // path convergence is inherited unchanged. Mirrors src/codegen.c.
+                        var or_jumps: [int] = []
+                        var onext = 0 - 1
+                        var oa = 0
+                        loop {
+                            if oa >= cases[ci].pattern.alts.len() {
+                                break
+                            }
+                            self.emit(OP_GET_LOCAL)
+                            self.emit_idx(subject)
+                            if cases[ci].pattern.alts[oa].kind == 2 {
+                                self.gen_expr(cases[ci].pattern.alts[oa].lit[0], value.line)   // subject == <literal>
+                            } else {
+                                self.emit(OP_GET_TAG)                        // subject.tag == <variant tag>
+                                let avi = self.resolve_case_vi(cases[ci].pattern.alts[oa].variant, match_enum)
+                                var avtag = 0
+                                if avi >= 0 {
+                                    avtag = self.ev_tag[avi]
+                                }
+                                let tidx = self.add_const_int(avtag)
+                                self.emit(OP_CONST)
+                                self.emit_idx(tidx)
+                            }
+                            self.emit(OP_EQ)
+                            if oa + 1 < cases[ci].pattern.alts.len() {
+                                let jf = self.emit_jump(OP_JUMP_IF_FALSE)
+                                self.emit(OP_POP)                            // this alt matched: pop the test bool
+                                or_jumps.append(self.emit_jump(OP_JUMP))     // → matched
+                                self.patch_jump(jf)
+                                self.emit(OP_POP)                            // this alt failed: pop, try the next
+                            } else {
+                                onext = self.emit_jump(OP_JUMP_IF_FALSE)     // none matched → pattern-false
+                                self.emit(OP_POP)                            // last alt matched: pop, fall to matched
+                            }
+                            oa = oa + 1
+                        }
+                        var oj = 0
+                        loop {
+                            if oj >= or_jumps.len() {
+                                break
+                            }
+                            self.patch_jump(or_jumps[oj])                    // matched: every alt-true jump converges here
+                            oj = oj + 1
+                        }
+                        let obase = self.locals.len()
+                        let ej = self.gen_arm_tail(cases[ci].guard, cases[ci].body, obase, onext, value.line, end_jumps.len() < 64)
+                        if ej >= 0 {
+                            end_jumps.append(ej)
                         }
                     } else {
                         // Scope the variant to the match's OWN enum so a name that collides across co-imported
@@ -8827,20 +8967,10 @@ struct Chunk {
                             }
                             b = b + 1
                         }
-                        var si = 0
-                        loop {
-                            if si >= cases[ci].body.len() {
-                                break
-                            }
-                            self.gen_stmt(cases[ci].body[si])
-                            si = si + 1
+                        let ej = self.gen_arm_tail(cases[ci].guard, cases[ci].body, bind_base, next, value.line, end_jumps.len() < 64)
+                        if ej >= 0 {
+                            end_jumps.append(ej)
                         }
-                        self.unwind_to(bind_base)                // release+pop bindings & body locals
-                        if end_jumps.len() < 64 {
-                            end_jumps.append(self.emit_jump(OP_JUMP))
-                        }
-                        self.patch_jump(next)
-                        self.emit(OP_POP)                        // not matched (false path): drop the test copy
                     }
                     ci = ci + 1
                 }

@@ -3644,6 +3644,34 @@ struct CgcGen {
     }
 
 
+    // emit_or_cond returns the parenthesised C disjunction for an or-pattern `case a | b | c`: each
+    // alternative is a variant-tag test (`tag == vi`) or a literal equality (`em_eq_op`), OR'd with
+    // `||`. The `||` short-circuits exactly like the VM's OR-of-tests, so both backends agree. Mirrors
+    // src/cgen_c.c emit_or_cond (same fresh-var order → byte-identical output).
+    fn emit_or_cond(mut self, alts: [ps.Pattern], sv: int, tv: int) -> string {
+        var s = "("
+        var a = 0
+        loop {
+            if a >= alts.len() {
+                break
+            }
+            if a > 0 {
+                s = s + " || "
+            }
+            if alts[a].kind == 2 {
+                let rv = self.fresh_var()
+                s = s + "em_truthy(em_eq_op(&g_em, (\{ Value v{rv} = v{sv}; if (IS_OBJ(v{rv})) OBJ_RETAIN(AS_OBJ(v{rv})); v{rv}; \}), {self.emit_expr(alts[a].lit[0])}))"
+            } else {
+                let tag = self.en.v_tag[self.en.variant_flat(alts[a].variant)]
+                s = s + "v{tv} == {tag}"
+            }
+            a = a + 1
+        }
+        s = s + ")"
+        return s
+    }
+
+
     fn emit_stmt(mut self, s: ps.Stmt) {
         match s {
             case SReturn(value, line) {
@@ -3847,11 +3875,43 @@ struct CgcGen {
                 // POSITIONALLY via em_enum_field (a borrow — the enum owns them); a `case _` is the `else`.
                 // (cgen_c.c match lowering. Scrutinee-is-an-owning-temp drop is a later increment.)
                 let sv = self.fresh_var()
-                let tv = self.fresh_var()
                 println("{self.ind()}\{")
                 self.indent = self.indent + 1
                 println("{self.ind()}Value v{sv} = {self.emit_expr(value.value)};")
-                println("{self.ind()}int v{tv} = em_tag(v{sv});")
+                // The tag header is only needed for variant arms; a scalar/string subject (all-literal
+                // arms) has no tag, so emitting em_tag on it would be dead and ill-typed (mirrors cgen_c.c).
+                var has_variant = false
+                var hvi = 0
+                loop {
+                    if hvi >= cases.len() {
+                        break
+                    }
+                    // A REAL variant arm (a bare/qualified name the enum table resolves). A bare name it
+                    // does NOT resolve is a scalar value binding (`case n` — Phase 2b), which needs no tag.
+                    let hv_real = cases[hvi].pattern.wildcard == false && cases[hvi].pattern.kind == 0 && self.en.variant_flat(cases[hvi].pattern.variant) >= 0
+                    if hv_real {
+                        has_variant = true
+                    }
+                    if cases[hvi].pattern.kind == 4 {
+                        // An or-pattern needs the tag header iff any alternative is a variant (not a literal).
+                        var ova = 0
+                        loop {
+                            if ova >= cases[hvi].pattern.alts.len() {
+                                break
+                            }
+                            if cases[hvi].pattern.alts[ova].kind != 2 {
+                                has_variant = true
+                            }
+                            ova = ova + 1
+                        }
+                    }
+                    hvi = hvi + 1
+                }
+                var tv = 0
+                if has_variant {
+                    tv = self.fresh_var()
+                    println("{self.ind()}int v{tv} = em_tag(v{sv});")
+                }
                 // If the scrutinee is a fresh OWNED enum temp (a call/ctor result — not a borrow binding/field),
                 // it must be dropped on every exit (each arm's return/break/… via emit_drops(0)) AND at the
                 // match's fall-through. Push it as a synthetic owned binding BELOW the arm payload marks so the
@@ -3861,74 +3921,152 @@ struct CgcGen {
                 if owns_subj {
                     self.push("", "v{sv}", 0 - 1, false, true, false, 0 - 1)
                 }
+                // Guards break the if/else-if chain — a failed guard must fall through, which `else if`
+                // can't do — so a match with any guard uses a `matched` flag + independent `if` blocks.
+                var has_guard = false
+                var hgi = 0
+                loop {
+                    if hgi >= cases.len() {
+                        break
+                    }
+                    if cases[hgi].guard.len() > 0 {
+                        has_guard = true
+                    }
+                    hgi = hgi + 1
+                }
+                var mv = 0
+                if has_guard {
+                    mv = self.fresh_var()
+                    println("{self.ind()}int v{mv} = 0;")
+                }
                 var ci = 0
                 var first = true
                 loop {
                     if ci >= cases.len() {
                         break
                     }
-                    if cases[ci].pattern.wildcard {
-                        if first {
-                            println("{self.ind()}if (1) \{")
+                    // A bare name the enum table does NOT resolve is a scalar VALUE binding (`case n`, 2b).
+                    let vb = cases[ci].pattern.wildcard == false && cases[ci].pattern.kind == 0 && self.en.variant_flat(cases[ci].pattern.variant) < 0
+                    // --- condition ---
+                    if has_guard {
+                        if cases[ci].pattern.wildcard || vb {
+                            println("{self.ind()}if (v{mv} == 0) \{")
+                        } else if cases[ci].pattern.kind == 2 {
+                            let rv = self.fresh_var()
+                            let cond = "em_truthy(em_eq_op(&g_em, (\{ Value v{rv} = v{sv}; if (IS_OBJ(v{rv})) OBJ_RETAIN(AS_OBJ(v{rv})); v{rv}; \}), {self.emit_expr(cases[ci].pattern.lit[0])}))"
+                            println("{self.ind()}if (v{mv} == 0 && {cond}) \{")
+                        } else if cases[ci].pattern.kind == 4 {
+                            let cond = self.emit_or_cond(cases[ci].pattern.alts, sv, tv)
+                            println("{self.ind()}if (v{mv} == 0 && {cond}) \{")
                         } else {
-                            println("{self.ind()}\} else \{")
+                            let tag = self.en.v_tag[self.en.variant_flat(cases[ci].pattern.variant)]
+                            println("{self.ind()}if (v{mv} == 0 && v{tv} == {tag}) \{")
                         }
                     } else {
-                        let tag = self.en.v_tag[self.en.variant_flat(cases[ci].pattern.variant)]
-                        if first {
-                            println("{self.ind()}if (v{tv} == {tag}) \{")
+                        if cases[ci].pattern.wildcard || vb {
+                            if first {
+                                println("{self.ind()}if (1) \{")
+                            } else {
+                                println("{self.ind()}\} else \{")
+                            }
+                        } else if cases[ci].pattern.kind == 2 {
+                            let rv = self.fresh_var()
+                            let cond = "em_truthy(em_eq_op(&g_em, (\{ Value v{rv} = v{sv}; if (IS_OBJ(v{rv})) OBJ_RETAIN(AS_OBJ(v{rv})); v{rv}; \}), {self.emit_expr(cases[ci].pattern.lit[0])}))"
+                            if first {
+                                println("{self.ind()}if ({cond}) \{")
+                            } else {
+                                println("{self.ind()}\} else if ({cond}) \{")
+                            }
+                        } else if cases[ci].pattern.kind == 4 {
+                            let cond = self.emit_or_cond(cases[ci].pattern.alts, sv, tv)
+                            if first {
+                                println("{self.ind()}if ({cond}) \{")
+                            } else {
+                                println("{self.ind()}\} else if ({cond}) \{")
+                            }
                         } else {
-                            println("{self.ind()}\} else if (v{tv} == {tag}) \{")
+                            let tag = self.en.v_tag[self.en.variant_flat(cases[ci].pattern.variant)]
+                            if first {
+                                println("{self.ind()}if (v{tv} == {tag}) \{")
+                            } else {
+                                println("{self.ind()}\} else if (v{tv} == {tag}) \{")
+                            }
                         }
                     }
                     self.indent = self.indent + 1
                     let mark = self.sc_name.len()
-                    var bi = 0
-                    loop {
-                        if bi >= cases[ci].pattern.bindings.len() {
-                            break
-                        }
+                    // --- bindings (shared between chain + flag) ---
+                    if vb {
                         let bv = self.fresh_var()
-                        println("{self.ind()}Value v{bv} = em_enum_field(&g_em, v{sv}, {bi});")
-                        let pa = self.en.payload_array(cases[ci].pattern.variant, bi)
-                        var pek = 0 - 1
-                        if pa {
-                            pek = self.en.payload_elem(cases[ci].pattern.variant, bi)
-                        }
-                        self.push(cases[ci].pattern.bindings[bi], "v{bv}", 0 - 1, false, false, pa, pek)   // a borrowed payload field (array-aware)
-                        if self.en.payload_refc(cases[ci].pattern.variant, bi) {
-                            self.set_last_refc(true)      // a refcounted (string/enum) payload → own_into_slot on consume
-                        }
-                        if pa {
-                            // a `[Struct]` / `[Box<T>]` payload: resolve the element struct sid via sid_of_ty
-                            // (handles generic instances ty_struct_sid can't), so `xs[i]` / `xs[i].f` resolve.
-                            let ety = elem_ty_of(self.en.payload_ty(cases[ci].pattern.variant, bi))
-                            let pes = self.st.sid_of_ty(ety)
-                            if pes >= 0 {
-                                self.set_last_elem_struct(pes)
+                        println("{self.ind()}Value v{bv} = v{sv};")   // scalar value binding — a borrow of the subject
+                        self.push(cases[ci].pattern.variant, "v{bv}", 0 - 1, false, false, false, 0 - 1)
+                    } else {
+                        var bi = 0
+                        loop {
+                            if bi >= cases[ci].pattern.bindings.len() {
+                                break
                             }
-                        } else {
-                            let pty = self.en.payload_ty(cases[ci].pattern.variant, bi)
-                            let psid = self.st.sid_of_ty(pty)
-                            if psid >= 0 {
-                                self.set_last_struct(psid)       // a struct / `Box<T>` payload: `elem.value` / `s.field` resolves
+                            let bv = self.fresh_var()
+                            println("{self.ind()}Value v{bv} = em_enum_field(&g_em, v{sv}, {bi});")
+                            let pa = self.en.payload_array(cases[ci].pattern.variant, bi)
+                            var pek = 0 - 1
+                            if pa {
+                                pek = self.en.payload_elem(cases[ci].pattern.variant, bi)
                             }
-                            let rk = render_kind_of_ty(pty)
-                            if rk != 0 {
-                                self.set_last_render(rk)         // a scalar float/bool/sized payload: `{v}` renders at its kind
+                            self.push(cases[ci].pattern.bindings[bi], "v{bv}", 0 - 1, false, false, pa, pek)   // a borrowed payload field (array-aware)
+                            if self.en.payload_refc(cases[ci].pattern.variant, bi) {
+                                self.set_last_refc(true)      // a refcounted (string/enum) payload → own_into_slot on consume
                             }
+                            if pa {
+                                // a `[Struct]` / `[Box<T>]` payload: resolve the element struct sid via sid_of_ty
+                                // (handles generic instances ty_struct_sid can't), so `xs[i]` / `xs[i].f` resolve.
+                                let ety = elem_ty_of(self.en.payload_ty(cases[ci].pattern.variant, bi))
+                                let pes = self.st.sid_of_ty(ety)
+                                if pes >= 0 {
+                                    self.set_last_elem_struct(pes)
+                                }
+                            } else {
+                                let pty = self.en.payload_ty(cases[ci].pattern.variant, bi)
+                                let psid = self.st.sid_of_ty(pty)
+                                if psid >= 0 {
+                                    self.set_last_struct(psid)       // a struct / `Box<T>` payload: `elem.value` / `s.field` resolves
+                                }
+                                let rk = render_kind_of_ty(pty)
+                                if rk != 0 {
+                                    self.set_last_render(rk)         // a scalar float/bool/sized payload: `{v}` renders at its kind
+                                }
+                            }
+                            bi = bi + 1
                         }
-                        bi = bi + 1
                     }
-                    self.emit_block_raw(cases[ci].body)
-                    self.emit_drops(mark)
+                    // --- body (guard-wrapped in the flag path) ---
+                    if has_guard && cases[ci].guard.len() > 0 {
+                        println("{self.ind()}if (em_truthy({self.emit_expr(cases[ci].guard[0])})) \{")
+                        self.indent = self.indent + 1
+                        println("{self.ind()}v{mv} = 1;")
+                        self.emit_block_raw(cases[ci].body)
+                        self.emit_drops(mark)
+                        self.indent = self.indent - 1
+                        println("{self.ind()}\}")
+                    } else {
+                        if has_guard {
+                            println("{self.ind()}v{mv} = 1;")
+                        }
+                        self.emit_block_raw(cases[ci].body)
+                        self.emit_drops(mark)
+                    }
                     self.truncate_scope(mark)
                     self.indent = self.indent - 1
+                    if has_guard {
+                        println("{self.ind()}\}")        // close this arm's independent `if`
+                    }
                     first = false
                     ci = ci + 1
                 }
-                if first == false {
-                    println("{self.ind()}\}")
+                if has_guard == false {
+                    if first == false {
+                        println("{self.ind()}\}")
+                    }
                 }
                 if owns_subj {
                     self.emit_drops(subj_mark)        // fall-through: drop the owning-temp scrutinee
@@ -4181,21 +4319,24 @@ fn native_id_for_name(name: string) -> int {
     if name == "byte_slice" {
         return 22
     }
+    if name == "from_bytes" {
+        return 23
+    }
     return 0 - 1
 }
 
 
 // is_em_native_id reports whether a native id goes through the em_native dispatcher (the READ_LINE..EXIT band
-// plus byte_slice; print/println keep their own em_print/em_println path, and 20/21 are witness-only).
+// plus byte_slice and from_bytes; print/println keep their own em_print/em_println path, and 20/21 are witness-only).
 fn is_em_native_id(nid: int) -> bool {
-    return (nid >= 2 && nid <= 19) || nid == 22
+    return (nid >= 2 && nid <= 19) || nid == 22 || nid == 23
 }
 
 
 // native_ret_kind classifies a native builtin's OWNED return: -3 a string, -2 an array, -1 scalar/unit
 // (not droppable), -4 = not a builtin. Drives owned-binding tracking for `let x = byte_slice(…)`.
 fn native_ret_kind(name: string) -> int {
-    if name == "read_line" || name == "read_file" || name == "env" || name == "from_char_code" || name == "byte_slice" || name == "concat" {
+    if name == "read_line" || name == "read_file" || name == "env" || name == "from_char_code" || name == "byte_slice" || name == "concat" || name == "from_bytes" {
         return 0 - 3
     }
     if name == "args" {

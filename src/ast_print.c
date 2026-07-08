@@ -339,9 +339,38 @@ static void print_stmt(const Stmt *s, int depth) {
             print_expr(s->as.match.value, depth + 2);
             for (size_t i = 0; i < s->as.match.case_count; i++) {
                 ind(depth + 1);
-                printf("case ");
-                print_pattern(&s->as.match.cases[i].pattern);
-                printf("\n");
+                const Pattern *cp = &s->as.match.cases[i].pattern;
+                if (cp->kind == PAT_LITERAL) {
+                    // Print the literal as a nested expression sub-tree, reusing the (already
+                    // byte-identical) expr printer so the self-hosted dump matches for free.
+                    printf("case (literal)\n");
+                    print_expr(cp->lit, depth + 2);
+                } else if (cp->kind == PAT_OR) {
+                    // An or-pattern: each alternative printed as its own sub-node so parser
+                    // parity is checked structurally (a literal alt reuses the expr printer).
+                    printf("case (or)\n");
+                    for (size_t a = 0; a < cp->alt_count; a++) {
+                        const Pattern *alt = &cp->alts[a];
+                        ind(depth + 2);
+                        if (alt->kind == PAT_LITERAL) {
+                            printf("alt (literal)\n");
+                            print_expr(alt->lit, depth + 3);
+                        } else {
+                            printf("alt ");
+                            print_pattern(alt);
+                            printf("\n");
+                        }
+                    }
+                } else {
+                    printf("case ");
+                    print_pattern(cp);
+                    printf("\n");
+                }
+                if (s->as.match.cases[i].guard != NULL) {
+                    ind(depth + 2);
+                    printf("guard:\n");
+                    print_expr(s->as.match.cases[i].guard, depth + 3);
+                }
                 print_block(&s->as.match.cases[i].body, depth + 2);
             }
             break;

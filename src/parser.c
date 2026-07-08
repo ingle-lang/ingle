@@ -892,6 +892,47 @@ static Expr *parse_lambda(Parser *p) {
 }
 
 
+// digit_value returns the numeric value 0–15 of a decimal/hex digit, or -1 if `c` is
+// not one — the loop terminator that marks the start of a width suffix.
+static int digit_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+
+// parse_float_lexeme reads a float literal, stripping `_` digit separators. The no-
+// separator path calls strtod straight from the source, preserving the historical
+// over-read past the lexeme (a contiguous `1.5e3` lexes FLOAT "1.5" + IDENT "e3" but
+// strtod's own exponent parse yields 1500 — the Ingle lexer has no exponent syntax, so
+// this quirk is relied on and the self-hosted parser reproduces it). When a `_` is
+// present the lexeme is copied to an arena buffer (any length — the self-hosted
+// `strip_underscores` strips unconditionally, so a bounded fallback that left a long
+// lexeme's separators in place would truncate at the first `_` and diverge).
+static double parse_float_lexeme(Arena *arena, const char *lex, size_t len) {
+    int has_sep = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (lex[i] == '_') {
+            has_sep = 1;
+            break;
+        }
+    }
+    if (!has_sep) {
+        return strtod(lex, NULL);
+    }
+    char *buf = arena_alloc(arena, len + 1);
+    size_t o = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (lex[i] != '_') {
+            buf[o++] = lex[i];
+        }
+    }
+    buf[o] = '\0';
+    return strtod(buf, NULL);
+}
+
+
 static Expr *parse_primary(Parser *p) {
     switch (pk(p)) {
         case TOK_PIPE:
@@ -902,26 +943,53 @@ static Expr *parse_primary(Parser *p) {
         case TOK_INT: {
             Expr *e = new_expr(p, EXPR_INT);
             const Token *t = adv(p);
-            errno = 0;
-            // Parse the magnitude as UNSIGNED 64-bit so a full-range `u64` literal (up to 2⁶⁴−1)
-            // survives to the checker, which alone knows the literal's TYPE (OFI-123). The bits are
-            // stored in the signed int_lit slot — a magnitude > i64-max lands with the sign bit set,
-            // which the checker reads as "u64-only" (int_fits). The narrower-than-i64 range checks
-            // (and the "not in u64 context" error) are the checker's job, not the parser's. strtoull
-            // stops at the width suffix (e.g. `255u8`); the lexeme carries no sign (`-` is its own token).
-            unsigned long long uv = strtoull(t->start, NULL, 10);
-            if (errno == ERANGE) {
-                // The digits overflow even 64 bits (> 2⁶⁴−1) — no integer type can hold it.
+            const char *lex = t->start;
+            size_t len = t->length;
+            // A leading `0x`/`0b`/`0o` selects the radix (the lexer already validated the
+            // prefix has a base digit); otherwise decimal.
+            int base = 10;
+            size_t i = 0;
+            if (len >= 2 && lex[0] == '0') {
+                char m = lex[1];
+                if (m == 'x' || m == 'X') { base = 16; i = 2; }
+                else if (m == 'o' || m == 'O') { base = 8; i = 2; }
+                else if (m == 'b' || m == 'B') { base = 2; i = 2; }
+            }
+            // Accumulate the magnitude as UNSIGNED 64-bit so a full-range `u64` literal (up to
+            // 2⁶⁴−1) survives to the checker, which alone knows the literal's TYPE (OFI-123). The
+            // bits are stored in the signed int_lit slot — a magnitude > i64-max lands with the
+            // sign bit set, which the checker reads as "u64-only" (int_fits). `_` separators are
+            // skipped; the loop stops at the first non-base-digit, which begins any width suffix.
+            unsigned long long uv = 0;
+            int overflow = 0, have_digit = 0;
+            for (; i < len; i++) {
+                char ch = lex[i];
+                if (ch == '_') {
+                    continue;
+                }
+                int d = digit_value(ch);
+                if (d < 0 || d >= base) {
+                    break;
+                }
+                have_digit = 1;
+                unsigned long long prod, sum;
+                if (__builtin_mul_overflow(uv, (unsigned long long)base, &prod) ||
+                    __builtin_add_overflow(prod, (unsigned long long)d, &sum)) {
+                    overflow = 1;
+                } else {
+                    uv = sum;
+                }
+            }
+            if (!have_digit) {
+                error_at(p, t, "integer literal has no digits");
+            }
+            if (overflow) {
                 error_at(p, t, "integer literal is out of range (larger than u64 / 2^64-1)");
             }
             e->as.int_lit = (long long)uv;
-            // A width suffix follows the digits in the lexeme (e.g. `255u8`).
-            size_t i = 0;
-            while (i < t->length && t->start[i] >= '0' && t->start[i] <= '9') {
-                i++;
-            }
-            if (i < t->length) {
-                int code = suffix_code(t->start + i, t->length - i);
+            // A width suffix (e.g. `255u8`, `0xFFu8`) is whatever follows the digits.
+            if (i < len) {
+                int code = suffix_code(lex + i, len - i);
                 if (code == 0) {
                     error_at(p, t, "unknown integer width suffix "
                                    "(use i8/i16/i32/i64/u8/u16/u32/u64)");
@@ -934,7 +1002,7 @@ static Expr *parse_primary(Parser *p) {
         case TOK_FLOAT: {
             Expr *e = new_expr(p, EXPR_FLOAT);
             const Token *t = adv(p);
-            e->as.float_lit = strtod(t->start, NULL);
+            e->as.float_lit = parse_float_lexeme(p->arena, t->start, t->length);
             return e;
         }
         case TOK_STRING: {
@@ -1252,9 +1320,34 @@ static Expr *parse_expression(Parser *p) {
 
 // ---- Patterns and statements. ----
 
+// is_literal_pattern_expr reports whether `e` is a constant usable as a `case` literal:
+// an int/float/string/bool literal, or a `-`-negated numeric literal (`case -1`).
+static int is_literal_pattern_expr(const Expr *e) {
+    if (e == NULL) {
+        return 0;
+    }
+    switch (e->kind) {
+        case EXPR_INT:
+        case EXPR_FLOAT:
+        case EXPR_STRING:
+        case EXPR_BOOL:
+            return 1;
+        case EXPR_UNARY:
+            return e->as.unary.op == TOK_MINUS && is_literal_pattern_expr(e->as.unary.operand);
+        default:
+            return 0;
+    }
+}
+
+
 static Pattern parse_pattern(Parser *p) {
     Pattern pat;
+    pat.kind          = PAT_VARIANT;
+    pat.alts          = NULL;
+    pat.alt_count     = 0;
+    pat.lit           = NULL;
     pat.type_name     = NULL;
+    pat.variant       = NULL;
     pat.bindings      = NULL;
     pat.binding_count = 0;
     pat.wildcard      = 0;
@@ -1266,9 +1359,24 @@ static Pattern parse_pattern(Parser *p) {
         pat.binding_struct[b] = -1;   // checker stamps an all-scalar value-struct payload's sid
     }
 
+    // A literal pattern — `case 0` / `case "x"` / `case true` / `case -1`. Parsed as a
+    // constant expression; the checker matches it against a scalar/string subject by value.
+    TokenType t0 = pk(p);
+    if (t0 == TOK_INT || t0 == TOK_FLOAT || t0 == TOK_STRING ||
+        t0 == TOK_TRUE || t0 == TOK_FALSE || t0 == TOK_MINUS) {
+        pat.kind = PAT_LITERAL;
+        pat.lit  = parse_unary(p);
+        if (!is_literal_pattern_expr(pat.lit)) {
+            error_at(p, cur(p),
+                     "a case pattern must be a literal (int/string/bool), a variant, or '_'");
+        }
+        return pat;
+    }
+
     const Token *first = expect(p, TOK_IDENT, "expected a pattern name");
     pat.variant = tok_text(p, first);
     if (strcmp(pat.variant, "_") == 0) {
+        pat.kind     = PAT_WILDCARD;
         pat.wildcard = 1;   // a catch-all arm: no qualifier, no bindings
         return pat;
     }
@@ -1300,6 +1408,24 @@ static Pattern parse_pattern(Parser *p) {
 
 
 
+
+
+// compound_assign_binop maps a compound-assignment token (`+=`, `&=`, …) to the binary
+// operator it desugars to — the SAME op-token the precedence parser stores for the
+// infix form — or TOK_COUNT if `t` is not a compound-assignment operator.
+static TokenType compound_assign_binop(TokenType t) {
+    switch (t) {
+        case TOK_PLUS_ASSIGN:    return TOK_PLUS;
+        case TOK_MINUS_ASSIGN:   return TOK_MINUS;
+        case TOK_STAR_ASSIGN:    return TOK_STAR;
+        case TOK_SLASH_ASSIGN:   return TOK_SLASH;
+        case TOK_PERCENT_ASSIGN: return TOK_PERCENT;
+        case TOK_AMP_ASSIGN:     return TOK_AMP;
+        case TOK_PIPE_ASSIGN:    return TOK_PIPE;
+        case TOK_CARET_ASSIGN:   return TOK_CARET;
+        default:                 return TOK_COUNT;
+    }
+}
 
 
 static Block parse_block(Parser *p) {
@@ -1460,7 +1586,41 @@ static Stmt *parse_statement(Parser *p) {
             while (!check(p, TOK_RBRACE) && !at_end(p)) {
                 expect(p, TOK_CASE, "expected 'case' in match");
                 MatchCase mc;
-                mc.pattern = parse_pattern(p);
+                Pattern first = parse_pattern(p);
+                // An or-pattern — `case a | b | c` — matches if ANY alternative does. The `|`
+                // here is unambiguous (a case position takes a pattern, never an expression), so
+                // it never collides with the bitwise-or operator. Alternatives are non-binding.
+                if (check(p, TOK_PIPE)) {
+                    Vec alts;
+                    vec_init(&alts, sizeof(Pattern));
+                    vec_push(&alts, &first);
+                    while (match(p, TOK_PIPE)) {
+                        Pattern alt = parse_pattern(p);
+                        vec_push(&alts, &alt);
+                    }
+                    Pattern orp;
+                    orp.kind          = PAT_OR;
+                    orp.lit           = NULL;
+                    orp.type_name     = NULL;
+                    orp.variant       = NULL;
+                    orp.bindings      = NULL;
+                    orp.binding_count = 0;
+                    orp.wildcard      = 0;
+                    orp.enum_id       = -1;
+                    orp.variant_index = -1;
+                    orp.line          = first.line;
+                    orp.col           = first.col;
+                    for (int b = 0; b < 16; b++) {
+                        orp.binding_struct[b] = -1;
+                    }
+                    orp.alts = vec_to_arena(p->arena, &alts, &orp.alt_count);
+                    mc.pattern = orp;
+                } else {
+                    mc.pattern = first;
+                }
+                // An optional `if <bool>` guard. parse_cond suppresses struct-literal syntax so
+                // the trailing `{` reads as the arm body, not a `Name { … }` literal.
+                mc.guard   = match(p, TOK_IF) ? parse_cond(p) : NULL;
                 mc.body    = parse_block(p);
                 vec_push(&cases, &mc);
                 if (p->panic) {
@@ -1499,6 +1659,24 @@ static Stmt *parse_statement(Parser *p) {
                 Stmt *s = new_stmt(p, STMT_ASSIGN);
                 s->as.assign.target = e;
                 s->as.assign.value  = parse_expression(p);
+                return s;
+            }
+            TokenType binop = compound_assign_binop(pk(p));
+            if (binop != TOK_COUNT) {
+                // Desugar `place OP= rhs` → `place = place OP rhs`. The target `e` is
+                // shared as the binary's left operand (a read of the same place). Compound
+                // assignment only type-checks on numeric/int (Copy) operands, so there is
+                // no move/borrow aliasing hazard; a side-effecting place subexpression is
+                // re-evaluated exactly as the hand-written `a[f()] = a[f()] + 1` would be
+                // (documented in OFI-184).
+                adv(p);
+                Stmt *s = new_stmt(p, STMT_ASSIGN);
+                s->as.assign.target = e;
+                Expr *bin = new_expr(p, EXPR_BINARY);
+                bin->as.binary.op    = binop;
+                bin->as.binary.left  = e;
+                bin->as.binary.right = parse_expression(p);
+                s->as.assign.value = bin;
                 return s;
             }
             Stmt *s = new_stmt(p, STMT_EXPR);

@@ -79,6 +79,14 @@ static const char *const TOKEN_NAMES[TOK_COUNT] = {
     [TOK_TILDE]     = "TILDE",
     [TOK_SHL]       = "SHL",
     [TOK_SHR]       = "SHR",
+    [TOK_PLUS_ASSIGN]    = "PLUS_ASSIGN",
+    [TOK_MINUS_ASSIGN]   = "MINUS_ASSIGN",
+    [TOK_STAR_ASSIGN]    = "STAR_ASSIGN",
+    [TOK_SLASH_ASSIGN]   = "SLASH_ASSIGN",
+    [TOK_PERCENT_ASSIGN] = "PERCENT_ASSIGN",
+    [TOK_AMP_ASSIGN]     = "AMP_ASSIGN",
+    [TOK_PIPE_ASSIGN]    = "PIPE_ASSIGN",
+    [TOK_CARET_ASSIGN]   = "CARET_ASSIGN",
 };
 
 const char *token_type_name(TokenType type) {

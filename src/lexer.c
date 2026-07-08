@@ -254,23 +254,57 @@ static Token scan_identifier(Scanner *s, const char *start, int line, int col) {
 
 
 
-// scan_number consumes an integer, promoting to a float only when a '.' is
-// followed by another digit. That look-ahead keeps `3.0` a float while leaving
-// `self.x` as IDENT DOT IDENT rather than swallowing the dot.
+// is_base_digit reports whether `c` is a digit in the given radix (2, 8, 10, or 16).
+static int is_base_digit(char c, int base) {
+    switch (base) {
+        case 16: return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        case 8:  return c >= '0' && c <= '7';
+        case 2:  return c == '0' || c == '1';
+        default: return c >= '0' && c <= '9';
+    }
+}
+
+
+// scan_number consumes an integer or float literal. Decimal is the default; a leading
+// '0' followed by a base marker (`0x`/`0b`/`0o`) and a base digit selects hex/binary/
+// octal. `_` digit separators are permitted between digits (the parser strips them).
+// A '.' promotes to a float only when followed by another digit, so `self.x` stays
+// IDENT DOT IDENT rather than swallowing the dot. A width suffix (`255u8`) is folded
+// into the lexeme; the parser validates and maps it.
 static Token scan_number(Scanner *s, const char *start, int line, int col) {
-    while (is_digit(peek(s))) {
+    // Non-decimal bases. Require a base digit immediately after the marker so `0border`
+    // still lexes as `0` then the identifier `border`, not a broken binary literal.
+    if (start[0] == '0') {
+        char m = peek(s);
+        int base = (m == 'x' || m == 'X') ? 16
+                 : (m == 'o' || m == 'O') ? 8
+                 : (m == 'b' || m == 'B') ? 2 : 0;
+        if (base != 0 && is_base_digit(peek_next(s), base)) {
+            advance(s);                 // consume the base marker
+            while (is_base_digit(peek(s), base) || peek(s) == '_') {
+                advance(s);
+            }
+            if ((peek(s) == 'i' || peek(s) == 'u') && is_digit(peek_next(s))) {
+                advance(s);
+                while (is_digit(peek(s))) {
+                    advance(s);
+                }
+            }
+            return mk(s, TOK_INT, start, line, col);
+        }
+    }
+    while (is_digit(peek(s)) || peek(s) == '_') {
         advance(s);
     }
     if (peek(s) == '.' && is_digit(peek_next(s))) {
         advance(s); // consume '.'
-        while (is_digit(peek(s))) {
+        while (is_digit(peek(s)) || peek(s) == '_') {
             advance(s);
         }
         return mk(s, TOK_FLOAT, start, line, col);
     }
-    // A width suffix, `i`/`u` followed by digits (e.g. `255u8`), is folded into the
-    // integer lexeme; the parser validates and maps it. The digit look-ahead keeps
-    // an adjacent identifier (`5x`) from being mistaken for a suffix.
+    // A width suffix, `i`/`u` followed by digits (e.g. `255u8`); the digit look-ahead
+    // keeps an adjacent identifier (`5x`) from being mistaken for a suffix.
     if ((peek(s) == 'i' || peek(s) == 'u') && is_digit(peek_next(s))) {
         advance(s);                 // 'i' or 'u'
         while (is_digit(peek(s))) {
@@ -386,12 +420,14 @@ static Token scan_token(Scanner *s) {
         case '.': return mk(s, match(s, '.') ? TOK_DOTDOT : TOK_DOT, start, line, col);
         case ':': return mk(s, TOK_COLON, start, line, col);
         case '?': return mk(s, TOK_QUESTION, start, line, col);
-        case '+': return mk(s, TOK_PLUS, start, line, col);
-        case '*': return mk(s, TOK_STAR, start, line, col);
-        case '/': return mk(s, TOK_SLASH, start, line, col);
-        case '%': return mk(s, TOK_PERCENT, start, line, col);
+        case '+': return mk(s, match(s, '=') ? TOK_PLUS_ASSIGN : TOK_PLUS, start, line, col);
+        case '*': return mk(s, match(s, '=') ? TOK_STAR_ASSIGN : TOK_STAR, start, line, col);
+        case '/': return mk(s, match(s, '=') ? TOK_SLASH_ASSIGN : TOK_SLASH, start, line, col);
+        case '%': return mk(s, match(s, '=') ? TOK_PERCENT_ASSIGN : TOK_PERCENT, start, line, col);
 
-        case '-': return mk(s, match(s, '>') ? TOK_ARROW : TOK_MINUS, start, line, col);
+        case '-':
+            if (match(s, '>')) return mk(s, TOK_ARROW, start, line, col);
+            return mk(s, match(s, '=') ? TOK_MINUS_ASSIGN : TOK_MINUS, start, line, col);
         case '=': return mk(s, match(s, '=') ? TOK_EQ : TOK_ASSIGN, start, line, col);
         case '!': return mk(s, match(s, '=') ? TOK_NEQ : TOK_BANG, start, line, col);
         // '<' / '>' carry three forms each: '<<'/'>>' shift, '<='/'>=' compare, bare
@@ -409,14 +445,14 @@ static Token scan_token(Scanner *s) {
         // not sigil-based — '&' is NOT a reference operator; MANIFESTO §5b.)
         case '&':
             if (match(s, '&')) return mk(s, TOK_AND, start, line, col);
-            return mk(s, TOK_AMP, start, line, col);
+            return mk(s, match(s, '=') ? TOK_AMP_ASSIGN : TOK_AMP, start, line, col);
         // '||' is logical or; a lone '|' is BOTH the lambda delimiter (`|x| x + 1`, in
         // operand position) and bitwise-or (`a | b`, in operator position) — the parser
         // tells them apart by grammar position, so one token serves both.
         case '|':
             if (match(s, '|')) return mk(s, TOK_OR, start, line, col);
-            return mk(s, TOK_PIPE, start, line, col);
-        case '^': return mk(s, TOK_CARET, start, line, col);
+            return mk(s, match(s, '=') ? TOK_PIPE_ASSIGN : TOK_PIPE, start, line, col);
+        case '^': return mk(s, match(s, '=') ? TOK_CARET_ASSIGN : TOK_CARET, start, line, col);
         case '~': return mk(s, TOK_TILDE, start, line, col);
 
         case '"': return scan_string(s, start, line, col);

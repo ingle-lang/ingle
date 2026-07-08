@@ -125,9 +125,13 @@ nursery spawn move mut self true false import as requires ensures extern`. The t
 `bool`, and `Self` are ordinary identifiers resolved in type position, not keywords.
 
 ### Literals
-- **Integers** — `0`, `2026`. **[runs]**
+- **Integers** — `0`, `2026`. Non-decimal bases: **hex** `0xFF`, **binary** `0b1010`, **octal**
+  `0o755` (case-insensitive prefix). `_` may separate digits for readability (`1_000_000`,
+  `0xDEAD_BEEF`, `0xFFFF_FFFF_FFFF_FFFF`). A leading zero is **not** octal — `0755` is decimal 755
+  (the C footgun is avoided; write `0o755` for octal). A width suffix still applies
+  (`0xFFu8`). **[runs]**
 - **Floats** — `3.14`, `0.0` (a `.` is only a decimal point when followed by a digit, so
-  `obj.field` is never a float). **[runs]**
+  `obj.field` is never a float). `_` digit separators are allowed (`1_234.567_5`). **[runs]**
 - **Strings** — `"..."`, with escapes `\n \t \r \\ \"`. `+` concatenates and `==`/`!=` compare
   by content. **Interpolation** splices an expression into a literal with `{ … }` — the hole
   holds any expression — including one with its own string literals, written with plain quotes
@@ -189,7 +193,14 @@ one token (MANIFESTO §5b).
 let name = "Ingle"   // immutable
 var count = 0        // mutable
 count = count + 1    // OK
+count += 1           // compound assignment — same as `count = count + 1`
 ```
+
+**Compound assignment** — `+= -= *= /= %=` (arithmetic) and `&= |= ^=` (bitwise) update a
+mutable place in place: `p OP= v` is exactly `p = p OP v`, on any assignable target (a `var`,
+a struct field, an array element). It desugars in the parser, so the operand-type rules and the
+immutable-`let` error apply unchanged. There is no `++`/`--` (write `x += 1`), and no `<<=`/`>>=`
+yet. (`i += 1` still traps on overflow, like `i = i + 1`.)
 
 Assigning to a `let` is a **compile error** — this is enforced today:
 
@@ -1310,14 +1321,58 @@ fn main() -> int {
 }
 ```
 
-`match` is **exhaustive** (every variant must be handled, or it's a compile error), has **no
+`match` is **exhaustive** (every case must be handled, or it's a compile error), has **no
 fallthrough** (first match wins), and binds each variant's fields as case-scoped locals. A
-duplicate case for a variant, or matching a non-enum value, is a compile error.
+duplicate case for a variant is a compile error.
 
-A **`case _`** arm is a catch-all: it handles every variant not named by an earlier arm, so a
+A **`case _`** arm is a catch-all: it handles every case not named by an earlier arm, so a
 match stays exhaustive without listing them all (a case after it is a duplicate — the catch-all
 goes last). `_` *inside* a variant pattern (`case Some(_)`) is an **ignored binding** — it drops
 the field and, like any `_`, cannot be read — not a catch-all wildcard.
+
+**Literal patterns** — a `match` on an **`int`, `string`, or `bool`** subject matches by value:
+`case 0`, `case "ready"`, `case true`, and `case -1` (a negated numeric literal). Exhaustiveness:
+a `bool` is covered by `true` + `false` (or `_`); `int`/`string` are unbounded, so they **require a
+`_` arm**. A variant pattern on a scalar subject (or a literal on an enum) is a compile error.
+
+```ember
+match cmd {
+    case "go"   { return "green" }
+    case "stop" { return "red" }
+    case _      { return "unknown" }   // required: string values are unbounded
+}
+```
+
+**Guards** — an arm may carry an `if <bool>` side-condition; the arm fires only when the pattern
+matches *and* the guard is true, otherwise control falls through to later arms. A guarded arm
+**never counts toward exhaustiveness** (it may not fire), so a guarded arm always needs a fallback.
+The guard can read the arm's bindings.
+
+**Value binding** — on a scalar subject, a bare identifier binds the value: `case n` binds `n` to the
+subject (irrefutable, so unguarded it covers like `_`). This is what lets a guard read a computed
+subject, e.g. `match score() { case k if k >= 90 { … } }`.
+
+```ember
+match score {
+    case k if k >= 90 { return "A" }   // value binding + guard
+    case k if k >= 80 { return "B" }
+    case _            { return "F" }   // guarded arms don't cover — a fallback is required
+}
+```
+
+**Or-patterns** — a single arm can list alternatives with `|`: `case a | b | c` fires if **any**
+alternative matches, so one body serves several cases without repetition. The `|` in a case position
+is always the or-separator (never the bitwise-or operator). Alternatives are **non-binding** — each
+must be a **literal** (`case 1 | 2 | 3`) or a **nullary variant** (`case Red | Green | Blue`), with no
+field bindings and no value binding — and each contributes to exhaustiveness on its own. An or-pattern
+may still carry a guard (`case 1 | 2 | 3 if n > 2`).
+
+```ember
+match color {
+    case Red | Green | Blue   { return "primary" }
+    case White | Black        { return "mono" }
+}
+```
 
 ```ember
 match color {

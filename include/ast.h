@@ -356,9 +356,25 @@ struct Expr {
 
 // -------------------------------------------------------------- Patterns ----
 
+// The kind of a match-case pattern. A discriminant so pattern-matching features
+// (literals, or-patterns, nesting — the Phase-2 campaign) are additive `PAT_*` arms
+// rather than overloaded reads of the `variant`/`wildcard` fields. `wildcard` is kept
+// in sync (set when kind == PAT_WILDCARD) so existing reads stay valid.
+typedef enum {
+    PAT_VARIANT,   // `case Circle(r)` / `case Shape.Circle(r)`
+    PAT_WILDCARD,  // `case _`
+    PAT_LITERAL,   // `case 0` / `case "x"` / `case true` — matches a scalar/string subject by value
+    PAT_BIND,      // `case k` on a SCALAR subject — binds the value (irrefutable); stamped by the checker
+    PAT_OR,        // `case a | b | c` — matches if ANY alternative does (non-binding); alts[] holds them
+} PatternKind;
+
 // A match-case pattern: an optional qualifier (`Shape.` in the full form), a
 // variant name, and zero or more positional field bindings.
-typedef struct {
+typedef struct Pattern {
+    PatternKind  kind;
+    struct Pattern *alts;       // PAT_OR: the `a | b | c` alternatives (each PAT_VARIANT/PAT_LITERAL,
+    size_t          alt_count;  // non-binding); NULL/0 otherwise.
+    struct Expr *lit;           // PAT_LITERAL: the constant to compare the subject against; NULL otherwise
     const char  *type_name;     // NULL in the short form `case Circle(r)`
     const char  *variant;
     int          enum_id;       // checker-set: the scrutinee enum's id + this variant's tag, so
@@ -376,10 +392,13 @@ typedef struct {
 
 // ------------------------------------------------------------ Statements ----
 
-// One arm of a match.
+// One arm of a match. `guard` (NULL if absent) is a `case pat if <bool>` side-condition:
+// the arm matches only when the pattern matches AND the guard is true, else control falls
+// through to later arms — so a guarded arm never counts toward exhaustiveness.
 typedef struct {
-    Pattern pattern;
-    Block   body;
+    Pattern      pattern;
+    struct Expr *guard;
+    Block        body;
 } MatchCase;
 
 typedef enum {

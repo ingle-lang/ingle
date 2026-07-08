@@ -1817,9 +1817,16 @@ struct Checker {
                     known = true
                     eid = st - ENUM_BASE
                 }
-                // a CONCRETE non-enum subject (int/string/bool/struct/…) can't be matched; an unmodelled
+                // A scalar / string / bool subject matches on LITERAL patterns by value (Phase 2a).
+                var scalar = false
+                if is_integer_ty(st) || st == TY_BOOL || st == TY_STRING {
+                    scalar = true
+                }
+                var seen_true = false
+                var seen_false = false
+                // A concrete non-enum, non-scalar subject (a struct/…) can't be matched; an unmodelled
                 // (TY_INFER) or error subject stays lenient.
-                if known == false && st != TY_INFER && st != TY_ERROR {
+                if known == false && scalar == false && st != TY_INFER && st != TY_ERROR {
                     self.error("'match' requires an enum value")
                 }
                 var vnames: [string] = []
@@ -1850,9 +1857,41 @@ struct Checker {
                         break
                     }
                     self.local_moved = clone_bools(pre)      // each arm starts fresh (no cross-poison)
+                    let ag = cases[ci].guard.len() > 0       // a guarded arm may not fire → never covers
+                    var is_bind = false
                     if known {
                         if cases[ci].pattern.wildcard {
-                            has_wild = true
+                            if ag == false {
+                                has_wild = true
+                            }
+                        } else if cases[ci].pattern.kind == 4 {
+                            // `case Red | Green | Blue` — each alternative is a NULLARY variant of
+                            // this enum (non-binding); each covers its own variant.
+                            var oa = 0
+                            loop {
+                                if oa >= cases[ci].pattern.alts.len() {
+                                    break
+                                }
+                                if cases[ci].pattern.alts[oa].kind == 2 {
+                                    self.error("a literal cannot match an enum value; use a variant pattern")
+                                } else {
+                                    if cases[ci].pattern.alts[oa].type_name != "" && cases[ci].pattern.alts[oa].type_name != self.enums[eid] {
+                                        self.error("pattern names a different enum than the match subject")
+                                    }
+                                    let avi = index_of(vnames, cases[ci].pattern.alts[oa].variant)
+                                    if avi < 0 {
+                                        self.error("this variant does not belong to the matched enum")
+                                    } else if varity[avi] != 0 || cases[ci].pattern.alts[oa].bindings.len() > 0 {
+                                        self.error("an or-pattern alternative must be a variant with no payload")
+                                    } else if ag == false {
+                                        if covered[avi] {
+                                            self.error("duplicate case for a variant")
+                                        }
+                                        covered[avi] = true
+                                    }
+                                }
+                                oa = oa + 1
+                            }
                         } else {
                             if cases[ci].pattern.type_name != "" && cases[ci].pattern.type_name != self.enums[eid] {
                                 self.error("pattern names a different enum than the match subject")
@@ -1861,12 +1900,99 @@ struct Checker {
                             if vi < 0 {
                                 self.error("this variant does not belong to the matched enum")
                             } else {
-                                if covered[vi] {
-                                    self.error("duplicate case for a variant")
+                                if ag == false {
+                                    if covered[vi] {
+                                        self.error("duplicate case for a variant")
+                                    }
+                                    covered[vi] = true
                                 }
-                                covered[vi] = true
                                 if cases[ci].pattern.bindings.len() != varity[vi] {
                                     self.error("pattern binds the wrong number of fields")
+                                }
+                            }
+                        }
+                    } else if scalar {
+                        if cases[ci].pattern.wildcard {
+                            if ag == false {
+                                has_wild = true
+                            }
+                        } else if cases[ci].pattern.kind == 2 {
+                            let lt = self.check_expr(cases[ci].pattern.lit[0])
+                            var compat = false
+                            if st == TY_BOOL {
+                                compat = lt == TY_BOOL
+                            } else if st == TY_STRING {
+                                compat = lt == TY_STRING
+                            } else {
+                                compat = is_integer_ty(lt)
+                            }
+                            if lt != TY_ERROR && compat == false {
+                                self.error("this literal's type does not match the match subject")
+                            }
+                            if ag == false && st == TY_BOOL {
+                                match cases[ci].pattern.lit[0] {
+                                    case EBool(bv) {
+                                        if bv {
+                                            seen_true = true
+                                        } else {
+                                            seen_false = true
+                                        }
+                                    }
+                                    case _ {}
+                                }
+                            }
+                        } else if cases[ci].pattern.kind == 4 {
+                            // `case 1 | 2 | 3` — every alternative is a literal (non-binding); each
+                            // contributes to coverage exactly as a bare literal arm would.
+                            var oa = 0
+                            loop {
+                                if oa >= cases[ci].pattern.alts.len() {
+                                    break
+                                }
+                                if cases[ci].pattern.alts[oa].kind != 2 {
+                                    self.error("an or-pattern on a scalar/string value may only combine literals")
+                                } else {
+                                    let lt = self.check_expr(cases[ci].pattern.alts[oa].lit[0])
+                                    var compat = false
+                                    if st == TY_BOOL {
+                                        compat = lt == TY_BOOL
+                                    } else if st == TY_STRING {
+                                        compat = lt == TY_STRING
+                                    } else {
+                                        compat = is_integer_ty(lt)
+                                    }
+                                    if lt != TY_ERROR && compat == false {
+                                        self.error("this literal's type does not match the match subject")
+                                    }
+                                    if ag == false && st == TY_BOOL {
+                                        match cases[ci].pattern.alts[oa].lit[0] {
+                                            case EBool(bv) {
+                                                if bv {
+                                                    seen_true = true
+                                                } else {
+                                                    seen_false = true
+                                                }
+                                            }
+                                            case _ {}
+                                        }
+                                    }
+                                }
+                                oa = oa + 1
+                            }
+                        } else {
+                            // A bare identifier binds the VALUE (an irrefutable value binding); a
+                            // qualified/parenthesised variant is meaningless on a scalar subject.
+                            if cases[ci].pattern.type_name != "" || cases[ci].pattern.bindings.len() > 0 {
+                                self.error("a variant pattern cannot match a scalar/string value; use a literal, a value binding, or `_`")
+                            } else if self.variant_enum(cases[ci].pattern.variant) >= 0 {
+                                // The name resolves to an enum variant — the codegen classifies bind-vs-
+                                // variant by exactly this by-name resolution, so treat it as a variant (an
+                                // error on a scalar) to keep checker + codegen in step (no miscompile).
+                                self.error("a variant pattern cannot match a scalar/string value; a value binding cannot reuse an enum variant name — rename it")
+                            } else {
+                                is_bind = true
+                                if ag == false {
+                                    has_wild = true          // an unguarded value binding is irrefutable
                                 }
                             }
                         }
@@ -1880,6 +2006,16 @@ struct Checker {
                         }
                         self.declare(cases[ci].pattern.bindings[bi], TY_INFER, false, false, false)   // a match binding is a borrow
                         bi = bi + 1
+                    }
+                    if is_bind {
+                        self.declare(cases[ci].pattern.variant, st, false, false, false)   // scalar value binding (borrow)
+                    }
+                    if cases[ci].guard.len() > 0 {
+                        // Checked in the arm scope, AFTER bindings, so the guard can read them.
+                        let gt = self.check_expr(cases[ci].guard[0])
+                        if gt != TY_ERROR && gt != TY_BOOL {
+                            self.error("a match guard must be a `bool`")
+                        }
                     }
                     var si = 0
                     loop {
@@ -1919,6 +2055,15 @@ struct Checker {
                             self.error("non-exhaustive match: a variant is not handled")
                         }
                         vj = vj + 1
+                    }
+                }
+                if scalar && has_wild == false {
+                    if st == TY_BOOL {
+                        if (seen_true && seen_false) == false {
+                            self.error("non-exhaustive match on bool: handle both true and false, or add a `_` arm")
+                        }
+                    } else {
+                        self.error("non-exhaustive match: add a `_` arm (int and string values are unbounded)")
                     }
                 }
             }

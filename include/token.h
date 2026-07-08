@@ -51,6 +51,13 @@ typedef enum {
     TOK_AMP, TOK_CARET, TOK_TILDE,       // & ^ ~  (bitwise and / xor / not)
     TOK_SHL, TOK_SHR,                    // << >>  (left / right shift)
 
+    // Compound assignment. The parser desugars `place OP= v` to `place = place OP v`
+    // at the assign site, so these never reach the checker or codegen. `<<=`/`>>=` are
+    // intentionally absent (they collide with the generic-close `>>`-split trick).
+    TOK_PLUS_ASSIGN, TOK_MINUS_ASSIGN, TOK_STAR_ASSIGN,  // += -= *=
+    TOK_SLASH_ASSIGN, TOK_PERCENT_ASSIGN,                // /= %=
+    TOK_AMP_ASSIGN, TOK_PIPE_ASSIGN, TOK_CARET_ASSIGN,   // &= |= ^=
+
     TOK_COUNT
 } TokenType;
 

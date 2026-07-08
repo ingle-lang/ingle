@@ -1,1 +1,1 @@
-tests/run/error_match_nonenum.ig:4:5: error: 'match' requires an enum value
+tests/run/error_match_nonenum.ig:7:14: error: a variant pattern cannot match a scalar/string value; use a literal (e.g. `case 0`), a value binding (`case n`), or `_`
