@@ -2035,8 +2035,19 @@ static SemType annotation_type(Checker *c, const Type *t) {
 // resolve_signature returns the index of a top-level function by name within the
 // module currently being checked (unqualified names are module-local), or -1.
 static int resolve_signature(Checker *c, const char *name) {
+    // A function in the current module wins — a user definition shadows a same-named
+    // prelude combinator (the prelude's is dropped at load time by program_declares_fn,
+    // but resolve current-module-first anyway so shadowing is robust).
     for (int i = 0; i < c->fn_count; i++) {
         if (c->fns[i].module == c->current_module &&
+            strcmp(c->fns[i].name, name) == 0) {
+            return i;
+        }
+    }
+    // Otherwise a prelude/global function (an Option/Result combinator) is visible
+    // unqualified from every module — the function counterpart to the prelude enums.
+    for (int i = 0; i < c->fn_count; i++) {
+        if (is_global_module(c->modules, c->fns[i].module) &&
             strcmp(c->fns[i].name, name) == 0) {
             return i;
         }

@@ -206,6 +206,40 @@ static const char *PRELUDE_SOURCE =
     // interpolate; declaring it lets the type also serve as a `Show` value / a `T: Show` bound.
     "interface Show {\n"
     "    fn show(self) -> string\n"
+    "}\n"
+    // Option/Result combinators (OFI-187): the ergonomic accessors, called method-style
+    // via UFCS (`o.unwrap_or(0)` desugars to `unwrap_or(o, 0)`). Generic + prelude-global,
+    // so every program gets them for free; unused ones are tree-shaken. A user may define
+    // their own function of the same name — it shadows the prelude's (program_declares_fn).
+    "fn is_some<T>(o: Option<T>) -> bool {\n"
+    "    match o {\n"
+    "        case Some(v) { return true }\n"
+    "        case None { return false }\n"
+    "    }\n"
+    "}\n"
+    "fn is_none<T>(o: Option<T>) -> bool {\n"
+    "    match o {\n"
+    "        case Some(v) { return false }\n"
+    "        case None { return true }\n"
+    "    }\n"
+    "}\n"
+    "fn unwrap_or<T: Copy>(o: Option<T>, d: T) -> T {\n"
+    "    match o {\n"
+    "        case Some(v) { return v }\n"
+    "        case None { return d }\n"
+    "    }\n"
+    "}\n"
+    "fn is_ok<T, E>(r: Result<T, E>) -> bool {\n"
+    "    match r {\n"
+    "        case Ok(v) { return true }\n"
+    "        case Err(e) { return false }\n"
+    "    }\n"
+    "}\n"
+    "fn is_err<T, E>(r: Result<T, E>) -> bool {\n"
+    "    match r {\n"
+    "        case Ok(v) { return false }\n"
+    "        case Err(e) { return true }\n"
+    "    }\n"
     "}\n";
 
 
@@ -226,7 +260,129 @@ static int program_declares_enum(const Program *progs, int count, const char *na
 }
 
 
+// program_declares_fn reports whether any already-parsed module declares a top-level
+// function named `name` — used to let a user's definition shadow a prelude combinator
+// (`unwrap_or`, `map`, …) instead of colliding with it (the function counterpart to
+// program_declares_enum).
+static int program_declares_fn(const Program *progs, int count, const char *name) {
+    for (int m = 0; m < count; m++) {
+        for (size_t d = 0; d < progs[m].count; d++) {
+            const Decl *decl = progs[m].decls[d];
+            if (decl->kind == DECL_FN &&
+                strcmp(decl->as.fn.name, name) == 0) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
 
+
+// type_refs_shadowed_enum reports whether type annotation `t` references (at any depth)
+// an enum the user has redefined. A prelude combinator whose signature mentions such an
+// enum (e.g. `o: Option<T>` when the program declares its OWN `enum Option`) can no
+// longer resolve that type — the user's enum lives in a user module, not the prelude —
+// so the function is dropped alongside the shadowed enum (the user brings their own).
+static int type_refs_shadowed_enum(const Type *t, const Program *progs, int count) {
+    if (t == NULL) {
+        return 0;
+    }
+    switch (t->kind) {
+        case TYPE_NAME:
+            return program_declares_enum(progs, count, t->as.name.name);
+        case TYPE_GENERIC:
+            if (program_declares_enum(progs, count, t->as.generic.name)) {
+                return 1;
+            }
+            for (size_t i = 0; i < t->as.generic.arg_count; i++) {
+                if (type_refs_shadowed_enum(t->as.generic.args[i], progs, count)) {
+                    return 1;
+                }
+            }
+            return 0;
+        case TYPE_ARRAY:
+            return type_refs_shadowed_enum(t->as.array.elem, progs, count);
+        case TYPE_FN:
+            for (size_t i = 0; i < t->as.fn.param_count; i++) {
+                if (type_refs_shadowed_enum(t->as.fn.params[i], progs, count)) {
+                    return 1;
+                }
+            }
+            return type_refs_shadowed_enum(t->as.fn.ret, progs, count);
+    }
+    return 0;
+}
+
+
+// prelude_fn_dangles reports whether a prelude function's signature references a
+// user-shadowed prelude enum (so it must be dropped with that enum).
+static int prelude_fn_dangles(const Decl *decl, const Program *progs, int count) {
+    const FnDecl *fn = &decl->as.fn;
+    for (size_t p = 0; p < fn->param_count; p++) {
+        if (type_refs_shadowed_enum(fn->params[p].type, progs, count)) {
+            return 1;
+        }
+    }
+    return type_refs_shadowed_enum(fn->return_type, progs, count);
+}
+
+
+
+
+
+// A NameSet is the set of identifier lexemes that appear in the user source — used to
+// inject a prelude COMBINATOR only when the program actually references it (so an unused
+// combinator costs nothing in the VM's emit-all bytecode, and the corpus is unchanged).
+// Lexemes are copied into the arena (import token buffers are freed during the load).
+typedef struct {
+    const char **names;
+    int          count;
+    int          cap;
+} NameSet;
+
+static int nameset_has(const NameSet *s, const char *name) {
+    for (int i = 0; i < s->count; i++) {
+        if (strcmp(s->names[i], name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// nameset_collect adds every identifier lexeme in `toks` to `s` (deduped). Identifiers
+// inside comments/strings never reach the token stream, so this cannot false-positive
+// on a mention of a combinator name in a comment.
+static void nameset_collect(NameSet *s, Arena *arena, const TokenList *toks) {
+    for (size_t i = 0; i < toks->count; i++) {
+        const Token *t = &toks->tokens[i];
+        if (t->type != TOK_IDENT) {
+            continue;
+        }
+        int dup = 0;
+        for (int j = 0; j < s->count && !dup; j++) {
+            if (strlen(s->names[j]) == t->length &&
+                strncmp(s->names[j], t->start, t->length) == 0) {
+                dup = 1;
+            }
+        }
+        if (dup) {
+            continue;
+        }
+        if (s->count == s->cap) {
+            int ncap = s->cap == 0 ? 64 : s->cap * 2;
+            const char **grown = realloc(s->names, (size_t)ncap * sizeof *grown);
+            if (grown == NULL) {
+                return;   // out of memory: fail safe (a missed name just keeps a combinator uninjected)
+            }
+            s->names = grown;
+            s->cap = ncap;
+        }
+        char *cp = arena_alloc(arena, t->length + 1);
+        memcpy(cp, t->start, t->length);
+        cp[t->length] = '\0';
+        s->names[s->count++] = cp;
+    }
+}
 
 
 // load_modules parses the entry module and every module it transitively imports,
@@ -238,12 +394,15 @@ static int load_modules(const TokenList *entry_tokens, const char *entry_path,
     Program progs[MAX_MODULES];
     int error = 0;
 
+    NameSet used_idents = {0};   // identifiers appearing in the user source (combinator injection gate)
+
     set->count = 1;
     set->prelude_module = -1;
     set->modules[0].path = entry_path;
     set->modules[0].import_count = 0;
     progs[0] = parser_parse(entry_tokens->tokens, entry_tokens->count,
                             arena, entry_path, &error);
+    nameset_collect(&used_idents, arena, entry_tokens);
 
     // Breadth-first over modules, discovering and loading imports.
     for (int m = 0; m < set->count; m++) {
@@ -281,6 +440,7 @@ static int load_modules(const TokenList *entry_tokens, const char *entry_path,
                 set->modules[target].import_count = 0;
                 progs[target] = parser_parse(toks.tokens, toks.count, arena,
                                              resolved, &perr);
+                nameset_collect(&used_idents, arena, &toks);
                 set->count++;
                 if (toks.had_error || perr) {
                     error = 1;
@@ -317,6 +477,19 @@ static int load_modules(const TokenList *entry_tokens, const char *entry_path,
         if (decl->kind == DECL_ENUM &&
             program_declares_enum(progs, user_count, decl->as.enum_.name)) {
             continue;   // the program defines its own — let it win
+        }
+        if (decl->kind == DECL_FN &&
+            program_declares_fn(progs, user_count, decl->as.fn.name)) {
+            continue;   // a user's own `unwrap_or`/`map`/… shadows the prelude combinator
+        }
+        if (decl->kind == DECL_FN &&
+            prelude_fn_dangles(decl, progs, user_count)) {
+            continue;   // its enum (Option/Result) was shadowed — drop the combinator too
+        }
+        if (decl->kind == DECL_FN &&
+            !nameset_has(&used_idents, decl->as.fn.name)) {
+            continue;   // the program never references this combinator — don't inject it
+                        // (the VM emits every function, so an unused one would just be bloat)
         }
         prelude_decls[prelude_count++] = decl;
     }
@@ -368,6 +541,7 @@ static int load_modules(const TokenList *entry_tokens, const char *entry_path,
     }
     merged->decls = decls;
     merged->count = total;
+    free(used_idents.names);   // the copied lexemes live in the arena; only the index array is heap
     return error;
 }
 
