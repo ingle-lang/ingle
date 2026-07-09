@@ -8,6 +8,7 @@
 
 import "parser" as ps
 import "codegen" as cg
+import "lexer" as lex
 
 
 // last_slash returns the index of the final '/' in a path, or -1.
@@ -80,6 +81,133 @@ struct Loaded {
 
 // load_modules parses the entry module and every module it transitively imports, BFS over imports, deduped
 // by resolved path, returning the merged declaration list ([entry decls, import1 decls, …]).
+// prelude_src is stage-0's PRELUDE_SOURCE (src/main.c), byte-for-byte. It is parsed so the Option/Result
+// COMBINATORS land at the SAME source lines as stage-0 (the enums + Hash/Eq/Show interfaces occupy lines
+// 1-17, is_some at 18, …) — so an injected combinator's bytecode source-map is byte-identical. Only the
+// combinator DECL_FNs are injected downstream; the enums/interfaces are here purely for line positioning
+// (Option/Result stay OUT of the enum table — the C-emit resolves Some/Ok/… by the prelude fallback, OFI-204).
+// Braces are `\{`/`\}` — a bare `{` starts string interpolation.
+fn prelude_src() -> string {
+    return "enum Option<T> \{\n" +
+           "    Some(value: T)\n" +
+           "    None\n" +
+           "\}\n" +
+           "enum Result<T, E> \{\n" +
+           "    Ok(value: T)\n" +
+           "    Err(error: E)\n" +
+           "\}\n" +
+           "interface Hash \{\n" +
+           "    fn hash(self) -> int\n" +
+           "\}\n" +
+           "interface Eq \{\n" +
+           "    fn eq(self, other: Self) -> bool\n" +
+           "\}\n" +
+           "interface Show \{\n" +
+           "    fn show(self) -> string\n" +
+           "\}\n" +
+           "fn is_some<T>(o: Option<T>) -> bool \{\n" +
+           "    match o \{\n" +
+           "        case Some(v) \{ return true \}\n" +
+           "        case None \{ return false \}\n" +
+           "    \}\n" +
+           "\}\n" +
+           "fn is_none<T>(o: Option<T>) -> bool \{\n" +
+           "    match o \{\n" +
+           "        case Some(v) \{ return false \}\n" +
+           "        case None \{ return true \}\n" +
+           "    \}\n" +
+           "\}\n" +
+           "fn unwrap_or<T: Copy>(o: Option<T>, d: T) -> T \{\n" +
+           "    match o \{\n" +
+           "        case Some(v) \{ return v \}\n" +
+           "        case None \{ return d \}\n" +
+           "    \}\n" +
+           "\}\n" +
+           "fn is_ok<T, E>(r: Result<T, E>) -> bool \{\n" +
+           "    match r \{\n" +
+           "        case Ok(v) \{ return true \}\n" +
+           "        case Err(e) \{ return false \}\n" +
+           "    \}\n" +
+           "\}\n" +
+           "fn is_err<T, E>(r: Result<T, E>) -> bool \{\n" +
+           "    match r \{\n" +
+           "        case Ok(v) \{ return false \}\n" +
+           "        case Err(e) \{ return true \}\n" +
+           "    \}\n" +
+           "\}\n"
+}
+
+
+// collect_idents returns every IDENTIFIER lexeme across the user sources (dups kept — membership is a
+// scan). Comments/strings never reach the token stream, so a combinator name mentioned in a comment is
+// NOT a false hit — mirrors stage-0's NameSet in src/main.c.
+fn collect_idents(sources: [string]) -> [string] {
+    var out: [string] = []
+    var si = 0
+    loop {
+        if si >= sources.len() {
+            break
+        }
+        let toks = lex.lex(sources[si])
+        var ti = 0
+        loop {
+            if ti >= toks.len() {
+                break
+            }
+            match toks[ti].kind {
+                case TIdent {
+                    out.append(toks[ti].text)
+                }
+                case _ {
+                }
+            }
+            ti = ti + 1
+        }
+        si = si + 1
+    }
+    return out
+}
+
+
+// name_used reports whether `n` appears in the collected identifier set.
+fn name_used(names: [string], n: string) -> bool {
+    var i = 0
+    loop {
+        if i >= names.len() {
+            break
+        }
+        if names[i] == n {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+
+// declares_fn reports whether the program already declares a top-level function named `n` — a user's own
+// `unwrap_or`/… shadows the prelude combinator (mirrors stage-0's program_declares_fn in src/main.c).
+fn declares_fn(decls: [ps.Decl], n: string) -> bool {
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.name == n {
+                    return true
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+
 fn load_modules(entry: string) -> Loaded {
     var seen: [string] = []
     var queue: [string] = []
@@ -88,6 +216,7 @@ fn load_modules(entry: string) -> Loaded {
     var imp_from: [int] = []
     var imp_alias: [string] = []
     var imp_to: [int] = []
+    var sources: [string] = []    // each module's source text, for the combinator usage gate
     seen.append(entry)
     queue.append(entry)
     var qi = 0
@@ -95,7 +224,9 @@ fn load_modules(entry: string) -> Loaded {
         if qi >= queue.len() {
             break
         }
-        let decls = ps.parse(read_file(queue[qi]))
+        let src = read_file(queue[qi])
+        let decls = ps.parse(src)
+        sources.append(src)
         var di = 0
         loop {
             if di >= decls.len() {
@@ -140,6 +271,30 @@ fn load_modules(entry: string) -> Loaded {
             ii = ii + 1
         }
         qi = qi + 1
+    }
+    // Inject each prelude combinator the program actually references (usage-gated, like stage-0's
+    // NameSet) — appended AFTER every user module, in a synthetic prelude module (queue.len()), so its
+    // function index matches stage-0 (the prelude module is last). Only the DECL_FNs; the parsed
+    // Option/Result enums are discarded (kept out of the enum table — the OFI-204 fallback path).
+    let used = collect_idents(sources)
+    let pdecls = ps.parse(prelude_src())
+    let pmod = queue.len()
+    var pi = 0
+    loop {
+        if pi >= pdecls.len() {
+            break
+        }
+        match pdecls[pi] {
+            case DFn(f) {
+                if name_used(used, f.name) && declares_fn(combined, f.name) == false {
+                    combined.append(pdecls[pi])
+                    mod_of.append(pmod)
+                }
+            }
+            case _ {
+            }
+        }
+        pi = pi + 1
     }
     return Loaded { decls: combined, mod_of: mod_of, imp_from: imp_from, imp_alias: imp_alias, imp_to: imp_to }
 }
