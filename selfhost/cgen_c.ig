@@ -2192,6 +2192,12 @@ struct CgcGen {
                     }
                 }
                 let cn = self.lookup_cname(name)
+                if cn == "" {
+                    let fvi = self.fn_index(name)
+                    if fvi >= 0 {
+                        return "em_closure(&g_em, {fvi}, 0)"   // a named function used as a VALUE — a zero-capture closure (cgen_c.c EXPR_FN_VALUE)
+                    }
+                }
                 if self.lookup_unboxed(name) {
                     return "INT_VAL((int64_t){cn})"      // an unboxed scalar `let` boxes back to a Value
                 }
@@ -2954,6 +2960,32 @@ struct CgcGen {
 
     // emit_call emits a user free-function call `f(args)` → `em_fn_<index>(<args>)`, or a built-in array
     // method (`arr.len()` → em_array_len, `arr.append(x)` → em_array_append) when the callee is `recv.m`.
+    // emit_closure_call renders a call THROUGH a closure VALUE (a fn-typed local/param): rt_call_closure(&g_em,
+    // <closure>, <argc>, (Value[])\{ args \}, em_invoke). The args are borrows — rt_call_closure retains heap
+    // args at runtime (mirrors cgen_c.c's closure_call path + the VM's OP_CALL_CLOSURE).
+    fn emit_closure_call(mut self, closure: string, args: [ps.Expr]) -> string {
+        var s = "rt_call_closure(&g_em, {closure}, {args.len()}, "
+        if args.len() == 0 {
+            s = s + "0"
+        } else {
+            s = s + "(Value[])\{ "
+            var i = 0
+            loop {
+                if i >= args.len() {
+                    break
+                }
+                if i > 0 {
+                    s = s + ", "
+                }
+                s = s + self.emit_expr(args[i])
+                i = i + 1
+            }
+            s = s + " \}"
+        }
+        return s + ", em_invoke)"
+    }
+
+
     fn emit_call(mut self, callee: ps.Expr, args: [ps.Expr]) -> string {
         match callee {
             case EIdent(name) {
@@ -2966,6 +2998,11 @@ struct CgcGen {
                 if args.len() == 2 && (name == "wrapping_add" || name == "wrapping_sub" || name == "wrapping_mul") {
                     let opn = byte_slice(name, 9, name.len())   // drop the "wrapping_" prefix → add / sub / mul
                     return "em_wrap_{opn}({self.emit_expr(args[0])}, {self.emit_expr(args[1])}, 0)"
+                }
+                if self.lookup_cname(name) != "" {
+                    // A call THROUGH a fn-typed local/param (`f(v)` where `f: fn(T)->U`) — a local binding a
+                    // callee can only be a closure value, so dispatch via rt_call_closure (cgen_c.c closure_call).
+                    return self.emit_closure_call(self.lookup_cname(name), args)
                 }
                 if self.en.is_case_variant(name) {
                     return self.emit_enum_ctor(name, args)   // an enum-variant construction `Circle(4)` / prelude `Some(5)`
@@ -4614,6 +4651,20 @@ fn enum_name_known(name: string, en: EnumTab) -> bool {
 }
 
 
+// is_fn_ty reports whether a type is a function type `fn(...) -> ...` — a first-class CLOSURE value, which is
+// an OWNED refcounted heap object (dropped at scope exit, like a string/enum). Mirrors codegen.ig's ty_is_fn.
+fn is_fn_ty(ty: ps.Ty) -> bool {
+    match ty {
+        case TyFn(params, ret) {
+            return true
+        }
+        case _ {
+            return false
+        }
+    }
+}
+
+
 fn is_enum_ty(ty: ps.Ty, en: EnumTab) -> bool {
     match ty {
         case TyName(qual, name) {
@@ -4706,7 +4757,7 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: Stru
             var pesid = 0 - 1
             if f.params[p].ty.len() > 0 {
                 pk = ty_scalar_kind(f.params[p].ty[0])
-                owned = is_string_ty(f.params[p].ty[0]) || is_enum_ty(f.params[p].ty[0], en)   // string / enum param is OWNED
+                owned = is_string_ty(f.params[p].ty[0]) || is_enum_ty(f.params[p].ty[0], en) || is_fn_ty(f.params[p].ty[0])   // string / enum / closure param is OWNED
                 is_arr = is_array_ty(f.params[p].ty[0])   // an array param is a BORROW (not dropped at exit)
                 if is_arr {
                     ek = ty_scalar_kind(elem_ty_of(f.params[p].ty[0]))   // its element scalar kind, so `a[i]` is a scalar
