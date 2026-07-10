@@ -2569,6 +2569,14 @@ struct CgcGen {
                         if qfi >= 0 {
                             return self.fn_ret_enum[qfi]
                         }
+                        // a UFCS enum-returning free-function call `a.ok_or(e)` (a NON-struct receiver prepended
+                        // as arg 0 — its result is an owned Result/Option temp, dropped at scope exit).
+                        if sid < 0 {
+                            let ufi = self.fn_index(mname)
+                            if ufi >= 0 {
+                                return self.fn_ret_enum[ufi]
+                            }
+                        }
                     }
                     case _ {
                     }

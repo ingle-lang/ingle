@@ -240,6 +240,27 @@ static const char *PRELUDE_SOURCE =
     "        case Ok(v) { return false }\n"
     "        case Err(e) { return true }\n"
     "    }\n"
+    "}\n"
+    // Higher-order combinators. `ok_or` turns an Option into a Result; `map` transforms the payload
+    // (constructing a new Option); `and_then` chains an Option-returning function (flat-map). The `f`
+    // parameter is a first-class function value (a named fn or a lambda).
+    "fn ok_or<T, E>(o: Option<T>, e: E) -> Result<T, E> {\n"
+    "    match o {\n"
+    "        case Some(v) { return Ok(v) }\n"
+    "        case None { return Err(e) }\n"
+    "    }\n"
+    "}\n"
+    "fn map<T, U>(o: Option<T>, f: fn(T) -> U) -> Option<U> {\n"
+    "    match o {\n"
+    "        case Some(v) { return Some(f(v)) }\n"
+    "        case None { return None }\n"
+    "    }\n"
+    "}\n"
+    "fn and_then<T, U>(o: Option<T>, f: fn(T) -> Option<U>) -> Option<U> {\n"
+    "    match o {\n"
+    "        case Some(v) { return f(v) }\n"
+    "        case None { return None }\n"
+    "    }\n"
     "}\n";
 
 
@@ -349,14 +370,19 @@ static int nameset_has(const NameSet *s, const char *name) {
     return 0;
 }
 
-// nameset_collect adds every identifier lexeme in `toks` to `s` (deduped). Identifiers
-// inside comments/strings never reach the token stream, so this cannot false-positive
-// on a mention of a combinator name in a comment.
+// nameset_collect adds every CALL-POSITION identifier lexeme in `toks` to `s` (deduped) — an
+// identifier immediately followed by `(`, i.e. a free call `f(…)` or a method/UFCS call `x.f(…)`.
+// This is what gates prelude-combinator injection, so a combinator NAME used as a variable, a
+// struct field (`s.map`), or a type is NOT a false hit — only an actual call is. Identifiers
+// inside comments/strings never reach the token stream either.
 static void nameset_collect(NameSet *s, Arena *arena, const TokenList *toks) {
     for (size_t i = 0; i < toks->count; i++) {
         const Token *t = &toks->tokens[i];
         if (t->type != TOK_IDENT) {
             continue;
+        }
+        if (i + 1 >= toks->count || toks->tokens[i + 1].type != TOK_LPAREN) {
+            continue;   // not a call — a variable / field / type reference of the same name
         }
         int dup = 0;
         for (int j = 0; j < s->count && !dup; j++) {

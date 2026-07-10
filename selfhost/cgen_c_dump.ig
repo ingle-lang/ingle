@@ -114,6 +114,24 @@ fn prelude_src() -> string {
            "        case Ok(v) \{ return false \}\n" +
            "        case Err(e) \{ return true \}\n" +
            "    \}\n" +
+           "\}\n" +
+           "fn ok_or<T, E>(o: Option<T>, e: E) -> Result<T, E> \{\n" +
+           "    match o \{\n" +
+           "        case Some(v) \{ return Ok(v) \}\n" +
+           "        case None \{ return Err(e) \}\n" +
+           "    \}\n" +
+           "\}\n" +
+           "fn map<T, U>(o: Option<T>, f: fn(T) -> U) -> Option<U> \{\n" +
+           "    match o \{\n" +
+           "        case Some(v) \{ return Some(f(v)) \}\n" +
+           "        case None \{ return None \}\n" +
+           "    \}\n" +
+           "\}\n" +
+           "fn and_then<T, U>(o: Option<T>, f: fn(T) -> Option<U>) -> Option<U> \{\n" +
+           "    match o \{\n" +
+           "        case Some(v) \{ return f(v) \}\n" +
+           "        case None \{ return None \}\n" +
+           "    \}\n" +
            "\}\n"
 }
 
@@ -133,11 +151,22 @@ fn collect_idents(sources: [string]) -> [string] {
             if ti >= toks.len() {
                 break
             }
-            match toks[ti].kind {
-                case TIdent {
-                    out.append(toks[ti].text)
-                }
-                case _ {
+            // Only a CALL-POSITION identifier (immediately followed by `(` — a free call `f(…)` or a
+            // method/UFCS call `x.f(…)`) gates injection, so a combinator NAME used as a variable / struct
+            // field (`s.map`) / type is not a false hit. Mirrors stage-0's nameset_collect.
+            if ti + 1 < toks.len() {
+                match toks[ti].kind {
+                    case TIdent {
+                        match toks[ti + 1].kind {
+                            case TLParen {
+                                out.append(toks[ti].text)
+                            }
+                            case _ {
+                            }
+                        }
+                    }
+                    case _ {
+                    }
                 }
             }
             ti = ti + 1
