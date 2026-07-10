@@ -1783,6 +1783,9 @@ struct CgcGen {
     fn_ret_struct: [int]       // ...for a value-struct-returning fn: the struct sid (so `let p = f()` is an em_s), else -1
     fn_ret_enum: [bool]        // ...does each fn return an enum (a `let o = f()` OWNED refcounted binding)?
     consts: ConstTab           // module-level `let NAME: int = <literal>` folded constants (TAG_*), inlined by emit_expr
+    cur_gopt: [string]         // param names whose type is a GENERIC Option/Result (Some/Ok payload is an erased
+                               // type param T) — so a `case Some(v)` payload binds as a refcounted borrow
+                               // (own_into_slot on return), matching stage-0's erased-generic ownership (OFI-205)
 
 
     fn fresh_var(mut self) -> int {
@@ -1850,6 +1853,30 @@ struct CgcGen {
             i = i - 1
         }
         return false
+    }
+
+
+    // subject_is_gopt reports whether a match scrutinee is a GENERIC Option/Result param (recorded in cur_gopt),
+    // so its `case Some(v)` / `case Ok(v)` payload binds an erased T — a refcounted borrow (OFI-205).
+    fn subject_is_gopt(self, e: ps.Expr) -> bool {
+        match e {
+            case EIdent(name) {
+                var i = 0
+                loop {
+                    if i >= self.cur_gopt.len() {
+                        break
+                    }
+                    if self.cur_gopt[i] == name {
+                        return true
+                    }
+                    i = i + 1
+                }
+                return false
+            }
+            case _ {
+                return false
+            }
+        }
     }
 
 
@@ -3719,6 +3746,11 @@ struct CgcGen {
     // struct element (em_index materialises/borrows the record), a literal, or a fresh owned temp go as-is.
     fn ret_owns(self, e: ps.Expr) -> bool {
         match e {
+            case EIdent(name) {
+                // A refcounted BORROW binding — an enum payload, or an erased generic-`T` param/payload (OFI-205) —
+                // is own_into_slot'd on return (a retain balanced by the owner's drop), matching stage-0.
+                return self.lookup_refc(name)
+            }
             case EGet(object, name) {
                 let osid = self.struct_sid_any(object.value)
                 if osid >= 0 {
@@ -4175,8 +4207,8 @@ struct CgcGen {
                                 pek = self.en.payload_elem(cases[ci].pattern.variant, bi)
                             }
                             self.push(cases[ci].pattern.bindings[bi], "v{bv}", 0 - 1, false, false, pa, pek)   // a borrowed payload field (array-aware)
-                            if self.en.payload_refc(cases[ci].pattern.variant, bi) {
-                                self.set_last_refc(true)      // a refcounted (string/enum) payload → own_into_slot on consume
+                            if self.en.payload_refc(cases[ci].pattern.variant, bi) || self.subject_is_gopt(value.value) {
+                                self.set_last_refc(true)      // a refcounted (string/enum) payload, OR an erased generic-Option<T> payload (OFI-205) → own_into_slot on consume
                             }
                             if pa {
                                 // a `[Struct]` / `[Box<T>]` payload: resolve the element struct sid via sid_of_ty
@@ -4592,8 +4624,55 @@ fn is_enum_ty(ty: ps.Ty, en: EnumTab) -> bool {
 }
 
 
+// ty_is_generic_param reports whether type `ty` is a bare reference to one of the enclosing function's type
+// parameters (`T` in `fn f<T>(x: T)`). Such an ERASED value is refcount-of-unknown-type: stage-0 own_into_slots
+// it on return / consume (a retain balanced by the owner's drop), so the self-host must mark it a refcounted
+// borrow to match byte-for-byte (OFI-205).
+fn ty_is_generic_param(ty: ps.Ty, generics: [ps.GenericParam]) -> bool {
+    match ty {
+        case TyName(qual, name) {
+            var i = 0
+            loop {
+                if i >= generics.len() {
+                    break
+                }
+                if generics[i].name == name {
+                    return true
+                }
+                i = i + 1
+            }
+            return false
+        }
+        case _ {
+            return false
+        }
+    }
+}
+
+
+// enum_payload_generic reports whether `ty` is a GENERIC Option/Result whose payload is a bare type parameter
+// (`Option<T>` / `Result<T, E>`) — so a `case Some(v)`/`case Ok(v)` on a subject of this type binds an erased T
+// (own_into_slot on return), UNLIKE a concrete `Option<int>` (a scalar payload, plain retain-dance).
+fn enum_payload_generic(ty: ps.Ty, generics: [ps.GenericParam]) -> bool {
+    match ty {
+        case TyGeneric(qual, name, args) {
+            if name == "Option" && args.len() > 0 {
+                return ty_is_generic_param(args[0], generics)
+            }
+            if name == "Result" && args.len() > 0 {
+                return ty_is_generic_param(args[0], generics)
+            }
+            return false
+        }
+        case _ {
+            return false
+        }
+    }
+}
+
+
 fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_ret_kind: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab) {
-    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_struct: [], sc_refc: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts }
+    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_struct: [], sc_refc: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [] }
     var ai = 0
     if has_self {
         g.push("self", "a0", 0 - 1, false, false, false, 0 - 1)
@@ -4637,6 +4716,17 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: Stru
             }
             if pesid >= 0 {
                 g.set_last_elem_struct(pesid)     // struct-array param → `a[i]` types as a boxed struct
+            }
+            if f.params[p].ty.len() > 0 {
+                // An erased generic-`T` param (`d: T`) is a refcounted borrow — own_into_slot on return (OFI-205).
+                if ty_is_generic_param(f.params[p].ty[0], f.generics) {
+                    g.set_last_refc(true)
+                }
+                // A generic Option/Result param (`o: Option<T>`) — record it so `case Some(v)`/`case Ok(v)` on it
+                // binds its erased payload as a refcounted borrow too.
+                if enum_payload_generic(f.params[p].ty[0], f.generics) {
+                    g.cur_gopt.append(f.params[p].name)
+                }
             }
             ai = ai + 1
         }

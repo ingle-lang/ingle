@@ -9,6 +9,7 @@
 
 import "parser" as ps
 import "serialize" as sz
+import "lexer" as lex
 
 
 // Loaded is the merged program plus, parallel to it, the source file each declaration came from (so a
@@ -76,6 +77,127 @@ fn seen_has(seen: [string], p: string) -> bool {
 }
 
 
+// prelude_src is stage-0's PRELUDE_SOURCE (src/main.c), byte-for-byte, so an injected combinator parses at the
+// same source lines as stage-0. Only the combinator DECL_FNs are injected; the enums are line-positioning
+// (Option/Result stay out of the enum table — the OFI-204 fallback). Braces are `\{`/`\}`.
+fn prelude_src() -> string {
+    return "enum Option<T> \{\n" +
+           "    Some(value: T)\n" +
+           "    None\n" +
+           "\}\n" +
+           "enum Result<T, E> \{\n" +
+           "    Ok(value: T)\n" +
+           "    Err(error: E)\n" +
+           "\}\n" +
+           "interface Hash \{\n" +
+           "    fn hash(self) -> int\n" +
+           "\}\n" +
+           "interface Eq \{\n" +
+           "    fn eq(self, other: Self) -> bool\n" +
+           "\}\n" +
+           "interface Show \{\n" +
+           "    fn show(self) -> string\n" +
+           "\}\n" +
+           "fn is_some<T>(o: Option<T>) -> bool \{\n" +
+           "    match o \{\n" +
+           "        case Some(v) \{ return true \}\n" +
+           "        case None \{ return false \}\n" +
+           "    \}\n" +
+           "\}\n" +
+           "fn is_none<T>(o: Option<T>) -> bool \{\n" +
+           "    match o \{\n" +
+           "        case Some(v) \{ return false \}\n" +
+           "        case None \{ return true \}\n" +
+           "    \}\n" +
+           "\}\n" +
+           "fn unwrap_or<T: Copy>(o: Option<T>, d: T) -> T \{\n" +
+           "    match o \{\n" +
+           "        case Some(v) \{ return v \}\n" +
+           "        case None \{ return d \}\n" +
+           "    \}\n" +
+           "\}\n" +
+           "fn is_ok<T, E>(r: Result<T, E>) -> bool \{\n" +
+           "    match r \{\n" +
+           "        case Ok(v) \{ return true \}\n" +
+           "        case Err(e) \{ return false \}\n" +
+           "    \}\n" +
+           "\}\n" +
+           "fn is_err<T, E>(r: Result<T, E>) -> bool \{\n" +
+           "    match r \{\n" +
+           "        case Ok(v) \{ return false \}\n" +
+           "        case Err(e) \{ return true \}\n" +
+           "    \}\n" +
+           "\}\n"
+}
+
+
+// collect_idents returns every IDENTIFIER lexeme across the user sources (comments/strings never reach the
+// token stream, so a combinator mentioned in a comment is not a false hit) — mirrors stage-0's NameSet.
+fn collect_idents(srcs: [string]) -> [string] {
+    var out: [string] = []
+    var si = 0
+    loop {
+        if si >= srcs.len() {
+            break
+        }
+        let toks = lex.lex(srcs[si])
+        var ti = 0
+        loop {
+            if ti >= toks.len() {
+                break
+            }
+            match toks[ti].kind {
+                case TIdent {
+                    out.append(toks[ti].text)
+                }
+                case _ {
+                }
+            }
+            ti = ti + 1
+        }
+        si = si + 1
+    }
+    return out
+}
+
+
+fn name_used(names: [string], n: string) -> bool {
+    var i = 0
+    loop {
+        if i >= names.len() {
+            break
+        }
+        if names[i] == n {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+
+// declares_fn — a user's own `unwrap_or`/… shadows the prelude combinator (mirrors stage-0's program_declares_fn).
+fn declares_fn(decls: [ps.Decl], n: string) -> bool {
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.name == n {
+                    return true
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+
 fn load_modules(entry: string) -> Loaded {
     var seen: [string] = []
     var queue: [string] = []
@@ -85,6 +207,7 @@ fn load_modules(entry: string) -> Loaded {
     var imp_from: [int] = []
     var imp_alias: [string] = []
     var imp_to: [int] = []
+    var src_texts: [string] = []    // each module's source text, for the combinator usage gate
     seen.append(entry)
     queue.append(entry)
     var qi = 0
@@ -92,7 +215,9 @@ fn load_modules(entry: string) -> Loaded {
         if qi >= queue.len() {
             break
         }
-        let decls = ps.parse(read_file(queue[qi]))
+        let src = read_file(queue[qi])
+        let decls = ps.parse(src)
+        src_texts.append(src)
         var di = 0
         loop {
             if di >= decls.len() {
@@ -138,6 +263,30 @@ fn load_modules(entry: string) -> Loaded {
             ii = ii + 1
         }
         qi = qi + 1
+    }
+    // Inject each referenced prelude combinator (usage-gated + shadow-guarded), appended after all user decls
+    // in a synthetic prelude module (queue.len()); its per-decl source path is "<prelude>" so the serialized
+    // .igb's per-function source_file matches stage-0's prelude module (src/main.c).
+    let used = collect_idents(src_texts)
+    let pdecls = ps.parse(prelude_src())
+    let pmod = queue.len()
+    var pi = 0
+    loop {
+        if pi >= pdecls.len() {
+            break
+        }
+        match pdecls[pi] {
+            case DFn(f) {
+                if name_used(used, f.name) && declares_fn(combined, f.name) == false {
+                    combined.append(pdecls[pi])
+                    sources.append("<prelude>")
+                    mod_of.append(pmod)
+                }
+            }
+            case _ {
+            }
+        }
+        pi = pi + 1
     }
     return Loaded { decls: combined, sources: sources, mod_of: mod_of, imp_from: imp_from, imp_alias: imp_alias, imp_to: imp_to }
 }
