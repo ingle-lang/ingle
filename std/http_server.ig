@@ -250,6 +250,13 @@ fn not_found(conn: Conn, body: string) -> int {
 }
 
 
+// redirect sends a 303 See Other to `location` — the POST-redirect-GET pattern after a form action, so
+// a refresh doesn't re-submit.
+fn redirect(conn: Conn, location: string) -> int {
+    return em_send(conn.fd, "HTTP/1.1 303 See Other\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".bytes())
+}
+
+
 // --- client side: a minimal HTTP/1.1 client over the same sockets, for Quog's sync transport. All
 // byte-level, because responses carry binary object data. ------------------------------------------
 

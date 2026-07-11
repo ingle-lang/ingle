@@ -1209,23 +1209,178 @@ fn cmd_push(argv: [string]) -> Result<int, string> {
 }
 
 
-// serve_log renders the branch history as an HTML page — each commit a link to its detail page.
-fn serve_log(db: sql.Db, conn: hs.Conn) -> Result<int, string> {
-    var md = "# Quog — history\n\n[verify integrity](/verify) · branch `" + head_branch(db)? + "`\n\n"
-    var id = get_ref(db, tip_ref(db)?)?
-    if id == "" {
-        md = md + "_No saves yet._\n"
-    } else {
-        loop {
-            if id == "" {
-                break
-            }
-            let text = from_bytes(get_object(db, id)?)
-            md = md + "- [`" + _short(id) + "`](/commit/" + id + ") — " + commit_message(text) + "\n"
-            id = commit_header(text, "parent ")
+// _hexval returns the 0–15 value of a hex digit byte, or -1.
+fn _hexval(c: u8) -> int {
+    if c >= 48u8 && c <= 57u8 {
+        return i64(c) - 48
+    }
+    if c >= 97u8 && c <= 102u8 {
+        return i64(c) - 87
+    }
+    if c >= 65u8 && c <= 70u8 {
+        return i64(c) - 55
+    }
+    return -1
+}
+
+
+// _url_decode decodes application/x-www-form-urlencoded text: '+' becomes a space, %XX becomes its byte.
+fn _url_decode(s: string) -> string {
+    var out: [u8] = []
+    let bs = s.bytes()
+    var i = 0
+    loop {
+        if i >= bs.len() {
+            break
+        }
+        let c = bs[i]
+        if c == 43u8 {
+            out.append(32u8)
+            i = i + 1
+        } else if c == 37u8 && i + 2 < bs.len() && _hexval(bs[i + 1]) >= 0 && _hexval(bs[i + 2]) >= 0 {
+            out.append(u8(_hexval(bs[i + 1]) * 16 + _hexval(bs[i + 2])))
+            i = i + 3
+        } else {
+            out.append(c)
+            i = i + 1
         }
     }
-    let _ = hs.ok_html(conn, html.page("Quog — history", html.render_markdown(md)))
+    return from_bytes(out)
+}
+
+
+// _form_value extracts and decodes a field from a urlencoded POST body ("a=1&b=hi+there"), or "".
+fn _form_value(body: [u8], key: string) -> string {
+    for pair in from_bytes(body).split("&") {
+        let eq = str.index_of(pair, "=")
+        if eq >= 0 && str.substring(pair, 0, eq) == key {
+            return _url_decode(str.substring(pair, eq + 1, str.cp_count(pair)))
+        }
+    }
+    return ""
+}
+
+
+// status_html renders the working-tree changes as <li> items (added / modified / deleted).
+fn status_html(db: sql.Db) -> Result<string, string> {
+    let old_tree = tree_map(tip_tree_text(db)?)
+    let new_tree = tree_map(scan(".", ""))
+    var h = ""
+    for path in new_tree.keys() {
+        let was = map_get(old_tree, path)
+        if was == "" {
+            h = h + "<li>added <code>" + html.escape(path) + "</code></li>"
+        } else if was != map_get(new_tree, path) {
+            h = h + "<li>modified <code>" + html.escape(path) + "</code></li>"
+        }
+    }
+    for path in old_tree.keys() {
+        if !new_tree.has(path) {
+            h = h + "<li>deleted <code>" + html.escape(path) + "</code></li>"
+        }
+    }
+    return Ok(h)
+}
+
+
+// history_html renders the current branch's commits as linked <li> items.
+fn history_html(db: sql.Db) -> Result<string, string> {
+    var id = get_ref(db, tip_ref(db)?)?
+    if id == "" {
+        return Ok("<li><em>no saves yet</em></li>")
+    }
+    var h = ""
+    loop {
+        if id == "" {
+            break
+        }
+        let text = from_bytes(get_object(db, id)?)
+        h = h + "<li><a href=\"/commit/" + id + "\"><code>" + _short(id) + "</code></a> — " + html.escape(commit_message(text)) + "</li>"
+        id = commit_header(text, "parent ")
+    }
+    return Ok(h)
+}
+
+
+// serve_dashboard is the interactive home page — it DRIVES the repo: save uncommitted changes, discard
+// them, create/switch branches, undo, all via POST forms, plus the browsable history.
+fn serve_dashboard(db: sql.Db, conn: hs.Conn) -> Result<int, string> {
+    let branch = head_branch(db)?
+    var h = "<h1>Quog</h1><p>on branch <strong>" + html.escape(branch) + "</strong> &middot; <a href=\"/verify\">verify integrity</a></p>"
+    if is_dirty(db)? {
+        h = h + "<h2>Uncommitted changes</h2><ul>" + status_html(db)? + "</ul>"
+        h = h + "<form method=\"post\" action=\"/action/save\"><input name=\"message\" placeholder=\"describe the change\" required> <button>Save</button></form>"
+        h = h + "<form method=\"post\" action=\"/action/discard\"><button>Discard to attic</button></form>"
+    } else {
+        h = h + "<p><em>working tree clean</em></p>"
+    }
+    h = h + "<h2>Branches</h2><ul>"
+    let bs = sql.prepare(db, "SELECT name FROM ref WHERE name LIKE 'branch:%' ORDER BY name")?
+    loop {
+        let more = sql.step(bs)?
+        if !more {
+            break
+        }
+        let full = sql.column_text(bs, 0)
+        let bname = str.substring(full, 7, str.cp_count(full))
+        if bname == branch {
+            h = h + "<li><strong>" + html.escape(bname) + "</strong> (current)</li>"
+        } else {
+            h = h + "<li>" + html.escape(bname) + " <form class=\"inline\" method=\"post\" action=\"/action/switch\"><input type=\"hidden\" name=\"branch\" value=\"" + html.escape(bname) + "\"><button>switch</button></form></li>"
+        }
+    }
+    h = h + "</ul>"
+    h = h + "<form method=\"post\" action=\"/action/branch\"><input name=\"name\" placeholder=\"new branch name\" required> <button>Create branch</button></form>"
+    h = h + "<form method=\"post\" action=\"/action/undo\"><button>Undo last operation</button></form>"
+    h = h + "<h2>History</h2><ul>" + history_html(db)? + "</ul>"
+    let _ = hs.ok_html(conn, html.page("Quog — " + branch, h))
+    return Ok(0)
+}
+
+
+// The action handlers run a command from a POST form, then redirect back to the dashboard (POST-
+// redirect-GET). They call the CLI commands, which snapshot / mutate the SERVER's working tree (serve
+// runs in the repo), so the browser drives the same repo the CLI does.
+fn action_save(conn: hs.Conn, body: [u8]) -> Result<int, string> {
+    let msg = _form_value(body, "message")
+    if msg != "" {
+        let _ = cmd_save(msg)?
+    }
+    let _ = hs.redirect(conn, "/")
+    return Ok(0)
+}
+
+
+fn action_branch(conn: hs.Conn, body: [u8]) -> Result<int, string> {
+    let name = _form_value(body, "name")
+    if name != "" {
+        let _ = cmd_branch(["branch", name])?
+    }
+    let _ = hs.redirect(conn, "/")
+    return Ok(0)
+}
+
+
+fn action_switch(conn: hs.Conn, body: [u8]) -> Result<int, string> {
+    let branch = _form_value(body, "branch")
+    if branch != "" {
+        let _ = cmd_switch(["switch", branch])?
+    }
+    let _ = hs.redirect(conn, "/")
+    return Ok(0)
+}
+
+
+fn action_discard(conn: hs.Conn) -> Result<int, string> {
+    let _ = cmd_discard()?
+    let _ = hs.redirect(conn, "/")
+    return Ok(0)
+}
+
+
+fn action_undo(conn: hs.Conn) -> Result<int, string> {
+    let _ = cmd_undo()?
+    let _ = hs.redirect(conn, "/")
     return Ok(0)
 }
 
@@ -1425,11 +1580,35 @@ fn serve_commit(db: sql.Db, conn: hs.Conn, id: string) -> Result<int, string> {
 }
 
 
-// route dispatches a request to the handler that serves it. POST goes to the sync push endpoints;
-// everything else is a read-only GET (the web view + sync fetch).
-fn route(db: sql.Db, conn: hs.Conn, req: hs.Request) -> Result<int, string> {
+// route dispatches a request. POST /action/* drives the repo from the web UI (allowed on loopback —
+// the owner — but token-gated on a public server); POST /sync/* is the token-gated push; everything
+// else is a read-only GET (the web view + sync fetch).
+fn route(db: sql.Db, conn: hs.Conn, req: hs.Request, public: bool) -> Result<int, string> {
     let path = req.path
     if req.method == "POST" {
+        if str.starts_with(path, "/action/") {
+            if public && !authorized(db, req.token)? {
+                let _ = hs.respond(conn, 401, "Unauthorized", "text/plain", "actions require a token on a public server")
+                return Ok(0)
+            }
+            if path == "/action/save" {
+                return action_save(conn, req.body)
+            }
+            if path == "/action/branch" {
+                return action_branch(conn, req.body)
+            }
+            if path == "/action/switch" {
+                return action_switch(conn, req.body)
+            }
+            if path == "/action/discard" {
+                return action_discard(conn)
+            }
+            if path == "/action/undo" {
+                return action_undo(conn)
+            }
+            let _ = hs.not_found(conn, "unknown action")
+            return Ok(0)
+        }
         if !authorized(db, req.token)? {
             let _ = hs.respond(conn, 401, "Unauthorized", "text/plain",
                 "push requires a token: set one on the server with 'quog auth <token>', then pass it via QUOG_TOKEN")
@@ -1445,7 +1624,7 @@ fn route(db: sql.Db, conn: hs.Conn, req: hs.Request) -> Result<int, string> {
         return Ok(0)
     }
     if path == "/" {
-        return serve_log(db, conn)
+        return serve_dashboard(db, conn)
     }
     if path == "/verify" {
         return serve_verify(db, conn)
@@ -1477,7 +1656,7 @@ fn serve_loop(db: sql.Db, server: hs.Server, port: int, public: bool) -> Result<
             case Ok(conn) {
                 match hs.read_request(conn) {
                     case Ok(req) {
-                        let _ = route(db, conn, req)
+                        let _ = route(db, conn, req, public)
                     }
                     case Err(e) {}
                 }

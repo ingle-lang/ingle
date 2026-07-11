@@ -24,8 +24,10 @@ fn _css() -> string {
     "ul\{margin:0 0 1em;padding-left:1.4em\}li\{margin:.2em 0\}" +
     "table\{border-collapse:collapse;width:100%;margin:0 0 1em\}th,td\{border:1px solid #ddd;padding:.5em .7em;text-align:left\}th\{background:#f6f6f8\}" +
     "pre.diff\{line-height:1.45\}pre.diff span\{display:block;white-space:pre\}.diff .add\{background:#e6ffed;color:#22863a\}.diff .rem\{background:#ffeef0;color:#b31d28\}" +
+    "form\{margin:.6em 0\}form.inline\{display:inline;margin:0\}button\{font:inherit;padding:.35em .8em;border:1px solid #ccc;border-radius:6px;background:#f0f0f3;cursor:pointer\}button:hover\{background:#e4e4ea\}input\{font:inherit;padding:.35em .5em;border:1px solid #ccc;border-radius:6px\}" +
     "@media(prefers-color-scheme:dark)\{body\{color:#e6e6e6;background:#151517\}code,pre,th\{background:#26262b\}" +
     ".diff .add\{background:#0f2f1a;color:#56d364\}.diff .rem\{background:#3a1418;color:#f26d78\}" +
+    "button\{background:#26262b;border-color:#3a3a42;color:#e6e6e6\}button:hover\{background:#33333a\}input\{background:#1c1c20;border-color:#3a3a42;color:#e6e6e6\}" +
     "a\{color:#5ab0ff\}blockquote\{border-left-color:#3a3a42;color:#aaa\}th,td\{border-color:#33333a\}\}"
 }
 
