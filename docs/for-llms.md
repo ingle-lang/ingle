@@ -44,6 +44,9 @@ the fragments above it are extracted from programs that do.
 | `Shape.Origin` / `Shape::Origin` | `Origin` | enum variants are referenced **bare** (a qualified form also parses) |
 | assuming `Circle(radius: 2.0)` is illegal | `Circle(2.0)` **or** `Circle(radius: 2.0)` | enum variants construct **positionally or by field name** (named mirrors a struct literal) — both are valid |
 | `use std::x`, `from x import y`, `import x` | `import "std/string" as str` | imports are a **quoted path** with an `as` alias |
+| `x = x + 1` for every update | `x += 1` (also `-= *= /= %= &= |= ^=`) | compound assignment exists; **no `<<=` / `>>=`** |
+| `0x`/`0b`/`0o` or `_` unsupported | `0xFF`, `0b1010`, `0o17`, `1_000_000` | hex/binary/octal literals + `_` digit separators; a leading `0` is **decimal**, not octal |
+| `unwrap_or(o, 0)` (free fn only) | also `o.unwrap_or(0)` | UFCS: a free fn can be called method-style **on an enum or scalar** receiver (not string/array/struct) |
 
 ## Structs, methods, interfaces — no `impl` blocks
 
@@ -92,6 +95,11 @@ fn area(s: Shape) -> float {
 }
 ```
 
+**Richer patterns:** literal (`case 0` / `case "q"` / `case true`), or-pattern (`case 1 | 2 | 3`),
+guard (`case n if n < 0` — doesn't count toward exhaustiveness on its own), and one-level nesting
+(`case Some(Point(x, y))`, `case Some(Ok(v))`). Matching an `int`/`string` needs a `case _`; a `bool`
+is covered by `true` + `false`. Deeper than one level: `match` again inside the arm.
+
 ## Option instead of null
 
 ```ember
@@ -100,6 +108,16 @@ match o {
     case Some(v) { println("got {v}") }
     case None    { println("empty") }
 }
+```
+
+The prelude provides **combinators**, callable method-style (UFCS) on an `Option`/`Result`:
+`is_some`/`is_none`, `is_ok`/`is_err`, `unwrap_or(default)`, `map(f)`, `and_then(f)`, `ok_or(err)`.
+`map`/`and_then` take a function — a named fn or a lambda. (There is **no `unwrap`/`expect`** yet.)
+
+```ember
+let a: Option<int> = Some(5)
+println(a.unwrap_or(0))                  // 5, or the default if None
+println(a.map(|x| x * 2).unwrap_or(0))   // 10
 ```
 
 ## Concurrency: nursery, spawn, channels

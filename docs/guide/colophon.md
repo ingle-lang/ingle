@@ -50,6 +50,14 @@ A July 2026 pass re-ran the book's error examples against the current compiler �
 still showed the old single-line `runtime error:` now show the structured **fault** the VM
 produces today — and settled the reader-facing text on the **Ingle** name.
 
+A further July 2026 pass folded in the **ergonomics campaign**: **compound assignment** (`x += 1`
+and the rest), **non-decimal integer literals** (`0xFF` / `0b1010` / `0o17`) with **`_` digit
+separators**, richer **pattern matching** (literal patterns, `|` or-patterns, `if` guards, and
+one-level nested destructuring like `case Some(Point(x, y))`), **method-style calls on enums and
+scalars** (`o.unwrap_or(0)` is `unwrap_or(o, 0)`), and the **`Option`/`Result` combinators** —
+`is_some`/`is_none`/`is_ok`/`is_err`, `unwrap_or`, `map`, `and_then`, `ok_or` — provided as ordinary
+prelude functions.
+
 Ingle will have grown since you read this. Treat the *spirit* — safe by default, simple by
 default, fast to build, honest about its edges — as the durable part, and check the current
 spec and examples for the details. The fire's only just been lit.

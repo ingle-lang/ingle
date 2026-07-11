@@ -364,6 +364,10 @@ count = count + 1    // ...like so
 `let` is **immutable**. Once bound, it stays bound. `var` is **mutable**; you can reassign it
 as often as you like. Two short words, one each, no modifiers to forget.
 
+For the common "update in place," the **compound assignment** operators are shorthand: `count += 1`
+is exactly `count = count + 1`. The set is `+=`, `-=`, `*=`, `/=`, `%=`, and the bitwise `&=`, `|=`,
+`^=`.
+
 If you try to reassign a `let`, the compiler stops you — and, importantly, it tells you
 exactly how to fix it:
 
@@ -479,6 +483,30 @@ let big: i64 = 42   // the same thing, spelled out
 let small: u8 = 200 // an 8-bit unsigned byte
 let x = 200u8       // or pin the width with a suffix
 ```
+
+Integers can be written in **other bases**, and long numbers grouped with underscores for
+legibility — the `_`s are purely visual and change nothing:
+
+```ember
+fn main() -> int {
+    let hex = 0xFF          // 255
+    let bin = 0b1010        // 10
+    let oct = 0o17          // 15
+    let million = 1_000_000 // underscores just group digits
+    println(hex + bin + oct)
+    println(million)
+    return 0
+}
+```
+
+```
+280
+1000000
+=> 0
+```
+
+(A leading zero is *not* octal — `010` is ten, not eight; Ingle sidesteps that old C footgun. Write
+`0o` when you mean octal.)
 
 Two rules will save you a great deal of confusion:
 
@@ -766,6 +794,43 @@ quietly hands back `0`.
 > single, contentless value — there's nothing to choose, so there's nothing to say. "Void"
 > and "unit" are the same idea wearing different hats: one borrowed from C's bookkeeping, the
 > other from mathematics' tidy bookkeeping.
+
+### Calling a function method-style
+
+For a value that has no methods of its own — an **enum** or a **scalar** (`int`, `bool`, `float`)
+— you may write a call the other way round, putting the first argument in front with a dot.
+`name(c)` and `c.name()` are the same call:
+
+```ember
+enum Color { Red  Green  Blue }
+
+fn name(c: Color) -> string {
+    match c {
+        case Red   { return "red" }
+        case Green { return "green" }
+        case Blue  { return "blue" }
+    }
+}
+
+fn triple(x: int) -> int { return x * 3 }
+
+fn main() -> int {
+    println(Green.name())   // same as name(Green)
+    println(7.triple())     // same as triple(7)
+    return 0
+}
+```
+
+```
+green
+21
+=> 0
+```
+
+It's a reading convenience — no new function, no method — and it's what lets the `Option`/`Result`
+combinators in [Chapter 9](#chapter-9--errors-and-optionals) read so naturally (`o.unwrap_or(0)`).
+The rule is deliberately narrow: a **struct**, a **string**, and an **array** already have their
+own methods, so `x.f()` on those looks up *their* methods only — it won't reach for a free function.
 
 ---
 
@@ -1389,6 +1454,62 @@ Ingle switches off struct-literal syntax so that the `{` can unambiguously start
 you ever genuinely need a struct literal right there, wrap it in parentheses. In practice this
 almost never comes up, but now it won't puzzle you when it does.
 
+### Richer patterns
+
+`match` handles more than one-variant-per-arm. Four extras cover almost everything you'll reach for:
+
+- **Literal patterns** — match a concrete `int`, `string`, or `bool`: `case 0`, `case "quit"`,
+  `case true`.
+- **Or-patterns** — one arm for several possibilities with `|`: `case 1 | 2 | 3`.
+- **Guards** — an extra condition with `if`: `case n if n < 0`. A guarded arm fires only when the
+  condition holds, so on its own it doesn't count toward exhaustiveness.
+- **One-level nesting** — destructure a variant's payload in place: `case Some(Point(x, y))` binds the
+  point's fields directly, and `case Some(Ok(v))` reaches through two enum layers at once.
+
+```ember
+struct Point { x: int  y: int }
+
+fn describe(n: int) -> string {
+    match n {
+        case 0           { return "zero" }
+        case 1 | 2 | 3   { return "small" }
+        case n if n < 0  { return "negative" }
+        case _           { return "big" }
+    }
+}
+
+fn corner(o: Option<Point>) -> int {
+    match o {
+        case Some(Point(x, y)) { return x + y }   // reach right into the payload
+        case None              { return 0 }
+    }
+}
+
+fn main() -> int {
+    println(describe(0))
+    println(describe(2))
+    println(describe(0 - 5))
+    println(describe(100))
+    println(corner(Some(Point { x: 3, y: 4 })))
+    println(corner(None))
+    return 0
+}
+```
+
+```
+zero
+small
+negative
+big
+7
+0
+=> 0
+```
+
+Exhaustiveness still holds throughout: matching on an `int` or `string` needs a `case _` (there are
+too many values to list), a `bool` is covered by `true` + `false`, and nesting is one level deep — for
+anything deeper, `match` again inside the arm.
+
 > **Fireside trivia.** Sum types — the formal name for these — are decades old (ML had them
 > in the 1970s) and spent a long time confined to academic and functional languages while the
 > mainstream made do with null and inheritance. Their slow conquest of industry is one of the
@@ -1477,6 +1598,54 @@ The catch — and it's a sensible one — is that `?` can only propagate a failu
 declared to return. Use `?` on a `Result<_, string>` and your function must itself return a
 `Result` with that same `string` error type; use it on an `Option` and your function must
 return an `Option`. The failure always has somewhere legal to go.
+
+### Combinators: the common moves, named
+
+Matching is always available, but for the everyday shapes there are shorter names — small
+functions provided to every program, like the enums themselves. And because you can call a free
+function method-style on an enum like `Option` — `a.unwrap_or(0)` is exactly `unwrap_or(a, 0)`
+written the other way round ([Chapter 4](#chapter-4--functions)) — they read as if they were
+methods on the value:
+
+```ember
+fn double(x: int) -> int { return x * 2 }
+
+fn main() -> int {
+    let a: Option<int> = Some(21)
+    let nothing: Option<int> = None
+
+    println(a.unwrap_or(0))              // the value, or a default if None
+    println(nothing.unwrap_or(99))       // 99 — nothing to unwrap
+    println(a.map(double).unwrap_or(0))  // transform the value, then unwrap
+
+    if a.is_some() { println("has a value") }
+
+    match a.ok_or("was empty") {         // turn an Option into a Result
+        case Ok(v)  { return v }
+        case Err(e) { return -1 }
+    }
+}
+```
+
+```
+21
+99
+42
+has a value
+=> 21
+```
+
+The set, all callable method-style on the value:
+
+- `is_some` / `is_none` — is there a value? (`is_ok` / `is_err` for a `Result`.)
+- `unwrap_or(default)` — the value, or `default` if it's `None`.
+- `map(f)` — apply `f` to the value if present, giving a new `Option`; a `None` stays `None`.
+- `and_then(f)` — like `map`, but `f` itself returns an `Option`, so the results don't nest.
+- `ok_or(err)` — turn `Some(v)` into `Ok(v)`, and `None` into `Err(err)`.
+
+The function you hand to `map`/`and_then` can be a named function or a lambda (`a.map(|x| x * 2)`
+— Chapter 11). And since these are ordinary functions, nothing stops you defining your own
+`unwrap_or` — yours quietly wins over the built-in one.
 
 > **Fireside trivia.** Tony Hoare introduced the null reference in 1965 and later called it
 > his "billion-dollar mistake," estimating the cost of the bugs, crashes, and security holes
@@ -3368,15 +3537,18 @@ Everything that runs today, compressed. (Keep the earlier chapters for the *why*
 ```ember
 // --- bindings ---
 let x = 5              // immutable
-var y = 0             // mutable; y = y + 1
+var y = 0             // mutable; y = y + 1  (or y += 1; also -= *= /= %= &= |= ^=)
 let TOP = 800         // top-level let = compile-time constant (literal only)
 
 // --- functions ---
 fn add(a: int, b: int) -> int { return a + b }
 fn greet(name: string) { println(name) }   // no '-> T' = unit (returns nothing)
+c.name()  7.triple()  // UFCS: call a free fn method-style on an enum/scalar (not string/array/struct)
 
 // --- numbers ---  int=i64, float=f64; also i8..i64, u8..u64, f32/f64
 let a: u8 = 200       // or 200u8
+let h = 0xFF  let bn = 0b1010  let oc = 0o17   // hex / binary / octal literals (leading 0 is NOT octal)
+let m = 1_000_000                              // _ digit separators, visual only
 let f = to_float(a)   // int -> float; to_int(f) truncates
 let g = u8(300)       // range-checked conversion; out of range -> runtime trap
 // no implicit coercion; integer overflow traps; % needs integers
@@ -3432,10 +3604,17 @@ match s {
     case Rect(w, h) { }
     case _          { }      // catch-all, must be last
 }
+// richer patterns:  case 0 / "q" / true (literals)   case 1 | 2 | 3 (or-pattern)
+//                   case n if n < 0 (guard; doesn't cover alone)
+//                   case Some(Point(x, y)) / case Some(Ok(v))  (one-level nested destructure)
 
 // --- errors / optionals ---  (no exceptions, no null; from the prelude)
 fn f(n: int) -> Result<int, string> { if n < 0 { return Err("neg") }  return Ok(n) }
 let v = f(3)?                       // unwrap Ok/Some, or return the Err/None early
+// combinators (method-style via UFCS on an Option/Result):
+a.is_some()  a.is_none()  r.is_ok()  r.is_err()        // -> bool
+a.unwrap_or(0)   // value, or default    a.ok_or("e")  // Option -> Result
+a.map(g)  a.and_then(h)             // g: fn(T)->U ;  h: fn(T)->Option<U>
 
 // --- generics ---
 struct Box<T> { value: T  fn get(self) -> T { return self.value } }
@@ -3975,6 +4154,14 @@ with itself.
 A July 2026 pass re-ran the book's error examples against the current compiler — three that
 still showed the old single-line `runtime error:` now show the structured **fault** the VM
 produces today — and settled the reader-facing text on the **Ingle** name.
+
+A further July 2026 pass folded in the **ergonomics campaign**: **compound assignment** (`x += 1`
+and the rest), **non-decimal integer literals** (`0xFF` / `0b1010` / `0o17`) with **`_` digit
+separators**, richer **pattern matching** (literal patterns, `|` or-patterns, `if` guards, and
+one-level nested destructuring like `case Some(Point(x, y))`), **method-style calls on enums and
+scalars** (`o.unwrap_or(0)` is `unwrap_or(o, 0)`), and the **`Option`/`Result` combinators** —
+`is_some`/`is_none`/`is_ok`/`is_err`, `unwrap_or`, `map`, `and_then`, `ok_or` — provided as ordinary
+prelude functions.
 
 Ingle will have grown since you read this. Treat the *spirit* — safe by default, simple by
 default, fast to build, honest about its edges — as the durable part, and check the current
