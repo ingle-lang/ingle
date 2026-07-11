@@ -87,6 +87,17 @@ fn set_ref(db: sql.Db, name: string, target: string) -> Result<int, string> {
 }
 
 
+// now returns the timestamp for commits and op-log entries — the wall clock, unless QUOG_NOW is set
+// (a fixed epoch value, like git's GIT_AUTHOR_DATE), in which case that is used so tests are reproducible.
+fn now() -> int {
+    let fixed = env("QUOG_NOW")
+    if fixed != "" {
+        return _atoi(fixed)
+    }
+    return time.now()
+}
+
+
 // log_op appends to the operation log — the append-only spine that makes every mutation undoable.
 // `before`/`after` capture the ref move so a future `undo` can restore the prior tip exactly.
 fn log_op(db: sql.Db, op: string, before: string, after: string) -> Result<int, string> {
@@ -94,7 +105,7 @@ fn log_op(db: sql.Db, op: string, before: string, after: string) -> Result<int, 
     let _ = sql.bind_text(st, 1, op)
     let _ = sql.bind_text(st, 2, before)
     let _ = sql.bind_text(st, 3, after)
-    let _ = sql.bind_int(st, 4, time.now())
+    let _ = sql.bind_int(st, 4, now())
     let _ = sql.step(st)?
     return Ok(0)
 }
@@ -218,7 +229,7 @@ fn cmd_save(message: string) -> Result<int, string> {
     let parent = get_ref(db, TIP_REF)?
     let tree_text = walk(db, ".", "")?
     let tree_id = put_object(db, "tree", tree_text.bytes())?
-    let commit = commit_serialize(tree_id, parent, time.now(), message)
+    let commit = commit_serialize(tree_id, parent, now(), message)
     let commit_id = put_object(db, "commit", commit.bytes())?
     let _ = set_ref(db, TIP_REF, commit_id)?
     let _ = log_op(db, "save", parent, commit_id)?

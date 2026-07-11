@@ -156,7 +156,7 @@ DEPS    := $(OBJECTS:.o=.d)
 GEN_BIN := build/gen_editor_assets
 GRAMMAR := editors/vscode/syntaxes/ember.tmLanguage.json
 
-.PHONY: all test test-update test-lsp doctor help release asan asan-par asan-trace install install-vscode build-zed install-zed parallel mn tsan-mn asan-mn mn-stress mn-graphics mn-net-graphics graphics net net-graphics db test-db test-graphics test-net test-parallel kernel test-kernel selfhost crucible ceilings ledger opcheck verify docs string-diff bench parbench gen-editor-assets check-editor-sync clean
+.PHONY: all test test-update test-lsp doctor help release asan asan-par asan-trace install install-vscode build-zed install-zed parallel mn tsan-mn asan-mn mn-stress mn-graphics mn-net-graphics graphics net net-graphics db test-db test-quog test-graphics test-net test-parallel kernel test-kernel selfhost crucible ceilings ledger opcheck verify docs string-diff bench parbench gen-editor-assets check-editor-sync clean
 
 all: $(BIN) $(RT_LIB) $(RT_LIB_PAR)
 
@@ -433,6 +433,11 @@ db: $(SQLITE_OBJ) | build
 # dependency-free `make test`; each case runs against a scratch DB under the system temp dir.
 test-db: db
 	@tests/run-db.sh
+
+# Quog integration test (public/quog) — dogfoods the CLI end to end against a golden transcript with a
+# fixed clock (QUOG_NOW). Needs the db build, so it is separate from the dependency-free `make test`.
+test-quog: db
+	@tests/run-quog.sh
 
 # Bare-metal kernel image (OFI-167 / kernel milestone 1). Uses the DEFAULT emberc with
 # `--emit=c --freestanding` (bare entry, no stdio/argv; main's int result = the exit code), then

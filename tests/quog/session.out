@@ -1,0 +1,36 @@
+$ quog init
+initialised empty Quog repo in .quog/
+=> 0
+$ quog save "initial import"
+saved 1b403862b3 (2 files) — initial import
+=> 0
+$ quog status
+clean — nothing changed since the last save
+=> 0
+$ quog status
+  modified  README.md
+  added     TODO.md
+=> 0
+$ quog diff
+=== README.md  (+2 -1) ===
+ alpha
+-beta
++BETA
+ gamma
++delta
+=== TODO.md  (+1 -0) ===
++notes
+=> 0
+$ quog save "edit readme, add todo"
+saved bc003bd838 (3 files) — edit readme, add todo
+=> 0
+$ quog log
+bc003bd838  t=1000000000  edit readme, add todo
+1b403862b3  t=1000000000  initial import
+=> 0
+$ quog undo
+undid save — tip bc003bd838 → 1b403862b3 (nothing lost)
+=> 0
+$ quog log
+1b403862b3  t=1000000000  initial import
+=> 0
