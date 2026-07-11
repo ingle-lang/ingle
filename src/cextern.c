@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>        // std/time: wall-clock seconds since the Unix epoch (time())
+#include <sys/stat.h>    // std/fs: mkdir() for repo layout (.quog/)
 #include <errno.h>       // std/proc: EAGAIN/EINTR on the non-blocking pipe drain
 #include <fcntl.h>       // std/proc: O_NONBLOCK on the capture pipes
 #include <poll.h>        // std/proc: drain stdout+stderr concurrently (no pipe-buffer deadlock)
@@ -146,6 +148,22 @@ static int w_fclose(const Value *a, Value *o) {
         return 1;
     }
     o[0] = INT_VAL((int64_t)fclose(f));
+    return 1;
+}
+
+// em_now_unix() -> int. Wall-clock time as whole seconds since the Unix epoch (time(NULL)) — for
+// commit / op-log timestamps. Nondeterministic; record/replay capture is the remainder of OFI-188.
+static int w_em_now_unix(const Value *a, Value *o) {
+    (void)a;
+    o[0] = INT_VAL((int64_t)time(NULL));
+    return 1;
+}
+
+// em_mkdir(path) -> int. Creates directory `path` (mode 0777, umask-masked). Returns 0 on success,
+// -1 on error (errno; EEXIST when it already exists, which a caller may treat as success). Part of
+// OFI-190 (the broader path/filesystem helper set is the remainder).
+static int w_em_mkdir(const Value *a, Value *o) {
+    o[0] = INT_VAL((int64_t)mkdir(AS_CSTRING(a[0]), 0777));
     return 1;
 }
 
@@ -789,6 +807,40 @@ static int w_sqlite_column_name(const Value *a, Value *o) {
     return 1;
 }
 
+// sqlite_bind_blob(stmt, idx, [u8]) -> int. Binds the buffer's raw bytes to parameter `idx` — the
+// binary-safe counterpart to bind_text, which stops at the first NUL. SQLITE_TRANSIENT copies now.
+static int w_sqlite_bind_blob(const Value *a, Value *o) {
+    ObjArray *buf = AS_ARR(a[2]);                               // [u8] — read only
+    o[0] = INT_VAL((int64_t)sqlite3_bind_blob((sqlite3_stmt *)AS_CPTR(a[0]), (int)AS_INT(a[1]),
+                                              buf->data, (int)buf->length, SQLITE_TRANSIENT));
+    return 1;
+}
+
+// sqlite_column_bytes(stmt, col) -> int. The byte length of a BLOB (or TEXT) column — the size to
+// allocate before copying it out with column_blob.
+static int w_sqlite_column_bytes(const Value *a, Value *o) {
+    o[0] = INT_VAL((int64_t)sqlite3_column_bytes((sqlite3_stmt *)AS_CPTR(a[0]), (int)AS_INT(a[1])));
+    return 1;
+}
+
+// sqlite_column_blob(stmt, col, mut [u8]) -> int. Copies the column's BLOB into the caller's
+// pre-sized buffer (written in place) and returns the bytes copied — min(blob length, buffer size).
+static int w_sqlite_column_blob(const Value *a, Value *o) {
+    sqlite3_stmt *st  = (sqlite3_stmt *)AS_CPTR(a[0]);
+    int           col = (int)AS_INT(a[1]);
+    ObjArray     *dst = AS_ARR(a[2]);                           // mut [u8] — written in place
+    const void   *blob = sqlite3_column_blob(st, col);
+    int           n    = sqlite3_column_bytes(st, col);
+    if (n > (int)dst->length) {
+        n = (int)dst->length;                                  // never write past the buffer
+    }
+    if (blob != NULL && n > 0) {
+        memcpy(dst->data, blob, (size_t)n);
+    }
+    o[0] = INT_VAL((int64_t)n);
+    return 1;
+}
+
 // sqlite_finalize(stmt) -> int. Destroys a prepared statement and releases its resources. A null
 // handle is a safe no-op, so a failed prepare() can still be finalized to satisfy linearity.
 static int w_sqlite_finalize(const Value *a, Value *o) {
@@ -849,6 +901,9 @@ static const CExternSig g_sigs[] = {
     { "proc_stdout", 1, { 'P' }, 1, { 'p' }, 0, 1 },
     { "proc_stderr", 1, { 'P' }, 1, { 'p' }, 0, 1 },
     { "proc_free",   1, { 'P' }, 1, { 'i' }, 0, 0 },
+    // wall-clock time (std/time) + mkdir (std/fs) — DEFAULT build:
+    { "em_now_unix", 0, { 0 },   1, { 'i' }, 0, 0 },
+    { "em_mkdir",    1, { 'p' }, 1, { 'i' }, 0, 0 },
 #if EMBER_NET
     // HTTPS POST (make net): url, headers ('\n'-separated lines), body → response string.
     { "http_post", 3, { 'p', 'p', 'p' }, 1, { 'p' }, 0, 1 },
@@ -882,6 +937,9 @@ static const CExternSig g_sigs[] = {
     { "sqlite_column_f64",        2, { 'P', 'i' },      1, { 'f' }, 0, 0 },
     { "sqlite_column_text",       2, { 'P', 'i' },      1, { 'p' }, 0, 1 },
     { "sqlite_column_name",       2, { 'P', 'i' },      1, { 'p' }, 0, 1 },
+    { "sqlite_bind_blob",         3, { 'P', 'i', 'b' }, 1, { 'i' }, 0, 0 },
+    { "sqlite_column_bytes",      2, { 'P', 'i' },      1, { 'i' }, 0, 0 },
+    { "sqlite_column_blob",       3, { 'P', 'i', 'b' }, 1, { 'i' }, 0, 0 },
     { "sqlite_finalize",          1, { 'P' },           1, { 'i' }, 0, 0 },
     { "sqlite_changes",           1, { 'P' },           1, { 'i' }, 0, 0 },
     { "sqlite_last_insert_rowid", 1, { 'P' },           1, { 'i' }, 0, 0 },
@@ -895,6 +953,7 @@ static const CExternFn g_fns[] = {
     w_cvec2_len, w_cvec2_dot, w_cvec2_add, w_cvec2_scale,
     w_strlen, w_strncmp, w_fopen, w_fread, w_fwrite, w_fclose,
     w_proc_run, w_proc_exit, w_proc_stdout, w_proc_stderr, w_proc_free,
+    w_em_now_unix, w_em_mkdir,
 #if EMBER_NET
     w_http_post,
     w_http_get,
@@ -907,6 +966,7 @@ static const CExternFn g_fns[] = {
     w_sqlite_step, w_sqlite_reset,
     w_sqlite_column_count, w_sqlite_column_type, w_sqlite_column_int, w_sqlite_column_f64,
     w_sqlite_column_text, w_sqlite_column_name,
+    w_sqlite_bind_blob, w_sqlite_column_bytes, w_sqlite_column_blob,
     w_sqlite_finalize, w_sqlite_changes, w_sqlite_last_insert_rowid,
 #endif
 };

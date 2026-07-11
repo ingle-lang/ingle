@@ -1,0 +1,9 @@
+hex=000f10ffab
+hex_rt=5:0:171
+odd=hex: odd number of digits
+b64_M=TQ==
+b64_Ma=TWE=
+b64_Man=TWFu
+b64_hello=aGVsbG8=
+b64_rt=hello world
+=> 0

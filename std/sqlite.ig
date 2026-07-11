@@ -54,6 +54,9 @@ extern "c" {
     fn sqlite_column_f64(st: Ptr, col: i64) -> f64
     fn sqlite_column_text(st: Ptr, col: i64) -> string
     fn sqlite_column_name(st: Ptr, col: i64) -> string
+    fn sqlite_bind_blob(st: Ptr, idx: i64, val: [u8]) -> i64
+    fn sqlite_column_bytes(st: Ptr, col: i64) -> i64
+    fn sqlite_column_blob(st: Ptr, col: i64, mut buf: [u8]) -> i64
     fn sqlite_finalize(move st: Ptr) -> i64
     fn sqlite_changes(h: Ptr) -> i64
     fn sqlite_last_insert_rowid(h: Ptr) -> i64
@@ -217,6 +220,38 @@ fn column_text(st: Stmt, col: int) -> string {
 // column_name returns the name of result column `col` (0-based), as named in the SELECT.
 fn column_name(st: Stmt, col: int) -> string {
     return sqlite_column_name(st.handle, col)
+}
+
+
+// bind_blob binds a byte buffer to parameter `idx` (1-based) — the binary-safe counterpart to
+// bind_text, preserving embedded NULs and non-UTF-8 bytes. Returns the SQLite result code.
+fn bind_blob(st: Stmt, idx: int, data: [u8]) -> int {
+    return sqlite_bind_blob(st.handle, idx, data)
+}
+
+
+// column_bytes returns the byte length of column `col` (0-based) in the current row — the size to
+// allocate before reading a BLOB with column_blob.
+fn column_bytes(st: Stmt, col: int) -> int {
+    return sqlite_column_bytes(st.handle, col)
+}
+
+
+// column_blob returns column `col` (0-based) of the current row as a fresh [u8] of its exact length,
+// copying the stored bytes out. Binary-safe, unlike column_text (which stops at the first NUL).
+fn column_blob(st: Stmt, col: int) -> [u8] {
+    let n = sqlite_column_bytes(st.handle, col)
+    var buf: [u8] = []
+    var i = 0
+    loop {
+        if i == n {
+            break
+        }
+        buf.append(0u8)
+        i = i + 1
+    }
+    let _ = sqlite_column_blob(st.handle, col, buf)
+    return buf
 }
 
 
