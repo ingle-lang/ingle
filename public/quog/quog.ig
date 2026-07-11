@@ -22,6 +22,8 @@ import "std/time" as time
 import "std/fs" as fs
 import "std/html" as html
 import "std/http_server" as hs
+import "std/map" as map
+import "std/diff" as diff
 
 
 let DB_PATH = ".quog/quog.db"
@@ -306,6 +308,153 @@ fn cmd_undo() -> Result<int, string> {
 }
 
 
+// scan walks the working tree like `walk` but WITHOUT storing anything — it only hashes each file to
+// its content id, for a read-only comparison against a saved snapshot (status / diff).
+fn scan(fsdir: string, prefix: string) -> string {
+    var out = ""
+    for name in list_dir(fsdir).split("\n") {
+        if name != "" {
+            if str.ends_with(name, "/") {
+                let base = str.cp_slice(name, 0, str.cp_count(name) - 1)
+                if base != ".quog" {
+                    out = out + scan(fsdir + "/" + base, prefix + base + "/")
+                }
+            } else {
+                out = out + prefix + name + "\t" + object_id(read_file(fsdir + "/" + name).bytes()) + "\n"
+            }
+        }
+    }
+    return out
+}
+
+
+// tree_map parses a tree text ("path\tid" per line) into a path -> content-id lookup.
+fn tree_map(text: string) -> map.Map<string, string> {
+    var m = map.Map<string, string>{ buckets: [], count: 0 }
+    for line in text.split("\n") {
+        if line != "" {
+            let parts = line.split("\t")
+            if parts.len() == 2 {
+                m.set(parts[0], parts[1])
+            }
+        }
+    }
+    return m
+}
+
+
+// map_get reads a key or returns "" when absent — the common "id, or nothing" shape here.
+fn map_get(m: map.Map<string, string>, k: string) -> string {
+    match m.get(k) {
+        case Some(v) {
+            return v
+        }
+        case None {
+            return ""
+        }
+    }
+}
+
+
+// tip_tree_text returns the last saved snapshot's tree text, or "" if there are no commits yet.
+fn tip_tree_text(db: sql.Db) -> Result<string, string> {
+    let tip = get_ref(db, TIP_REF)?
+    if tip == "" {
+        return Ok("")
+    }
+    let commit = from_bytes(get_object(db, tip)?)
+    return Ok(from_bytes(get_object(db, commit_header(commit, "tree "))?))
+}
+
+
+// cmd_status reports what changed in the working tree since the last save: added / modified / deleted.
+fn cmd_status() -> Result<int, string> {
+    let db = sql.open(DB_PATH)?
+    let old_tree = tree_map(tip_tree_text(db)?)
+    let new_tree = tree_map(scan(".", ""))
+    var n = 0
+    for path in new_tree.keys() {
+        let was = map_get(old_tree, path)
+        if was == "" {
+            println("  added     {path}")
+            n = n + 1
+        } else if was != map_get(new_tree, path) {
+            println("  modified  {path}")
+            n = n + 1
+        }
+    }
+    for path in old_tree.keys() {
+        if !new_tree.has(path) {
+            println("  deleted   {path}")
+            n = n + 1
+        }
+    }
+    if n == 0 {
+        println("clean — nothing changed since the last save")
+    }
+    return Ok(0)
+}
+
+
+// _lines splits file content into lines, dropping the single trailing empty line a newline-terminated
+// file produces (so it isn't shown as a spurious blank context line in the diff).
+fn _lines(content: string) -> [string] {
+    var c = content
+    if str.ends_with(c, "\n") {
+        c = str.substring(c, 0, str.cp_count(c) - 1)
+    }
+    if c == "" {
+        var empty: [string] = []
+        return empty
+    }
+    return c.split("\n")
+}
+
+
+// _diff_file prints a labelled unified diff of one file between its saved content (`old_id`, "" = a new
+// file) and its working content (`work_path`, "" = a deleted file).
+fn _diff_file(db: sql.Db, path: string, old_id: string, work_path: string) -> Result<int, string> {
+    var old_content = ""
+    if old_id != "" {
+        old_content = from_bytes(get_object(db, old_id)?)
+    }
+    var new_content = ""
+    if work_path != "" {
+        new_content = read_file(work_path)
+    }
+    let edits = diff.diff_lines(_lines(old_content), _lines(new_content))
+    println("=== {path}  (+{diff.added_count(edits)} -{diff.removed_count(edits)}) ===")
+    print(diff.unified(edits))
+    return Ok(0)
+}
+
+
+// cmd_diff shows the line changes since the last save — every added / modified / deleted file.
+fn cmd_diff() -> Result<int, string> {
+    let db = sql.open(DB_PATH)?
+    let old_tree = tree_map(tip_tree_text(db)?)
+    let new_tree = tree_map(scan(".", ""))
+    var any = 0
+    for path in new_tree.keys() {
+        let was = map_get(old_tree, path)
+        if was != map_get(new_tree, path) {
+            let _ = _diff_file(db, path, was, "./" + path)?
+            any = any + 1
+        }
+    }
+    for path in old_tree.keys() {
+        if !new_tree.has(path) {
+            let _ = _diff_file(db, path, map_get(old_tree, path), "")?
+            any = any + 1
+        }
+    }
+    if any == 0 {
+        println("clean — nothing changed since the last save")
+    }
+    return Ok(0)
+}
+
+
 // serve_log renders the branch history as an HTML page — each commit a link to its detail page.
 fn serve_log(db: sql.Db, conn: hs.Conn) -> Result<int, string> {
     var md = "# Quog — history\n\n"
@@ -324,6 +473,68 @@ fn serve_log(db: sql.Db, conn: hs.Conn) -> Result<int, string> {
     }
     let _ = hs.ok_html(conn, html.page("Quog — history", html.render_markdown(md)))
     return Ok(0)
+}
+
+
+// diff_lines_html renders an edit script as colored <span> lines inside a <pre class="diff">.
+fn diff_lines_html(edits: [diff.Edit]) -> string {
+    var h = ""
+    for e in edits {
+        match e {
+            case Keep(t) {
+                h = h + "<span>  " + html.escape(t) + "</span>"
+            }
+            case Add(t) {
+                h = h + "<span class=\"add\">+ " + html.escape(t) + "</span>"
+            }
+            case Remove(t) {
+                h = h + "<span class=\"rem\">- " + html.escape(t) + "</span>"
+            }
+        }
+    }
+    return h
+}
+
+
+// render_diff_html renders a commit's diff against its parent as colored, per-file diff blocks — the
+// "what changed in this commit" review view. A file present here but not in the parent is a full add;
+// one only in the parent is a full delete.
+fn render_diff_html(db: sql.Db, this_text: string) -> Result<string, string> {
+    let this_tree = tree_map(from_bytes(get_object(db, commit_header(this_text, "tree "))?))
+    let parent = commit_header(this_text, "parent ")
+    var parent_tree = tree_map("")
+    if parent != "" {
+        let ptext = from_bytes(get_object(db, parent)?)
+        parent_tree = tree_map(from_bytes(get_object(db, commit_header(ptext, "tree "))?))
+    }
+    var h = "<h2>Changes</h2>"
+    var any = 0
+    for path in this_tree.keys() {
+        let oldid = map_get(parent_tree, path)
+        let newid = map_get(this_tree, path)
+        if oldid != newid {
+            var oldc = ""
+            if oldid != "" {
+                oldc = from_bytes(get_object(db, oldid)?)
+            }
+            let edits = diff.diff_lines(_lines(oldc), _lines(from_bytes(get_object(db, newid)?)))
+            h = h + "<h3>{html.escape(path)} <small>+{diff.added_count(edits)} -{diff.removed_count(edits)}</small></h3>"
+            h = h + "<pre class=\"diff\">" + diff_lines_html(edits) + "</pre>"
+            any = any + 1
+        }
+    }
+    for path in parent_tree.keys() {
+        if !this_tree.has(path) {
+            let edits = diff.diff_lines(_lines(from_bytes(get_object(db, map_get(parent_tree, path))?)), _lines(""))
+            h = h + "<h3>{html.escape(path)} <small>deleted</small></h3>"
+            h = h + "<pre class=\"diff\">" + diff_lines_html(edits) + "</pre>"
+            any = any + 1
+        }
+    }
+    if any == 0 {
+        h = h + "<p><em>No file changes (identical to the parent).</em></p>"
+    }
+    return Ok(h)
 }
 
 
@@ -350,7 +561,8 @@ fn serve_commit(db: sql.Db, conn: hs.Conn, id: string) -> Result<int, string> {
                 }
             }
             md = md + "\n[← back to history](/)\n"
-            let _ = hs.ok_html(conn, html.page("Commit " + _short(id), html.render_markdown(md)))
+            let body = html.render_markdown(md) + render_diff_html(db, text)?
+            let _ = hs.ok_html(conn, html.page("Commit " + _short(id), body))
             return Ok(0)
         }
         case Err(e) {
@@ -404,12 +616,18 @@ fn cmd_serve(argv: [string]) -> Result<int, string> {
 // dispatch runs the requested verb, returning a Result so any store error routes to one place.
 fn dispatch(argv: [string]) -> Result<int, string> {
     if argv.len() == 0 {
-        println("usage: quog <init|save|log|show|undo|serve> [args]")
+        println("usage: quog <init|save|status|diff|log|show|undo|serve> [args]")
         return Ok(0)
     }
     let verb = argv[0]
     if verb == "init" {
         return cmd_init()
+    }
+    if verb == "status" {
+        return cmd_status()
+    }
+    if verb == "diff" {
+        return cmd_diff()
     }
     if verb == "serve" {
         return cmd_serve(argv)

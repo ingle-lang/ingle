@@ -1,0 +1,10 @@
+ alpha
+-beta
++BETA
+ gamma
++epsilon
+ delta
+summary +2 -1
+identical +0 -0
+allnew +2 -0
+=> 0

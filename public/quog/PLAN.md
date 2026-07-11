@@ -161,8 +161,10 @@ Constraints to plan around:
 `undo` over the SQLite store, with the safety invariants written as executable contracts. Goal:
 prove append-only and universal undo actually hold, machine-checked, end to end.
 
-**Phase 2 — working with change.** `status`, `diff` (Myers), `switch`/`branch` with auto-snapshot,
-`restore` from the attic, `merge` (additive, new-head-on-conflict).
+**Phase 2 — working with change** *(status + diff done)*. `status` (added/modified/deleted since the
+last save) and `diff` (line-level, via a new `std/diff` LCS engine) ship — in the CLI **and** the web
+view (a commit page shows its colored diff against its parent, GitHub-style). Still to come:
+`switch`/`branch` with auto-snapshot, `restore` from the attic, `merge` (additive, new-head-on-conflict).
 
 **Phase W1 — the web content leaf** *(done)*. `std/html` renders Markdown/AST to HTML; Quog's
 history/diff/file views render as pages.

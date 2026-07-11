@@ -23,7 +23,9 @@ fn _css() -> string {
     "blockquote\{margin:0 0 1em;padding:.2em 1em;border-left:3px solid #d0d0d6;color:#555\}" +
     "ul\{margin:0 0 1em;padding-left:1.4em\}li\{margin:.2em 0\}" +
     "table\{border-collapse:collapse;width:100%;margin:0 0 1em\}th,td\{border:1px solid #ddd;padding:.5em .7em;text-align:left\}th\{background:#f6f6f8\}" +
+    "pre.diff\{line-height:1.45\}pre.diff span\{display:block;white-space:pre\}.diff .add\{background:#e6ffed;color:#22863a\}.diff .rem\{background:#ffeef0;color:#b31d28\}" +
     "@media(prefers-color-scheme:dark)\{body\{color:#e6e6e6;background:#151517\}code,pre,th\{background:#26262b\}" +
+    ".diff .add\{background:#0f2f1a;color:#56d364\}.diff .rem\{background:#3a1418;color:#f26d78\}" +
     "a\{color:#5ab0ff\}blockquote\{border-left-color:#3a3a42;color:#aaa\}th,td\{border-color:#33333a\}\}"
 }
 
