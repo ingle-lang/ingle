@@ -229,7 +229,7 @@ fn _short(id: string) -> string {
 fn cmd_init() -> Result<int, string> {
     let _ = fs.mkdir(".quog")                        // -1 if it already exists — harmless
     let db = sql.open(DB_PATH)?
-    let _ = sql.exec(db, "CREATE TABLE IF NOT EXISTS object(id TEXT PRIMARY KEY, kind TEXT, data BLOB); CREATE TABLE IF NOT EXISTS ref(name TEXT PRIMARY KEY, target TEXT); CREATE TABLE IF NOT EXISTS oplog(seq INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT, before TEXT, after TEXT, ts INTEGER)")?
+    let _ = sql.exec(db, "CREATE TABLE IF NOT EXISTS object(id TEXT PRIMARY KEY, kind TEXT, data BLOB); CREATE TABLE IF NOT EXISTS ref(name TEXT PRIMARY KEY, target TEXT); CREATE TABLE IF NOT EXISTS oplog(seq INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT, before TEXT, after TEXT, ts INTEGER); CREATE TABLE IF NOT EXISTS attic(seq INTEGER PRIMARY KEY AUTOINCREMENT, tree TEXT, reason TEXT, ts INTEGER)")?
     let _ = set_ref(db, "HEAD", "main")?
     let _ = set_ref(db, TIP_REF, "")?
     println("initialised empty Quog repo in .quog/")
@@ -630,6 +630,92 @@ fn cmd_switch(argv: [string]) -> Result<int, string> {
 }
 
 
+// is_dirty reports whether the working tree differs from the current branch's tip snapshot.
+fn is_dirty(db: sql.Db) -> Result<bool, string> {
+    let tip = get_ref(db, tip_ref(db)?)?
+    var tip_tree_id = ""
+    if tip != "" {
+        tip_tree_id = commit_header(from_bytes(get_object(db, tip)?), "tree ")
+    }
+    return Ok(object_id(scan(".", "").bytes()) != tip_tree_id)
+}
+
+
+// attic_save stores the current working tree (blobs + a tree object) and records an attic row, so the
+// snapshot is fully recoverable. Returns the attic entry's number. Invariant #6: nothing goes to
+// /dev/null — a "thrown away" change lands here.
+fn attic_save(db: sql.Db, reason: string) -> Result<int, string> {
+    let tree_id = put_object(db, "tree", walk(db, ".", "")?.bytes())?
+    let st = sql.prepare(db, "INSERT INTO attic(tree, reason, ts) VALUES(?, ?, ?)")?
+    let _ = sql.bind_text(st, 1, tree_id)
+    let _ = sql.bind_text(st, 2, reason)
+    let _ = sql.bind_int(st, 3, now())
+    let _ = sql.step(st)?
+    return Ok(sql.last_insert_id(db))
+}
+
+
+// cmd_discard throws away uncommitted working changes — but to the attic, not /dev/null (invariant #6):
+// it snapshots the current tree into the attic first, then reverts the working files to the last save.
+fn cmd_discard() -> Result<int, string> {
+    let db = sql.open(DB_PATH)?
+    if !is_dirty(db)? {
+        println("nothing to discard — the working tree already matches the last save")
+        return Ok(0)
+    }
+    let seq = attic_save(db, "discarded working changes")?
+    let tip = get_ref(db, tip_ref(db)?)?
+    var tip_tree = ""
+    if tip != "" {
+        tip_tree = commit_tree_text(db, tip)?
+    }
+    let _ = checkout(db, tip_tree)?
+    let _ = log_op(db, "discard", "", "attic")?
+    println("discarded working changes — recoverable with: quog restore {seq}")
+    return Ok(0)
+}
+
+
+// cmd_restore lists the attic (no arg) or brings an attic entry back into the working tree. Restoring
+// first stashes any current uncommitted work to the attic, so restore itself can never lose work.
+fn cmd_restore(argv: [string]) -> Result<int, string> {
+    let db = sql.open(DB_PATH)?
+    if argv.len() < 2 {
+        let st = sql.prepare(db, "SELECT seq, ts, reason FROM attic ORDER BY seq DESC")?
+        var any = 0
+        loop {
+            let more = sql.step(st)?
+            if !more {
+                break
+            }
+            println("  {sql.column_int(st, 0)}  t={sql.column_int(st, 1)}  {sql.column_text(st, 2)}")
+            any = any + 1
+        }
+        if any == 0 {
+            println("attic is empty")
+        } else {
+            println("restore one with: quog restore <n>")
+        }
+        return Ok(0)
+    }
+    let seq = _atoi(argv[1])
+    let st = sql.prepare(db, "SELECT tree FROM attic WHERE seq = ?")?
+    let _ = sql.bind_int(st, 1, seq)
+    let found = sql.step(st)?
+    if !found {
+        return Err("no attic entry " + argv[1])
+    }
+    let tree_id = sql.column_text(st, 0)
+    if is_dirty(db)? {
+        let stashed = attic_save(db, "auto-stash before restore")?
+        println("(stashed your current changes as {stashed} first)")
+    }
+    let _ = checkout(db, from_bytes(get_object(db, tree_id)?))?
+    println("restored attic {seq} into the working tree")
+    return Ok(0)
+}
+
+
 // serve_log renders the branch history as an HTML page — each commit a link to its detail page.
 fn serve_log(db: sql.Db, conn: hs.Conn) -> Result<int, string> {
     var md = "# Quog — history\n\n"
@@ -910,7 +996,7 @@ fn cmd_verify() -> Result<int, string> {
 // dispatch runs the requested verb, returning a Result so any store error routes to one place.
 fn dispatch(argv: [string]) -> Result<int, string> {
     if argv.len() == 0 {
-        println("usage: quog <init|save|status|diff|log|show|undo|branch|switch|verify|serve> [args]")
+        println("usage: quog <init|save|status|diff|log|show|undo|discard|restore|branch|switch|verify|serve> [args]")
         return Ok(0)
     }
     let verb = argv[0]
@@ -919,6 +1005,12 @@ fn dispatch(argv: [string]) -> Result<int, string> {
     }
     if verb == "verify" {
         return cmd_verify()
+    }
+    if verb == "discard" {
+        return cmd_discard()
+    }
+    if verb == "restore" {
+        return cmd_restore(argv)
     }
     if verb == "status" {
         return cmd_status()

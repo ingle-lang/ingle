@@ -48,5 +48,10 @@ undid switch — back on main
 $ quog branch
   experiment
 * main
+$ quog discard
+discarded working changes — recoverable with: quog restore 1
+$ quog restore
+  1  t=1000000000  discarded working changes
+restore one with: quog restore <n>
 $ quog verify
-verified 4 commits, 3 trees, 5 blobs — every object intact, every link resolves
+verified 4 commits, 4 trees, 6 blobs — every object intact, every link resolves
