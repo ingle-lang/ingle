@@ -1,0 +1,8 @@
+read=a=x;b=y;
+moved=2 src=2
+sum=90
+idx=2,20
+0:p:5,6
+1:q:7,8
+empty=0
+=> 0

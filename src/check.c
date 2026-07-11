@@ -6976,6 +6976,10 @@ static void check_stmt(Checker *c, Stmt *s) {
                     reserve_hidden_slot(c);                                        // index
                 }
                 reserve_hidden_slot(c);                                            // length
+                // A value-struct element is bound as an owned per-iteration copy (OFI-215): record
+                // its struct id so the native backend drops the copy each pass. The loop var stays a
+                // borrow (owned=0) — a body that hands it off clones, so the source copy stays live.
+                s->as.for_.elem_struct_id = array_inline_struct_id(c, elem);
                 declare_local(c, s->line, s->col, s->as.for_.var, 0, elem, 0);     // x
             }
             // OFI-049: a `break`/`continue` here scans body-local handles ([loop_local_base, n)). A

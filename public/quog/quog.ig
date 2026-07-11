@@ -11,9 +11,9 @@
 //     log             show the history of the current branch
 //
 // Representation note: a snapshot tree is carried as text ("path\tid\n" per file) and a commit as
-// text, rather than as arrays of a value-struct. That is deliberate — building the store surfaced a
-// compiler memory bug in value-struct-in-array copies (OFI-215, filed with an ASan repro); a
-// string-serialised tree is a clean, honest representation and stays on the language's solid paths.
+// text, rather than as arrays of a value-struct. Building the store originally surfaced a compiler
+// memory bug in value-struct-in-array copies (OFI-215, since FIXED); the string-serialised tree is
+// kept anyway because it IS the object's on-disk bytes — hashing and storage want the text directly.
 import "std/sqlite" as sql
 import "std/sha256" as sha
 import "std/encoding" as enc

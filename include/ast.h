@@ -466,6 +466,9 @@ struct Stmt {
             const char *index_var;  // NULL for `for x in …`; the index in `for (i, x) in array`
             Expr       *iter;
             Block       body;
+            int         elem_struct_id;  // inline value-struct element's struct id, else -1 (OFI-215):
+                                         // the element is bound as an owned per-iteration copy that
+                                         // the native backend must drop (the VM uses runtime elem_kind)
         } for_;
         struct {
             Block body;

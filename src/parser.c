@@ -1610,6 +1610,7 @@ static Stmt *parse_statement(Parser *p) {
             Stmt *s = new_stmt(p, STMT_FOR);
             adv(p);
             s->as.for_.index_var = NULL;
+            s->as.for_.elem_struct_id = -1;   // set by the checker for a value-struct element (OFI-215)
             // `for (i, x) in array` — index and element together (arrays only).
             if (match(p, TOK_LPAREN)) {
                 const Token *iv = expect(p, TOK_IDENT,

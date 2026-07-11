@@ -2514,10 +2514,15 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 VM_NEXT();
             }
             VM_CASE(OP_FOR_ARRAY): {
-                // Fused array-iteration step: pre-increment the index, exit at the
-                // cached length, else bind the loop variable to the next element
-                // (a borrow — the array owns it). The length is read once before
-                // the loop, so it is not recomputed each iteration.
+                // Fused array-iteration step: pre-increment the index, exit at the cached length,
+                // else bind the loop variable to the next element. A scalar/string/enum element is a
+                // BORROW the array owns (array_box). A value-struct element (AEK_INLINE_STRUCT) cannot
+                // be borrowed by reference through a uniform Value — value_box would read only its
+                // first field — so it is bound as an OWNED per-iteration COPY (exactly like OP_INDEX)
+                // and released here on the next step / at exit (OFI-215). The loop var stays a borrow
+                // to the checker, so a body that hands the element off CLONES it (moves_local=2) and
+                // the source copy stays live; the unconditional drop below therefore never races a
+                // moved-out value. The length is read once before the loop.
                 size_t arr_slot  = operand_read(&frame->ip, OPK_IDX);
                 size_t idx_slot  = operand_read(&frame->ip, OPK_IDX);
                 size_t len_slot  = operand_read(&frame->ip, OPK_IDX);
@@ -2526,10 +2531,25 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                 frame->ip += 2;
                 int64_t idx = AS_INT(frame->slots[idx_slot]) + 1;
                 frame->slots[idx_slot] = INT_VAL(idx);
-                if (idx >= AS_INT(frame->slots[len_slot])) {
+                ObjArray *a = AS_ARRAY(frame->slots[arr_slot]);
+                if (a->elem_kind == AEK_INLINE_STRUCT) {
+                    // Release the previous iteration's owned copy (a no-op for the initial int
+                    // placeholder), then either exit or materialise a fresh independent copy.
+                    drop_value(RT(vm), frame->slots[var_slot]);
+                    frame->slots[var_slot] = INT_VAL(0);   // a harmless non-heap value if we exit
+                    if (idx < AS_INT(frame->slots[len_slot])) {
+                        int fc = vm->heap->prog->structs[a->elem_struct_id].field_count;
+                        Value copy = alloc_instance(RT(vm), a->elem_struct_id, 0, 0, fc);
+                        memcpy(AS_STRUCT(copy)->data,
+                               (unsigned char *)a->data + (size_t)idx * a->elem_size, a->elem_size);
+                        struct_elem_retain(RT(vm), a->elem_struct_id, AS_STRUCT(copy)->data);
+                        frame->slots[var_slot] = copy;
+                    } else {
+                        frame->ip += exit_off;
+                    }
+                } else if (idx >= AS_INT(frame->slots[len_slot])) {
                     frame->ip += exit_off;
                 } else {
-                    ObjArray *a = AS_ARRAY(frame->slots[arr_slot]);
                     frame->slots[var_slot] = array_box(a, (size_t)idx);
                 }
                 VM_NEXT();

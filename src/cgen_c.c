@@ -3384,7 +3384,12 @@ static void emit_stmt(CgcGen *g, const Stmt *s) {
                 snprintf(icn, sizeof icn, "v%d", iv);
                 cgc_push(g, s->as.for_.index_var, icn, 0, -1);   // fresh int index, no drop
             }
-            cgc_push(g, s->as.for_.var, cn, 0, -1);   // element borrow
+            // A value-struct element (OFI-215): em_index returned an OWNED boxed copy, so drop it
+            // each iteration. A body that hands it off uses own_into_slot, which CLONES a unique-owner
+            // struct, so the source copy stays live and this drop never double-frees. A scalar/string/
+            // enum element (elem_struct_id < 0) stays a borrow the array owns — no drop.
+            int for_elem_drop = (s->as.for_.elem_struct_id >= 0) ? 1 : 0;
+            cgc_push(g, s->as.for_.var, cn, for_elem_drop, -1);
             for (size_t i = 0; i < s->as.for_.body.count; i++) {
                 emit_stmt(g, s->as.for_.body.stmts[i]);
             }
