@@ -1031,6 +1031,32 @@ fn fetch_missing(db: sql.Db, host: string, port: int, start: string) -> Result<i
 }
 
 
+// authorized reports whether `token` is allowed to push to this repo: a sync token must be configured
+// AND match. A repo with no token configured accepts NO pushes (secure default) — reads stay open.
+fn authorized(db: sql.Db, token: string) -> Result<bool, string> {
+    let configured = get_ref(db, "config:token")?
+    return Ok(configured != "" && configured == token)
+}
+
+
+// cmd_auth sets (or reports) this repo's sync token — the shared secret a client must present (via the
+// QUOG_TOKEN env var) to push. Reads are unaffected; only writes are gated.
+fn cmd_auth(argv: [string]) -> Result<int, string> {
+    let db = sql.open(DB_PATH)?
+    if argv.len() < 2 {
+        if get_ref(db, "config:token")? == "" {
+            println("no sync token set — this repo refuses all pushes. Enable with: quog auth <token>")
+        } else {
+            println("a sync token is set — pushes require it (clients pass it via QUOG_TOKEN)")
+        }
+        return Ok(0)
+    }
+    let _ = set_ref(db, "config:token", argv[1])?
+    println("sync token set — pushes now require it; share it, clients pass it via QUOG_TOKEN")
+    return Ok(0)
+}
+
+
 // cmd_pull fetches objects + refs from a remote Quog server and integrates them ADDITIVELY: a local
 // branch fast-forwards when the remote is strictly ahead; a diverged branch is kept and the remote tip
 // lands under `remote/<branch>` so local work is never clobbered. Every fetched object is re-hashed
@@ -1097,6 +1123,7 @@ fn cmd_push(argv: [string]) -> Result<int, string> {
     let db = sql.open(DB_PATH)?
     let host = argv[1]
     let port = _atoi(argv[2])
+    let token = env("QUOG_TOKEN")            // the shared secret the remote requires for writes
     // Collect every object reachable from a local branch tip.
     var seen = map.Map<string, string>{ buckets: [], count: 0 }
     var queue: [string] = []
@@ -1129,7 +1156,10 @@ fn cmd_push(argv: [string]) -> Result<int, string> {
         for b in data {
             pbody.append(b)
         }
-        let resp = hs.post(host, port, "/sync/object/" + id, pbody)?
+        let resp = hs.post(host, port, "/sync/object/" + id, pbody, token)?
+        if resp.status == 401 {
+            return Err("push refused: the remote requires a token — set QUOG_TOKEN (server: quog auth <token>)")
+        }
         if resp.status == 200 {
             sent = sent + 1
         }
@@ -1171,7 +1201,7 @@ fn cmd_push(argv: [string]) -> Result<int, string> {
             for b in (sql.column_text(rs, 0) + "\t" + target).bytes() {
                 rbody.append(b)
             }
-            let _ = hs.post(host, port, "/sync/ref", rbody)?
+            let _ = hs.post(host, port, "/sync/ref", rbody, token)?
         }
     }
     println("pushed {sent} objects to {host}:{port}")
@@ -1400,6 +1430,11 @@ fn serve_commit(db: sql.Db, conn: hs.Conn, id: string) -> Result<int, string> {
 fn route(db: sql.Db, conn: hs.Conn, req: hs.Request) -> Result<int, string> {
     let path = req.path
     if req.method == "POST" {
+        if !authorized(db, req.token)? {
+            let _ = hs.respond(conn, 401, "Unauthorized", "text/plain",
+                "push requires a token: set one on the server with 'quog auth <token>', then pass it via QUOG_TOKEN")
+            return Ok(0)
+        }
         if str.starts_with(path, "/sync/object/") {
             return serve_push_object(db, conn, str.substring(path, 13, str.cp_count(path)), req.body)
         }
@@ -1578,12 +1613,15 @@ fn cmd_verify() -> Result<int, string> {
 // dispatch runs the requested verb, returning a Result so any store error routes to one place.
 fn dispatch(argv: [string]) -> Result<int, string> {
     if argv.len() == 0 {
-        println("usage: quog <init|save|status|diff|log|show|undo|discard|restore|branch|switch|merge|verify|pull|push|serve> [args]")
+        println("usage: quog <init|save|status|diff|log|show|undo|discard|restore|branch|switch|merge|verify|auth|pull|push|serve> [args]")
         return Ok(0)
     }
     let verb = argv[0]
     if verb == "init" {
         return cmd_init()
+    }
+    if verb == "auth" {
+        return cmd_auth(argv)
     }
     if verb == "verify" {
         return cmd_verify()

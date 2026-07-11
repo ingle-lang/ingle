@@ -37,12 +37,13 @@ resource struct Conn {
 }
 
 
-// A parsed request — the method + path from the request line, and the raw request body (byte-exact,
-// empty for a GET). Enough for both the read-only web view and the sync POST endpoints.
+// A parsed request — the method + path from the request line, the raw request body (byte-exact, empty
+// for a GET), and the X-Quog-Token header value (or "") used to authorize a push.
 struct Request {
     method: string
     path: string
     body: [u8]
+    token: string
 }
 
 
@@ -91,6 +92,23 @@ fn _chunk(buf: [u8], n: int) -> string {
         i = i + 1
     }
     return from_bytes(out)
+}
+
+
+// _header_value returns the value of header `name` (including its trailing colon, e.g. "X-Quog-Token:")
+// from the ASCII header block — up to the end of that line, trimmed — or "" if absent.
+fn _header_value(header: string, name: string) -> string {
+    let idx = str.index_of(header, name)
+    if idx < 0 {
+        return ""
+    }
+    let rest = str.substring(header, idx + str.cp_count(name), str.cp_count(header))
+    let end = str.index_of(rest, "\r")
+    var val = rest
+    if end >= 0 {
+        val = str.substring(rest, 0, end)
+    }
+    return str.trim(val)
 }
 
 
@@ -205,7 +223,7 @@ fn read_request(conn: Conn) -> Result<Request, string> {
             k = k + 1
         }
     }
-    return Ok(Request { method: parts[0], path: parts[1], body: body })
+    return Ok(Request { method: parts[0], path: parts[1], body: body, token: _header_value(header, "X-Quog-Token:") })
 }
 
 
@@ -319,14 +337,19 @@ fn _status_code(head: [u8]) -> int {
 
 // request sends one HTTP/1.1 request to host:port and returns the response. Connection: close, so the
 // whole reply is read to EOF; the body is returned byte-exact.
-fn request(host: string, port: int, method: string, path: string, body: [u8]) -> Result<Response, string> {
+fn request(host: string, port: int, method: string, path: string, body: [u8], token: string) -> Result<Response, string> {
     let fd = em_tcp_connect(host, port)
     if fd < 0 {
         return Err("could not connect to {host}:{port}")
     }
     let conn = Conn { fd: fd }
+    var reqhead = "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {body.len()}\r\n"
+    if token != "" {
+        reqhead = reqhead + "X-Quog-Token: {token}\r\n"
+    }
+    reqhead = reqhead + "\r\n"
     var req: [u8] = []
-    for b in "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {body.len()}\r\n\r\n".bytes() {
+    for b in reqhead.bytes() {
         req.append(b)
     }
     for b in body {
@@ -360,13 +383,13 @@ fn request(host: string, port: int, method: string, path: string, body: [u8]) ->
 }
 
 
-// get / post are the two verbs Quog's sync uses.
+// get / post are the two verbs Quog's sync uses. post carries a token to authorize a write.
 fn get(host: string, port: int, path: string) -> Result<Response, string> {
     var empty: [u8] = []
-    return request(host, port, "GET", path, empty)
+    return request(host, port, "GET", path, empty, "")
 }
 
 
-fn post(host: string, port: int, path: string, body: [u8]) -> Result<Response, string> {
-    return request(host, port, "POST", path, body)
+fn post(host: string, port: int, path: string, body: [u8], token: string) -> Result<Response, string> {
+    return request(host, port, "POST", path, body, token)
 }
