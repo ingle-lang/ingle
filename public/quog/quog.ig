@@ -644,14 +644,15 @@ fn cmd_switch(argv: [string]) -> Result<int, string> {
 }
 
 
-// is_dirty reports whether the working tree differs from the current branch's tip snapshot.
+// is_dirty reports whether the working tree differs from the current branch's tip snapshot. Compares
+// the tree TEXTS directly (an empty repo with an empty tree is clean, which the hash form got wrong).
 fn is_dirty(db: sql.Db) -> Result<bool, string> {
     let tip = get_ref(db, tip_ref(db)?)?
-    var tip_tree_id = ""
+    var committed = ""
     if tip != "" {
-        tip_tree_id = commit_header(from_bytes(get_object(db, tip)?), "tree ")
+        committed = commit_tree_text(db, tip)?
     }
-    return Ok(object_id(scan(".", "").bytes()) != tip_tree_id)
+    return Ok(scan(".", "") != committed)
 }
 
 
@@ -907,6 +908,184 @@ fn cmd_merge(argv: [string]) -> Result<int, string> {
 }
 
 
+// have_object reports whether an object id is already in the local store.
+fn have_object(db: sql.Db, id: string) -> Result<bool, string> {
+    let st = sql.prepare(db, "SELECT 1 FROM object WHERE id = ?")?
+    let _ = sql.bind_text(st, 1, id)
+    return sql.step(st)
+}
+
+
+// object_kind returns an object's kind (blob/tree/commit), or "" if absent.
+fn object_kind(db: sql.Db, id: string) -> Result<string, string> {
+    let st = sql.prepare(db, "SELECT kind FROM object WHERE id = ?")?
+    let _ = sql.bind_text(st, 1, id)
+    let found = sql.step(st)?
+    if !found {
+        return Ok("")
+    }
+    return Ok(sql.column_text(st, 0))
+}
+
+
+// store_raw_object stores an object received from a remote — but ONLY after re-hashing its bytes to
+// confirm they match the claimed id. Never trust a remote's content addressing: a mismatch is a
+// corrupt or forged object, and is refused. Append-only (INSERT OR IGNORE). This is verified sync.
+fn store_raw_object(db: sql.Db, id: string, kind: string, data: [u8]) -> Result<int, string> {
+    if object_id(data) != id {
+        return Err("remote sent a corrupt object — content does not hash to " + _short(id))
+    }
+    let st = sql.prepare(db, "INSERT OR IGNORE INTO object(id, kind, data) VALUES(?, ?, ?)")?
+    let _ = sql.bind_text(st, 1, id)
+    let _ = sql.bind_text(st, 2, kind)
+    let _ = sql.bind_blob(st, 3, data)
+    let _ = sql.step(st)?
+    return Ok(0)
+}
+
+
+// _byte_nl returns the index of the first newline (0x0A) in `bytes`, or bytes.len() if there is none.
+fn _byte_nl(bytes: [u8]) -> int {
+    var i = 0
+    loop {
+        if i >= bytes.len() {
+            return bytes.len()
+        }
+        if bytes[i] == 10u8 {
+            return i
+        }
+        i = i + 1
+    }
+}
+
+
+// _byte_sub returns bytes[start, end) as a fresh [u8].
+fn _byte_sub(bytes: [u8], start: int, end: int) -> [u8] {
+    var out: [u8] = []
+    var i = start
+    loop {
+        if i >= end {
+            break
+        }
+        out.append(bytes[i])
+        i = i + 1
+    }
+    return out
+}
+
+
+// fetch_missing walks the object DAG from `start` on the remote, fetching every object we don't yet
+// have (commit -> its tree + parents, tree -> its blobs), verifying and storing each. Additive + safe.
+fn fetch_missing(db: sql.Db, host: string, port: int, start: string) -> Result<int, string> {
+    var queue: [string] = []
+    var seen = map.Map<string, string>{ buckets: [], count: 0 }
+    if start != "" {
+        queue.append(start)
+        seen.set(start, "1")
+    }
+    var fetched = 0
+    var i = 0
+    loop {
+        if i >= queue.len() {
+            break
+        }
+        let id = queue[i]
+        i = i + 1
+        if !have_object(db, id)? {
+            let resp = hs.get(host, port, "/sync/object/" + id)?
+            if resp.status != 200 {
+                return Err("remote is missing object " + _short(id))
+            }
+            let nl = _byte_nl(resp.body)
+            let kind = from_bytes(_byte_sub(resp.body, 0, nl))
+            let data = _byte_sub(resp.body, nl + 1, resp.body.len())
+            let _ = store_raw_object(db, id, kind, data)?
+            fetched = fetched + 1
+            if kind == "commit" {
+                let text = from_bytes(data)
+                let tid = commit_header(text, "tree ")
+                if tid != "" && !seen.has(tid) {
+                    seen.set(tid, "1")
+                    queue.append(tid)
+                }
+                for p in commit_parents(text) {
+                    if !seen.has(p) {
+                        seen.set(p, "1")
+                        queue.append(p)
+                    }
+                }
+            } else if kind == "tree" {
+                for line in from_bytes(data).split("\n") {
+                    if line != "" {
+                        let parts = line.split("\t")
+                        if parts.len() == 2 && !seen.has(parts[1]) {
+                            seen.set(parts[1], "1")
+                            queue.append(parts[1])
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return Ok(fetched)
+}
+
+
+// cmd_pull fetches objects + refs from a remote Quog server and integrates them ADDITIVELY: a local
+// branch fast-forwards when the remote is strictly ahead; a diverged branch is kept and the remote tip
+// lands under `remote/<branch>` so local work is never clobbered. Every fetched object is re-hashed
+// (store_raw_object), so a corrupt or forged remote is rejected. If the working tree was clean, the
+// current branch's new files are checked out.
+fn cmd_pull(argv: [string]) -> Result<int, string> {
+    if argv.len() < 3 {
+        return Err("usage: quog pull <host> <port>")
+    }
+    let db = sql.open(DB_PATH)?
+    let host = argv[1]
+    let port = _atoi(argv[2])
+    let refs = hs.get(host, port, "/sync/refs")?
+    if refs.status != 200 {
+        return Err("{host}:{port} is not a Quog sync server (status {refs.status})")
+    }
+    let was_clean = !is_dirty(db)?
+    let old_cur = get_ref(db, tip_ref(db)?)?
+    var total = 0
+    var updated = 0
+    for line in from_bytes(refs.body).split("\n") {
+        if line != "" {
+            let parts = line.split("\t")
+            if parts.len() == 2 {
+                let name = parts[0]
+                let remote_tip = parts[1]
+                total = total + fetch_missing(db, host, port, remote_tip)?
+                let bname = str.substring(name, 7, str.cp_count(name))
+                let local = get_ref(db, name)?
+                if local == "" {
+                    let _ = set_ref(db, name, remote_tip)?
+                    updated = updated + 1
+                } else if local != remote_tip {
+                    let local_anc = collect_ancestors(db, local)?
+                    let remote_anc = collect_ancestors(db, remote_tip)?
+                    if remote_anc.has(local) {
+                        let _ = set_ref(db, name, remote_tip)?
+                        updated = updated + 1
+                    } else if !local_anc.has(remote_tip) {
+                        let _ = set_ref(db, "remote/" + bname, remote_tip)?
+                        println("  {bname}: diverged — kept local; remote tip is under remote/{bname}")
+                    }
+                }
+            }
+        }
+    }
+    let new_cur = get_ref(db, tip_ref(db)?)?
+    if was_clean && new_cur != old_cur && new_cur != "" {
+        let _ = checkout(db, commit_tree_text(db, new_cur)?)?
+    }
+    println("pulled {total} objects from {host}:{port} — {updated} branch(es) updated")
+    return Ok(0)
+}
+
+
 // serve_log renders the branch history as an HTML page — each commit a link to its detail page.
 fn serve_log(db: sql.Db, conn: hs.Conn) -> Result<int, string> {
     var md = "# Quog — history\n\n[verify integrity](/verify) · branch `" + head_branch(db)? + "`\n\n"
@@ -990,6 +1169,39 @@ fn render_diff_html(db: sql.Db, this_text: string) -> Result<string, string> {
 }
 
 
+// serve_sync_refs answers a client's pull with this repo's branch tips ("branch:name\tcommitid" lines).
+fn serve_sync_refs(db: sql.Db, conn: hs.Conn) -> Result<int, string> {
+    var text = ""
+    let st = sql.prepare(db, "SELECT name, target FROM ref WHERE name LIKE 'branch:%'")?
+    loop {
+        let more = sql.step(st)?
+        if !more {
+            break
+        }
+        let target = sql.column_text(st, 1)
+        if target != "" {
+            text = text + sql.column_text(st, 0) + "\t" + target + "\n"
+        }
+    }
+    let _ = hs.respond(conn, 200, "OK", "text/plain", text)
+    return Ok(0)
+}
+
+
+// serve_sync_object answers a client's object request with "kind\n" + the object's raw bytes.
+fn serve_sync_object(db: sql.Db, conn: hs.Conn, id: string) -> Result<int, string> {
+    match get_object(db, id) {
+        case Ok(data) {
+            let _ = hs.respond(conn, 200, "OK", "application/octet-stream", object_kind(db, id)? + "\n" + from_bytes(data))
+        }
+        case Err(e) {
+            let _ = hs.not_found(conn, "object not found")
+        }
+    }
+    return Ok(0)
+}
+
+
 // serve_verify renders the integrity report as a page — the "provably safe" badge in the browser.
 fn serve_verify(db: sql.Db, conn: hs.Conn) -> Result<int, string> {
     let problems = verify_problems(db)?
@@ -1054,6 +1266,12 @@ fn route(db: sql.Db, conn: hs.Conn, path: string) -> Result<int, string> {
     }
     if path == "/verify" {
         return serve_verify(db, conn)
+    }
+    if path == "/sync/refs" {
+        return serve_sync_refs(db, conn)
+    }
+    if str.starts_with(path, "/sync/object/") {
+        return serve_sync_object(db, conn, str.substring(path, 13, str.cp_count(path)))
     }
     if str.starts_with(path, "/commit/") {
         return serve_commit(db, conn, str.substring(path, 8, str.cp_count(path)))
@@ -1212,7 +1430,7 @@ fn cmd_verify() -> Result<int, string> {
 // dispatch runs the requested verb, returning a Result so any store error routes to one place.
 fn dispatch(argv: [string]) -> Result<int, string> {
     if argv.len() == 0 {
-        println("usage: quog <init|save|status|diff|log|show|undo|discard|restore|branch|switch|merge|verify|serve> [args]")
+        println("usage: quog <init|save|status|diff|log|show|undo|discard|restore|branch|switch|merge|verify|pull|serve> [args]")
         return Ok(0)
     }
     let verb = argv[0]
@@ -1221,6 +1439,9 @@ fn dispatch(argv: [string]) -> Result<int, string> {
     }
     if verb == "verify" {
         return cmd_verify()
+    }
+    if verb == "pull" {
+        return cmd_pull(argv)
     }
     if verb == "discard" {
         return cmd_discard()

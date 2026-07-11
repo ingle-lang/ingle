@@ -9,6 +9,7 @@
 #include <sys/stat.h>    // std/fs: mkdir() for repo layout (.quog/)
 #include <sys/socket.h>  // std/http_server: TCP sockets (socket/bind/listen/accept/recv/send)
 #include <netinet/in.h>  // std/http_server: sockaddr_in / INADDR_ANY / htonl / htons
+#include <netdb.h>       // std/http_server: getaddrinfo for the client connect (resolve host:port)
 #include <signal.h>      // std/http_server: ignore SIGPIPE so a send to a closed peer can't kill us
 #include <errno.h>       // std/proc: EAGAIN/EINTR on the non-blocking pipe drain
 #include <fcntl.h>       // std/proc: O_NONBLOCK on the capture pipes
@@ -208,6 +209,32 @@ static int w_em_tcp_listen(const Value *a, Value *o) {
 // em_tcp_accept(listen_fd) -> int. Block for the next connection; returns the client fd, or -1.
 static int w_em_tcp_accept(const Value *a, Value *o) {
     o[0] = INT_VAL((int64_t)accept((int)AS_INT(a[0]), NULL, NULL));
+    return 1;
+}
+
+// em_tcp_connect(host, port) -> int. Resolve host:port and open a client connection. Returns the
+// socket fd, or -1 on any failure (resolve, socket, connect). The client half of the sync transport.
+static int w_em_tcp_connect(const Value *a, Value *o) {
+    char portstr[16];
+    snprintf(portstr, sizeof portstr, "%d", (int)AS_INT(a[1]));
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(AS_CSTRING(a[0]), portstr, &hints, &res) != 0 || res == NULL) {
+        o[0] = INT_VAL(-1);
+        return 1;
+    }
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0 || connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
+        if (fd >= 0) { close(fd); }
+        freeaddrinfo(res);
+        o[0] = INT_VAL(-1);
+        return 1;
+    }
+    freeaddrinfo(res);
+    o[0] = INT_VAL((int64_t)fd);
     return 1;
 }
 
@@ -981,8 +1008,9 @@ static const CExternSig g_sigs[] = {
     { "em_mkdir",    1, { 'p' }, 1, { 'i' }, 0, 0 },
     { "em_remove",   1, { 'p' }, 1, { 'i' }, 0, 0 },
     // TCP sockets (std/http_server) — DEFAULT build:
-    { "em_tcp_listen", 2, { 'i', 'i' }, 1, { 'i' }, 0, 0 },
-    { "em_tcp_accept", 1, { 'i' },      1, { 'i' }, 0, 0 },
+    { "em_tcp_listen",  2, { 'i', 'i' }, 1, { 'i' }, 0, 0 },
+    { "em_tcp_accept",  1, { 'i' },      1, { 'i' }, 0, 0 },
+    { "em_tcp_connect", 2, { 'p', 'i' }, 1, { 'i' }, 0, 0 },
     { "em_recv",       2, { 'i', 'b' }, 1, { 'i' }, 0, 0 },
     { "em_send",       2, { 'i', 'b' }, 1, { 'i' }, 0, 0 },
     { "em_close",      1, { 'i' },      1, { 'i' }, 0, 0 },
@@ -1036,7 +1064,7 @@ static const CExternFn g_fns[] = {
     w_strlen, w_strncmp, w_fopen, w_fread, w_fwrite, w_fclose,
     w_proc_run, w_proc_exit, w_proc_stdout, w_proc_stderr, w_proc_free,
     w_em_now_unix, w_em_mkdir, w_em_remove,
-    w_em_tcp_listen, w_em_tcp_accept, w_em_recv, w_em_send, w_em_close,
+    w_em_tcp_listen, w_em_tcp_accept, w_em_tcp_connect, w_em_recv, w_em_send, w_em_close,
 #if EMBER_NET
     w_http_post,
     w_http_get,

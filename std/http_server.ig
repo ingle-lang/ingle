@@ -12,6 +12,7 @@ import "std/string" as str
 extern "c" {
     fn em_tcp_listen(port: i64, public: i64) -> i64
     fn em_tcp_accept(fd: i64) -> i64
+    fn em_tcp_connect(host: string, port: i64) -> i64
     fn em_recv(fd: i64, mut buf: [u8]) -> i64
     fn em_send(fd: i64, buf: [u8]) -> i64
     fn em_close(fd: i64) -> i64
@@ -148,4 +149,144 @@ fn ok_html(conn: Conn, body: string) -> int {
 // not_found is a plain 404 for an unknown path.
 fn not_found(conn: Conn, body: string) -> int {
     return respond(conn, 404, "Not Found", "text/html; charset=utf-8", body)
+}
+
+
+// --- client side: a minimal HTTP/1.1 client over the same sockets, for Quog's sync transport. All
+// byte-level, because responses carry binary object data. ------------------------------------------
+
+
+// A client response: the HTTP status code and the raw body bytes (byte-exact — objects are binary).
+struct Response {
+    status: int
+    body: [u8]
+}
+
+
+// _crlfcrlf returns the index where the CR-LF-CR-LF header terminator begins in `bytes`, or -1.
+fn _crlfcrlf(bytes: [u8]) -> int {
+    var i = 0
+    loop {
+        if i + 3 >= bytes.len() {
+            return -1
+        }
+        if bytes[i] == 13u8 && bytes[i + 1] == 10u8 && bytes[i + 2] == 13u8 && bytes[i + 3] == 10u8 {
+            return i
+        }
+        i = i + 1
+    }
+}
+
+
+// _read_all reads a connection to EOF (the server replies Connection: close) into a byte buffer.
+fn _read_all(conn: Conn) -> [u8] {
+    var acc: [u8] = []
+    loop {
+        var buf: [u8] = []
+        var i = 0
+        loop {
+            if i == 8192 {
+                break
+            }
+            buf.append(0u8)
+            i = i + 1
+        }
+        let n = em_recv(conn.fd, buf)
+        if n <= 0 {
+            break
+        }
+        var k = 0
+        loop {
+            if k == n {
+                break
+            }
+            acc.append(buf[k])
+            k = k + 1
+        }
+    }
+    return acc
+}
+
+
+// _status_code parses the numeric status from an HTTP status line ("HTTP/1.1 200 OK" -> 200).
+fn _status_code(head: [u8]) -> int {
+    var i = 0
+    loop {
+        if i >= head.len() {
+            return 0
+        }
+        if head[i] == 32u8 {
+            break                       // the space after "HTTP/1.1"
+        }
+        i = i + 1
+    }
+    i = i + 1
+    var code = 0
+    loop {
+        if i >= head.len() {
+            break
+        }
+        let c = head[i]
+        if c < 48u8 || c > 57u8 {
+            break
+        }
+        code = code * 10 + (i64(c) - 48)
+        i = i + 1
+    }
+    return code
+}
+
+
+// request sends one HTTP/1.1 request to host:port and returns the response. Connection: close, so the
+// whole reply is read to EOF; the body is returned byte-exact.
+fn request(host: string, port: int, method: string, path: string, body: [u8]) -> Result<Response, string> {
+    let fd = em_tcp_connect(host, port)
+    if fd < 0 {
+        return Err("could not connect to {host}:{port}")
+    }
+    let conn = Conn { fd: fd }
+    var req: [u8] = []
+    for b in "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {body.len()}\r\n\r\n".bytes() {
+        req.append(b)
+    }
+    for b in body {
+        req.append(b)
+    }
+    let _ = em_send(conn.fd, req)
+    let raw = _read_all(conn)
+    let sep = _crlfcrlf(raw)
+    if sep < 0 {
+        return Err("malformed response from {host}:{port}")
+    }
+    var head: [u8] = []
+    var i = 0
+    loop {
+        if i >= sep {
+            break
+        }
+        head.append(raw[i])
+        i = i + 1
+    }
+    var out: [u8] = []
+    var j = sep + 4
+    loop {
+        if j >= raw.len() {
+            break
+        }
+        out.append(raw[j])
+        j = j + 1
+    }
+    return Ok(Response { status: _status_code(head), body: out })
+}
+
+
+// get / post are the two verbs Quog's sync uses.
+fn get(host: string, port: int, path: string) -> Result<Response, string> {
+    var empty: [u8] = []
+    return request(host, port, "GET", path, empty)
+}
+
+
+fn post(host: string, port: int, path: string, body: [u8]) -> Result<Response, string> {
+    return request(host, port, "POST", path, body)
 }
