@@ -41,6 +41,18 @@ q() { ( cd "$WORK" && "$BIN" --emit=run "$QUOG" "$@" ); }
     echo '$ quog log';                   q log
     echo '$ quog undo';                  q undo
     echo '$ quog log';                   q log
+
+    echo '$ quog save "resync"';         q save "resync"
+    echo '$ quog branch experiment';     q branch experiment
+    echo '$ quog switch experiment';     q switch experiment
+    printf 'experimental\n' > "$WORK/EXP.md"
+    echo '$ quog save "experiment work"'; q save "experiment work"
+    echo '$ quog switch main';           q switch main
+    echo '$ quog status';                q status
+    echo '$ quog switch experiment';     q switch experiment
+    echo '$ quog log';                   q log
+    echo '$ quog undo';                  q undo
+    echo '$ quog branch';                q branch
 } > "$TRANSCRIPT" 2>&1
 
 rc=0

@@ -3,6 +3,7 @@
 // (exists / rename / dirname / join / …) is OFI-190. Thin FFI, DEFAULT build, no dependency.
 extern "c" {
     fn em_mkdir(path: string) -> i64
+    fn em_remove(path: string) -> i64
 }
 
 
@@ -11,4 +12,11 @@ extern "c" {
 // directory present can safely ignore.
 fn mkdir(path: string) -> int {
     return em_mkdir(path)
+}
+
+
+// remove deletes the file at `path` (unlink). Returns 0 on success, or -1 if it could not be removed
+// (e.g. it does not exist), which a caller that just wants the file gone can ignore.
+fn remove(path: string) -> int {
+    return em_remove(path)
 }

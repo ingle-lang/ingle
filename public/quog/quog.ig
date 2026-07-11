@@ -98,6 +98,22 @@ fn now() -> int {
 }
 
 
+// head_branch returns the name of the branch HEAD points at (defaulting to "main" before the first ref).
+fn head_branch(db: sql.Db) -> Result<string, string> {
+    let b = get_ref(db, "HEAD")?
+    if b == "" {
+        return Ok("main")
+    }
+    return Ok(b)
+}
+
+
+// tip_ref returns the ref that holds the CURRENT branch's tip commit — "branch:<current>".
+fn tip_ref(db: sql.Db) -> Result<string, string> {
+    return Ok("branch:" + head_branch(db)?)
+}
+
+
 // log_op appends to the operation log — the append-only spine that makes every mutation undoable.
 // `before`/`after` capture the ref move so a future `undo` can restore the prior tip exactly.
 fn log_op(db: sql.Db, op: string, before: string, after: string) -> Result<int, string> {
@@ -226,12 +242,13 @@ fn cmd_init() -> Result<int, string> {
 // holds throughout — no object is overwritten, and the prior tip is preserved in the op-log.
 fn cmd_save(message: string) -> Result<int, string> {
     let db = sql.open(DB_PATH)?
-    let parent = get_ref(db, TIP_REF)?
+    let tr = tip_ref(db)?
+    let parent = get_ref(db, tr)?
     let tree_text = walk(db, ".", "")?
     let tree_id = put_object(db, "tree", tree_text.bytes())?
     let commit = commit_serialize(tree_id, parent, now(), message)
     let commit_id = put_object(db, "commit", commit.bytes())?
-    let _ = set_ref(db, TIP_REF, commit_id)?
+    let _ = set_ref(db, tr, commit_id)?
     let _ = log_op(db, "save", parent, commit_id)?
     println("saved {_short(commit_id)} ({_count_lines(tree_text)} files) — {message}")
     return Ok(0)
@@ -241,7 +258,7 @@ fn cmd_save(message: string) -> Result<int, string> {
 // cmd_log walks the current branch from its tip back through parent links, newest first.
 fn cmd_log() -> Result<int, string> {
     let db = sql.open(DB_PATH)?
-    var id = get_ref(db, TIP_REF)?
+    var id = get_ref(db, tip_ref(db)?)?
     if id == "" {
         println("no saves yet")
         return Ok(0)
@@ -266,7 +283,7 @@ fn cmd_show(argv: [string]) -> Result<int, string> {
     if argv.len() >= 2 {
         id = argv[1]
     } else {
-        id = get_ref(db, TIP_REF)?
+        id = get_ref(db, tip_ref(db)?)?
     }
     if id == "" {
         println("no saves yet")
@@ -308,12 +325,21 @@ fn cmd_undo() -> Result<int, string> {
     let op = sql.column_text(st, 0)
     let before = sql.column_text(st, 1)
     let after = sql.column_text(st, 2)
-    let _ = set_ref(db, TIP_REF, before)?
-    let _ = log_op(db, "undo", after, before)?
-    if before == "" {
-        println("undid {op} — back to empty history ({_short(after)} still stored, nothing lost)")
+    if op == "switch" {
+        // before/after are branch names: return to `before` and lay down its snapshot.
+        let _ = checkout_branch(db, before)?
+        let _ = set_ref(db, "HEAD", before)?
+        let _ = log_op(db, "undo", after, before)?
+        println("undid switch — back on {before}")
     } else {
-        println("undid {op} — tip {_short(after)} → {_short(before)} (nothing lost)")
+        // save/undo: before/after are commit ids on the current branch; restore the tip.
+        let _ = set_ref(db, tip_ref(db)?, before)?
+        let _ = log_op(db, "undo", after, before)?
+        if before == "" {
+            println("undid {op} — back to empty history ({_short(after)} still stored, nothing lost)")
+        } else {
+            println("undid {op} — tip {_short(after)} → {_short(before)} (nothing lost)")
+        }
     }
     return Ok(0)
 }
@@ -369,7 +395,7 @@ fn map_get(m: map.Map<string, string>, k: string) -> string {
 
 // tip_tree_text returns the last saved snapshot's tree text, or "" if there are no commits yet.
 fn tip_tree_text(db: sql.Db) -> Result<string, string> {
-    let tip = get_ref(db, TIP_REF)?
+    let tip = get_ref(db, tip_ref(db)?)?
     if tip == "" {
         return Ok("")
     }
@@ -466,10 +492,148 @@ fn cmd_diff() -> Result<int, string> {
 }
 
 
+// commit_tree_text returns the tree text (path\tid lines) of the snapshot a commit points at.
+fn commit_tree_text(db: sql.Db, commit_id: string) -> Result<string, string> {
+    let commit = from_bytes(get_object(db, commit_id)?)
+    return Ok(from_bytes(get_object(db, commit_header(commit, "tree "))?))
+}
+
+
+// mkdir_p creates every parent directory of file path `fs_path` (like `mkdir -p` on its dirname).
+fn mkdir_p(fs_path: string) {
+    let parts = fs_path.split("/")
+    var prefix = ""
+    var i = 0
+    loop {
+        if i >= parts.len() - 1 {
+            break
+        }
+        if i == 0 {
+            prefix = parts[0]
+        } else {
+            prefix = prefix + "/" + parts[i]
+        }
+        let _ = fs.mkdir(prefix)
+        i = i + 1
+    }
+}
+
+
+// checkout makes the working tree match `tree_text` (a snapshot): every file in it is written out, and
+// any working file NOT in it is removed. Callers snapshot first, so a pruned file is never truly lost.
+fn checkout(db: sql.Db, tree_text: string) -> Result<int, string> {
+    let target = tree_map(tree_text)
+    for path in target.keys() {
+        let fs_path = "./" + path
+        mkdir_p(fs_path)
+        write_file(fs_path, from_bytes(get_object(db, map_get(target, path))?))
+    }
+    let current = tree_map(scan(".", ""))
+    for path in current.keys() {
+        if !target.has(path) {
+            let _ = fs.remove("./" + path)
+        }
+    }
+    return Ok(0)
+}
+
+
+// checkout_branch lays down a branch's tip snapshot (an empty tree if the branch has no commits).
+fn checkout_branch(db: sql.Db, branch: string) -> Result<int, string> {
+    let tip = get_ref(db, "branch:" + branch)?
+    var tree = ""
+    if tip != "" {
+        tree = commit_tree_text(db, tip)?
+    }
+    return checkout(db, tree)
+}
+
+
+// ref_exists reports whether a ref row exists — distinguishing an empty branch from an absent one.
+fn ref_exists(db: sql.Db, name: string) -> Result<bool, string> {
+    let st = sql.prepare(db, "SELECT 1 FROM ref WHERE name = ?")?
+    let _ = sql.bind_text(st, 1, name)
+    return sql.step(st)
+}
+
+
+// cmd_branch lists branches (marking the current with '*'), or with a name creates one at the current tip.
+fn cmd_branch(argv: [string]) -> Result<int, string> {
+    let db = sql.open(DB_PATH)?
+    if argv.len() < 2 {
+        let cur = head_branch(db)?
+        let st = sql.prepare(db, "SELECT name FROM ref WHERE name LIKE 'branch:%' ORDER BY name")?
+        loop {
+            let more = sql.step(st)?
+            if !more {
+                break
+            }
+            let full = sql.column_text(st, 0)
+            let bname = str.substring(full, 7, str.cp_count(full))
+            if bname == cur {
+                println("* {bname}")
+            } else {
+                println("  {bname}")
+            }
+        }
+        return Ok(0)
+    }
+    let name = argv[1]
+    let tip = get_ref(db, tip_ref(db)?)?
+    let _ = set_ref(db, "branch:" + name, tip)?
+    if tip == "" {
+        println("created branch {name} (empty)")
+    } else {
+        println("created branch {name} at {_short(tip)}")
+    }
+    return Ok(0)
+}
+
+
+// cmd_switch moves to another branch. Invariant #4 (switching never loses work): it snapshots any
+// uncommitted changes on the current branch FIRST, then points HEAD at the target and checks out its
+// snapshot (writing its files, pruning the rest — all recoverable from the snapshot just taken).
+fn cmd_switch(argv: [string]) -> Result<int, string> {
+    if argv.len() < 2 {
+        return Err("switch needs a branch name: quog switch <name>")
+    }
+    let db = sql.open(DB_PATH)?
+    let target = argv[1]
+    let cur = head_branch(db)?
+    if target == cur {
+        println("already on {target}")
+        return Ok(0)
+    }
+    if !ref_exists(db, "branch:" + target)? {
+        return Err("no such branch: " + target + " (create it with: quog branch " + target + ")")
+    }
+    let cur_tr = tip_ref(db)?
+    let cur_tip = get_ref(db, cur_tr)?
+    var cur_tree_id = ""
+    if cur_tip != "" {
+        cur_tree_id = commit_header(from_bytes(get_object(db, cur_tip)?), "tree ")
+    }
+    // Invariant #4: if the working tree differs from the current tip, commit it before leaving.
+    if object_id(scan(".", "").bytes()) != cur_tree_id {
+        let tree_id = put_object(db, "tree", walk(db, ".", "")?.bytes())?
+        let snap = commit_serialize(tree_id, cur_tip, now(), "auto-snapshot before switching to " + target)
+        let snap_id = put_object(db, "commit", snap.bytes())?
+        let _ = set_ref(db, cur_tr, snap_id)?
+        let _ = log_op(db, "save", cur_tip, snap_id)?
+        println("auto-snapshot: saved your changes on {cur} as {_short(snap_id)}")
+    }
+    let _ = checkout_branch(db, target)?
+    let _ = set_ref(db, "HEAD", target)?
+    let _ = log_op(db, "switch", cur, target)?
+    println("switched to {target}")
+    return Ok(0)
+}
+
+
 // serve_log renders the branch history as an HTML page — each commit a link to its detail page.
 fn serve_log(db: sql.Db, conn: hs.Conn) -> Result<int, string> {
     var md = "# Quog — history\n\n"
-    var id = get_ref(db, TIP_REF)?
+    var id = get_ref(db, tip_ref(db)?)?
     if id == "" {
         md = md + "_No saves yet._\n"
     } else {
@@ -627,7 +791,7 @@ fn cmd_serve(argv: [string]) -> Result<int, string> {
 // dispatch runs the requested verb, returning a Result so any store error routes to one place.
 fn dispatch(argv: [string]) -> Result<int, string> {
     if argv.len() == 0 {
-        println("usage: quog <init|save|status|diff|log|show|undo|serve> [args]")
+        println("usage: quog <init|save|status|diff|log|show|undo|branch|switch|serve> [args]")
         return Ok(0)
     }
     let verb = argv[0]
@@ -639,6 +803,12 @@ fn dispatch(argv: [string]) -> Result<int, string> {
     }
     if verb == "diff" {
         return cmd_diff()
+    }
+    if verb == "branch" {
+        return cmd_branch(argv)
+    }
+    if verb == "switch" {
+        return cmd_switch(argv)
     }
     if verb == "serve" {
         return cmd_serve(argv)

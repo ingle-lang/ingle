@@ -170,6 +170,13 @@ static int w_em_mkdir(const Value *a, Value *o) {
     return 1;
 }
 
+// em_remove(path) -> int. Delete a file (unlink). 0 on success, -1 on error (e.g. absent). Part of
+// OFI-190; used by Quog's `switch` to prune working-tree files not in the target snapshot.
+static int w_em_remove(const Value *a, Value *o) {
+    o[0] = INT_VAL((int64_t)unlink(AS_CSTRING(a[0])));
+    return 1;
+}
+
 // --- TCP sockets (std/http_server) — a server-side networking slice, libc/POSIX, DEFAULT build (no
 // dependency). Purpose-built so no sockaddr struct crosses the FFI: em_tcp_listen hides socket +
 // SO_REUSEADDR + bind(INADDR_ANY:port) + listen behind one "listen on this port" call. --------------
@@ -971,6 +978,7 @@ static const CExternSig g_sigs[] = {
     // wall-clock time (std/time) + mkdir (std/fs) — DEFAULT build:
     { "em_now_unix", 0, { 0 },   1, { 'i' }, 0, 0 },
     { "em_mkdir",    1, { 'p' }, 1, { 'i' }, 0, 0 },
+    { "em_remove",   1, { 'p' }, 1, { 'i' }, 0, 0 },
     // TCP sockets (std/http_server) — DEFAULT build:
     { "em_tcp_listen", 1, { 'i' },      1, { 'i' }, 0, 0 },
     { "em_tcp_accept", 1, { 'i' },      1, { 'i' }, 0, 0 },
@@ -1026,7 +1034,7 @@ static const CExternFn g_fns[] = {
     w_cvec2_len, w_cvec2_dot, w_cvec2_add, w_cvec2_scale,
     w_strlen, w_strncmp, w_fopen, w_fread, w_fwrite, w_fclose,
     w_proc_run, w_proc_exit, w_proc_stdout, w_proc_stderr, w_proc_free,
-    w_em_now_unix, w_em_mkdir,
+    w_em_now_unix, w_em_mkdir, w_em_remove,
     w_em_tcp_listen, w_em_tcp_accept, w_em_recv, w_em_send, w_em_close,
 #if EMBER_NET
     w_http_post,
