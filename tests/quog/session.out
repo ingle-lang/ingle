@@ -1,16 +1,12 @@
 $ quog init
 initialised empty Quog repo in .quog/
-=> 0
 $ quog save "initial import"
 saved 1b403862b3 (2 files) — initial import
-=> 0
 $ quog status
 clean — nothing changed since the last save
-=> 0
 $ quog status
   modified  README.md
   added     TODO.md
-=> 0
 $ quog diff
 === README.md  (+2 -1) ===
  alpha
@@ -20,50 +16,37 @@ $ quog diff
 +delta
 === TODO.md  (+1 -0) ===
 +notes
-=> 0
 $ quog save "edit readme, add todo"
 saved bc003bd838 (3 files) — edit readme, add todo
-=> 0
 $ quog log
 bc003bd838  t=1000000000  edit readme, add todo
 1b403862b3  t=1000000000  initial import
-=> 0
 $ quog undo
 undid save — tip bc003bd838 → 1b403862b3 (nothing lost)
-=> 0
 $ quog log
 1b403862b3  t=1000000000  initial import
-=> 0
 $ quog save "resync"
 saved d90b9dae79 (3 files) — resync
-=> 0
 $ quog branch experiment
 created branch experiment at d90b9dae79
-=> 0
 $ quog switch experiment
 switched to experiment
-=> 0
 $ quog save "experiment work"
 saved d706d5131a (4 files) — experiment work
-=> 0
 $ quog switch main
 switched to main
-=> 0
 $ quog status
 clean — nothing changed since the last save
-=> 0
 $ quog switch experiment
 switched to experiment
-=> 0
 $ quog log
 d706d5131a  t=1000000000  experiment work
 d90b9dae79  t=1000000000  resync
 1b403862b3  t=1000000000  initial import
-=> 0
 $ quog undo
 undid switch — back on main
-=> 0
 $ quog branch
   experiment
 * main
-=> 0
+$ quog verify
+verified 4 commits, 3 trees, 5 blobs — every object intact, every link resolves

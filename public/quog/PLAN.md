@@ -46,6 +46,14 @@ contracts (append-only: the object table only grows; undo: the pre-state is reac
 whose safety is proven by the language's own contract machinery is the strongest possible dogfood of
 Ingle's north star — so it is a first-class goal here, not an afterthought.
 
+**Provably safe > "secure like everyone else".** For Quog's audience — people who won't configure
+auth/TLS correctly — security means *safe by default and verifiable*, not knobs to set. The
+content-addressed, append-only store is already a tamper-evidence asset: **`quog verify`** re-hashes
+every object (a mismatch = corruption or in-place history rewrite) and checks every commit/tree/ref
+link resolves, exiting non-zero for CI or a pre-sync gate. And `serve` binds **loopback only** by
+default (`--public` to expose deliberately). Generic auth/TLS is table-stakes, deferred to when
+`sync` actually puts writes on the wire — done properly then, not bolted on early.
+
 ## Command surface (~a dozen verbs)
 
 | verb | does |
@@ -60,9 +68,10 @@ Ingle's north star — so it is a first-class goal here, not an afterthought.
 | `branch` | make / list branches |
 | `merge` | join two histories (additive; conflict → new head) |
 | `undo` | revert the last operation (from the op-log) |
+| `verify` | prove the repo is intact + untampered (content-address integrity + link/ref checks) |
 | `restore` | bring something back from the attic |
 | `sync` | exchange objects with a remote (additive) |
-| `serve` | run the web view + sync endpoint |
+| `serve` | run the web view (loopback by default; `--public` to expose) + sync endpoint |
 
 ## Storage model
 

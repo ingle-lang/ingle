@@ -761,17 +761,14 @@ fn route(db: sql.Db, conn: hs.Conn, path: string) -> Result<int, string> {
 }
 
 
-// cmd_serve runs the read-only web view: a Fossil-style local server over the repo's history. It
-// serves one connection at a time (per-connection fibers are a follow-on); a bad request or transient
-// accept error is swallowed so the server stays up.
-fn cmd_serve(argv: [string]) -> Result<int, string> {
-    let db = sql.open(DB_PATH)?
-    var port = 8017
-    if argv.len() >= 2 {
-        port = _atoi(argv[1])
+// serve_loop is the accept loop over an already-bound listener: one connection at a time (per-connection
+// fibers are a follow-on); a bad request or transient accept error is swallowed so the server stays up.
+fn serve_loop(db: sql.Db, server: hs.Server, port: int, public: bool) -> Result<int, string> {
+    if public {
+        println("quog serving PUBLICLY on http://0.0.0.0:{port} — reachable from your network, NO auth. Ctrl-C to stop")
+    } else {
+        println("quog serving on http://localhost:{port} (loopback only) — Ctrl-C to stop")
     }
-    let server = hs.listen(port)?
-    println("quog serving on http://localhost:{port}  —  Ctrl-C to stop")
     loop {
         match hs.accept(server) {
             case Ok(conn) {
@@ -788,15 +785,140 @@ fn cmd_serve(argv: [string]) -> Result<int, string> {
 }
 
 
+// cmd_serve runs the read-only web view over the repo's history. It binds LOOPBACK ONLY by default
+// (reachable only from this machine — the safe default); `--public` opts into exposing it to the
+// network (no auth/TLS, so only behind a trusted network or a proxy). Usage: quog serve [port] [--public]
+fn cmd_serve(argv: [string]) -> Result<int, string> {
+    let db = sql.open(DB_PATH)?
+    var port = 8017
+    var public = false
+    var i = 1
+    loop {
+        if i >= argv.len() {
+            break
+        }
+        if argv[i] == "--public" {
+            public = true
+        } else {
+            port = _atoi(argv[i])
+        }
+        i = i + 1
+    }
+    if public {
+        return serve_loop(db, hs.listen_public(port)?, port, true)
+    }
+    return serve_loop(db, hs.listen(port)?, port, false)
+}
+
+
+// cmd_verify proves the repo's integrity — the safety/security backbone that content addressing makes
+// cheap. (1) Every object's stored bytes must still hash to its id: a mismatch means corruption or
+// tampering (someone edited history in place). (2) Every commit's tree + parent and every tree's blobs
+// must resolve, and (3) every branch tip must exist — no dangling links. Exits non-zero on any problem,
+// so it drops straight into CI or a pre-sync check.
+fn cmd_verify() -> Result<int, string> {
+    let db = sql.open(DB_PATH)?
+    var ids = map.Map<string, string>{ buckets: [], count: 0 }   // id -> kind; doubles as the exists-set
+    var n_blob = 0
+    var n_tree = 0
+    var n_commit = 0
+    var problems = 0
+
+    // (1) content-address integrity: id must equal SHA-256(data).
+    let st = sql.prepare(db, "SELECT id, kind, data FROM object")?
+    loop {
+        let more = sql.step(st)?
+        if !more {
+            break
+        }
+        let id = sql.column_text(st, 0)
+        let kind = sql.column_text(st, 1)
+        ids.set(id, kind)
+        if object_id(sql.column_blob(st, 2)) != id {
+            println("  TAMPERED  {_short(id)} — its content no longer hashes to its id")
+            problems = problems + 1
+        }
+        if kind == "blob" {
+            n_blob = n_blob + 1
+        } else if kind == "tree" {
+            n_tree = n_tree + 1
+        } else if kind == "commit" {
+            n_commit = n_commit + 1
+        }
+    }
+
+    // (2) link integrity: commit -> tree/parent, tree -> blobs.
+    let cs = sql.prepare(db, "SELECT id, data FROM object WHERE kind = 'commit'")?
+    loop {
+        let more = sql.step(cs)?
+        if !more {
+            break
+        }
+        let cid = sql.column_text(cs, 0)
+        let text = from_bytes(sql.column_blob(cs, 1))
+        if !ids.has(commit_header(text, "tree ")) {
+            println("  BROKEN    commit {_short(cid)} points at a missing tree")
+            problems = problems + 1
+        }
+        let parent = commit_header(text, "parent ")
+        if parent != "" && !ids.has(parent) {
+            println("  BROKEN    commit {_short(cid)} points at a missing parent {_short(parent)}")
+            problems = problems + 1
+        }
+    }
+    let ts = sql.prepare(db, "SELECT id, data FROM object WHERE kind = 'tree'")?
+    loop {
+        let more = sql.step(ts)?
+        if !more {
+            break
+        }
+        let tid = sql.column_text(ts, 0)
+        for line in from_bytes(sql.column_blob(ts, 1)).split("\n") {
+            if line != "" {
+                let parts = line.split("\t")
+                if parts.len() == 2 && !ids.has(parts[1]) {
+                    println("  BROKEN    tree {_short(tid)} references a missing blob for {parts[0]}")
+                    problems = problems + 1
+                }
+            }
+        }
+    }
+
+    // (3) refs: every branch tip must exist.
+    let rs = sql.prepare(db, "SELECT name, target FROM ref WHERE name LIKE 'branch:%'")?
+    loop {
+        let more = sql.step(rs)?
+        if !more {
+            break
+        }
+        let target = sql.column_text(rs, 1)
+        if target != "" && !ids.has(target) {
+            println("  BROKEN    {sql.column_text(rs, 0)} points at a missing commit")
+            problems = problems + 1
+        }
+    }
+
+    if problems == 0 {
+        println("verified {n_commit} commits, {n_tree} trees, {n_blob} blobs — every object intact, every link resolves")
+        return Ok(0)
+    }
+    println("FAILED — {problems} integrity problem(s) found")
+    return Ok(1)
+}
+
+
 // dispatch runs the requested verb, returning a Result so any store error routes to one place.
 fn dispatch(argv: [string]) -> Result<int, string> {
     if argv.len() == 0 {
-        println("usage: quog <init|save|status|diff|log|show|undo|branch|switch|serve> [args]")
+        println("usage: quog <init|save|status|diff|log|show|undo|branch|switch|verify|serve> [args]")
         return Ok(0)
     }
     let verb = argv[0]
     if verb == "init" {
         return cmd_init()
+    }
+    if verb == "verify" {
+        return cmd_verify()
     }
     if verb == "status" {
         return cmd_status()
@@ -832,14 +954,17 @@ fn dispatch(argv: [string]) -> Result<int, string> {
 }
 
 
-fn main() -> int {
+fn main() {
+    // exit() (not return) so the process exit code is the command's status — `quog verify` failing a
+    // CI/pre-sync check must fail the shell too — and so the VM runner's "=> N" line stays out of the
+    // CLI's output, matching how a native `quog` binary behaves.
     match dispatch(args()) {
         case Ok(code) {
-            return code
+            exit(code)
         }
         case Err(e) {
             println("quog: {e}")
-            return 1
+            exit(1)
         }
     }
 }

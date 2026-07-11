@@ -10,7 +10,7 @@ import "std/string" as str
 
 
 extern "c" {
-    fn em_tcp_listen(port: i64) -> i64
+    fn em_tcp_listen(port: i64, public: i64) -> i64
     fn em_tcp_accept(fd: i64) -> i64
     fn em_recv(fd: i64, mut buf: [u8]) -> i64
     fn em_send(fd: i64, buf: [u8]) -> i64
@@ -44,9 +44,21 @@ struct Request {
 }
 
 
-// listen opens a TCP listener on `port` (all interfaces), erring if the port can't be bound.
+// listen opens a TCP listener on `port` bound to LOOPBACK ONLY (127.0.0.1) — reachable from this
+// machine, not the network. This is the safe default; use listen_public to expose it deliberately.
 fn listen(port: int) -> Result<Server, string> {
-    let fd = em_tcp_listen(port)
+    let fd = em_tcp_listen(port, 0)
+    if fd < 0 {
+        return Err("could not listen on port {port} (in use, or needs privilege for < 1024)")
+    }
+    return Ok(Server { fd: fd })
+}
+
+
+// listen_public opens a listener on ALL interfaces (INADDR_ANY) — reachable from the network. Opt-in,
+// because a server with no auth/TLS exposed to the network is a real risk; prefer `listen` + a proxy.
+fn listen_public(port: int) -> Result<Server, string> {
+    let fd = em_tcp_listen(port, 1)
     if fd < 0 {
         return Err("could not listen on port {port} (in use, or needs privilege for < 1024)")
     }

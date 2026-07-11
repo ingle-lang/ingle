@@ -181,9 +181,10 @@ static int w_em_remove(const Value *a, Value *o) {
 // dependency). Purpose-built so no sockaddr struct crosses the FFI: em_tcp_listen hides socket +
 // SO_REUSEADDR + bind(INADDR_ANY:port) + listen behind one "listen on this port" call. --------------
 
-// em_tcp_listen(port) -> int. Open a listening TCP socket on `port` (all interfaces). Returns the
-// listener fd, or -1 on any error. Ignores SIGPIPE once so a later send to a hung-up peer returns an
-// error instead of killing the process.
+// em_tcp_listen(port, public) -> int. Open a listening TCP socket on `port`. `public` == 0 binds
+// 127.0.0.1 only (loopback — the SAFE default, reachable only from this machine); non-zero binds all
+// interfaces (INADDR_ANY — exposed to the network, opt-in). Returns the listener fd, or -1 on error.
+// Ignores SIGPIPE once so a later send to a hung-up peer returns an error instead of killing us.
 static int w_em_tcp_listen(const Value *a, Value *o) {
     signal(SIGPIPE, SIG_IGN);
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -193,7 +194,7 @@ static int w_em_tcp_listen(const Value *a, Value *o) {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof addr);
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_addr.s_addr = htonl(AS_INT(a[1]) ? INADDR_ANY : INADDR_LOOPBACK);
     addr.sin_port = htons((uint16_t)AS_INT(a[0]));
     if (bind(fd, (struct sockaddr *)&addr, sizeof addr) < 0 || listen(fd, 64) < 0) {
         close(fd);
@@ -980,7 +981,7 @@ static const CExternSig g_sigs[] = {
     { "em_mkdir",    1, { 'p' }, 1, { 'i' }, 0, 0 },
     { "em_remove",   1, { 'p' }, 1, { 'i' }, 0, 0 },
     // TCP sockets (std/http_server) — DEFAULT build:
-    { "em_tcp_listen", 1, { 'i' },      1, { 'i' }, 0, 0 },
+    { "em_tcp_listen", 2, { 'i', 'i' }, 1, { 'i' }, 0, 0 },
     { "em_tcp_accept", 1, { 'i' },      1, { 'i' }, 0, 0 },
     { "em_recv",       2, { 'i', 'b' }, 1, { 'i' }, 0, 0 },
     { "em_send",       2, { 'i', 'b' }, 1, { 'i' }, 0, 0 },
