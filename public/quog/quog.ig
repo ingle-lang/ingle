@@ -244,10 +244,70 @@ fn cmd_log() -> Result<int, string> {
 }
 
 
+// cmd_show prints a commit's metadata and the files in its snapshot. With no id it shows the tip.
+fn cmd_show(argv: [string]) -> Result<int, string> {
+    let db = sql.open(DB_PATH)?
+    var id = ""
+    if argv.len() >= 2 {
+        id = argv[1]
+    } else {
+        id = get_ref(db, TIP_REF)?
+    }
+    if id == "" {
+        println("no saves yet")
+        return Ok(0)
+    }
+    let text = from_bytes(get_object(db, id)?)
+    let tree_id = commit_header(text, "tree ")
+    let parent = commit_header(text, "parent ")
+    println("commit   {id}")
+    if parent != "" {
+        println("parent   {parent}")
+    }
+    println("time     {_atoi(commit_header(text, "time "))}")
+    println("message  {commit_message(text)}")
+    println("files:")
+    for line in from_bytes(get_object(db, tree_id)?).split("\n") {
+        if line != "" {
+            let parts = line.split("\t")
+            if parts.len() == 2 {
+                println("  {_short(parts[1])}  {parts[0]}")
+            }
+        }
+    }
+    return Ok(0)
+}
+
+
+// cmd_undo reverts the last operation from the op-log (invariant #2: everything is undoable). It moves
+// the branch tip back to the op's `before` state and records the undo itself — so nothing is lost (the
+// undone commit is still stored, append-only) and the undo is itself in the log.
+fn cmd_undo() -> Result<int, string> {
+    let db = sql.open(DB_PATH)?
+    let st = sql.prepare(db, "SELECT op, before, after FROM oplog ORDER BY seq DESC LIMIT 1")?
+    let found = sql.step(st)?
+    if !found {
+        println("nothing to undo")
+        return Ok(0)
+    }
+    let op = sql.column_text(st, 0)
+    let before = sql.column_text(st, 1)
+    let after = sql.column_text(st, 2)
+    let _ = set_ref(db, TIP_REF, before)?
+    let _ = log_op(db, "undo", after, before)?
+    if before == "" {
+        println("undid {op} — back to empty history ({_short(after)} still stored, nothing lost)")
+    } else {
+        println("undid {op} — tip {_short(after)} → {_short(before)} (nothing lost)")
+    }
+    return Ok(0)
+}
+
+
 // dispatch runs the requested verb, returning a Result so any store error routes to one place.
 fn dispatch(argv: [string]) -> Result<int, string> {
     if argv.len() == 0 {
-        println("usage: quog <init|save|log> [args]")
+        println("usage: quog <init|save|log|show|undo> [args]")
         return Ok(0)
     }
     let verb = argv[0]
@@ -262,6 +322,12 @@ fn dispatch(argv: [string]) -> Result<int, string> {
     }
     if verb == "log" {
         return cmd_log()
+    }
+    if verb == "show" {
+        return cmd_show(argv)
+    }
+    if verb == "undo" {
+        return cmd_undo()
     }
     return Err("unknown verb: " + verb)
 }
