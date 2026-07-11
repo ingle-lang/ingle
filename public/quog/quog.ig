@@ -24,6 +24,7 @@ import "std/html" as html
 import "std/http_server" as hs
 import "std/map" as map
 import "std/diff" as diff
+import "std/list" as list
 
 
 let DB_PATH = ".quog/quog.db"
@@ -199,19 +200,32 @@ fn commit_header(text: string, prefix: string) -> string {
 }
 
 
-// commit_message returns a commit's message body — everything after the blank line at index 3.
+// commit_message returns a commit's message body — everything after the first blank line (robust to
+// the variable number of header lines: a merge commit has two `parent` lines, not one).
 fn commit_message(text: string) -> string {
     let lines = text.split("\n")
-    var msg = ""
-    var i = 4
+    var i = 0
     loop {
-        if i == lines.len() {
+        if i >= lines.len() {
+            return ""
+        }
+        if lines[i] == "" {
+            break                       // the blank separator between headers and the message
+        }
+        i = i + 1
+    }
+    i = i + 1                           // step past the blank line
+    var msg = ""
+    var first = true
+    loop {
+        if i >= lines.len() {
             break
         }
-        if i > 4 {
+        if !first {
             msg = msg + "\n"
         }
         msg = msg + lines[i]
+        first = false
         i = i + 1
     }
     return msg
@@ -716,6 +730,183 @@ fn cmd_restore(argv: [string]) -> Result<int, string> {
 }
 
 
+// commit_parents returns all of a commit's parent ids (two for a merge commit, one normally, none
+// for the first commit).
+fn commit_parents(text: string) -> [string] {
+    var out: [string] = []
+    for line in text.split("\n") {
+        if str.starts_with(line, "parent ") {
+            let p = _after(line, "parent ")
+            if p != "" {
+                out.append(p)
+            }
+        }
+    }
+    return out
+}
+
+
+// collect_ancestors returns the set (as a map keyed by id) of every commit reachable from `start` via
+// parent links, including `start` — a BFS over the commit DAG.
+fn collect_ancestors(db: sql.Db, start: string) -> Result<map.Map<string, string>, string> {
+    var seen = map.Map<string, string>{ buckets: [], count: 0 }
+    var queue: [string] = []
+    if start != "" {
+        queue.append(start)
+        seen.set(start, "1")
+    }
+    var i = 0
+    loop {
+        if i >= queue.len() {
+            break
+        }
+        let id = queue[i]
+        i = i + 1
+        for p in commit_parents(from_bytes(get_object(db, id)?)) {
+            if !seen.has(p) {
+                seen.set(p, "1")
+                queue.append(p)
+            }
+        }
+    }
+    return Ok(seen)
+}
+
+
+// merge_base returns the closest common ancestor of `c` and `t` (the merge base for a 3-way merge), or
+// "" if their histories are unrelated.
+fn merge_base(db: sql.Db, c: string, t: string) -> Result<string, string> {
+    let c_anc = collect_ancestors(db, c)?
+    var seen = map.Map<string, string>{ buckets: [], count: 0 }
+    var queue: [string] = []
+    if t != "" {
+        queue.append(t)
+        seen.set(t, "1")
+    }
+    var i = 0
+    loop {
+        if i >= queue.len() {
+            break
+        }
+        let id = queue[i]
+        i = i + 1
+        if c_anc.has(id) {
+            return Ok(id)
+        }
+        for p in commit_parents(from_bytes(get_object(db, id)?)) {
+            if !seen.has(p) {
+                seen.set(p, "1")
+                queue.append(p)
+            }
+        }
+    }
+    return Ok("")
+}
+
+
+// cmd_merge joins branch <name> into the current branch. Fast-forwards when possible; otherwise does a
+// 3-way merge against the common ancestor. Per invariant #5 it is ADDITIVE: a real conflict (a file
+// changed on both sides) is NOT clobbered — the merge is declined and both branch heads survive intact.
+fn cmd_merge(argv: [string]) -> Result<int, string> {
+    if argv.len() < 2 {
+        return Err("merge needs a branch name: quog merge <name>")
+    }
+    let db = sql.open(DB_PATH)?
+    let other = argv[1]
+    if !ref_exists(db, "branch:" + other)? {
+        return Err("no such branch: " + other)
+    }
+    if is_dirty(db)? {
+        return Err("working tree has uncommitted changes — save or discard before merging")
+    }
+    let cur_branch = head_branch(db)?
+    let cur_tr = tip_ref(db)?
+    let c = get_ref(db, cur_tr)?
+    let t = get_ref(db, "branch:" + other)?
+    if t == "" || c == t {
+        println("already up to date")
+        return Ok(0)
+    }
+    let c_anc = collect_ancestors(db, c)?
+    let t_anc = collect_ancestors(db, t)?
+    if c_anc.has(t) {
+        println("already up to date — {other} is contained in {cur_branch}")
+        return Ok(0)
+    }
+    if c != "" && !t_anc.has(c) {
+        // Diverged: 3-way merge against the common ancestor.
+        let base = merge_base(db, c, t)?
+        var base_tree = tree_map("")
+        if base != "" {
+            base_tree = tree_map(commit_tree_text(db, base)?)
+        }
+        let c_tree = tree_map(commit_tree_text(db, c)?)
+        let t_tree = tree_map(commit_tree_text(db, t)?)
+        var merged = map.Map<string, string>{ buckets: [], count: 0 }
+        var paths = map.Map<string, string>{ buckets: [], count: 0 }
+        var conflicts: [string] = []
+        for p in c_tree.keys() {
+            paths.set(p, "1")
+        }
+        for p in t_tree.keys() {
+            paths.set(p, "1")
+        }
+        for path in paths.keys() {
+            let cv = map_get(c_tree, path)
+            let tv = map_get(t_tree, path)
+            let bv = map_get(base_tree, path)
+            if cv == tv {
+                if cv != "" {
+                    merged.set(path, cv)
+                }
+            } else if cv == bv {
+                if tv != "" {
+                    merged.set(path, tv)
+                }
+            } else if tv == bv {
+                if cv != "" {
+                    merged.set(path, cv)
+                }
+            } else {
+                conflicts.append(path)
+            }
+        }
+        if conflicts.len() > 0 {
+            println("merge declined — both {cur_branch} and {other} changed these; nothing clobbered (both branches kept):")
+            for f in conflicts {
+                println("  conflict: {f}")
+            }
+            println("reconcile by hand: switch to {other}, apply what you need, then save.")
+            return Ok(1)
+        }
+        // Build the merged tree in sorted path order (a deterministic content address), commit it with
+        // TWO parents, advance the branch, and lay it down.
+        var mpaths: [string] = []
+        for p in merged.keys() {
+            mpaths.append(p)
+        }
+        var tree_text = ""
+        for p in list.sort(mpaths, |a, b| str.less(a, b)) {
+            tree_text = tree_text + p + "\t" + map_get(merged, p) + "\n"
+        }
+        let tree_id = put_object(db, "tree", tree_text.bytes())?
+        let commit = "tree {tree_id}\nparent {c}\nparent {t}\ntime {now()}\n\nmerge {other} into {cur_branch}"
+        let commit_id = put_object(db, "commit", commit.bytes())?
+        let _ = set_ref(db, cur_tr, commit_id)?
+        let _ = log_op(db, "save", c, commit_id)?
+        let _ = checkout(db, tree_text)?
+        println("merged {other} into {cur_branch} — {_short(commit_id)} ({merged.size()} files)")
+        return Ok(0)
+    }
+    // Fast-forward: c is an ancestor of t (or c is empty).
+    let _ = checkout(db, commit_tree_text(db, t)?)?
+    let _ = set_ref(db, cur_tr, t)?
+    let _ = log_op(db, "save", c, t)?
+    println("fast-forwarded {cur_branch} to {_short(t)}")
+    return Ok(0)
+}
+
+
 // serve_log renders the branch history as an HTML page — each commit a link to its detail page.
 fn serve_log(db: sql.Db, conn: hs.Conn) -> Result<int, string> {
     var md = "# Quog — history\n\n"
@@ -996,7 +1187,7 @@ fn cmd_verify() -> Result<int, string> {
 // dispatch runs the requested verb, returning a Result so any store error routes to one place.
 fn dispatch(argv: [string]) -> Result<int, string> {
     if argv.len() == 0 {
-        println("usage: quog <init|save|status|diff|log|show|undo|discard|restore|branch|switch|verify|serve> [args]")
+        println("usage: quog <init|save|status|diff|log|show|undo|discard|restore|branch|switch|merge|verify|serve> [args]")
         return Ok(0)
     }
     let verb = argv[0]
@@ -1023,6 +1214,9 @@ fn dispatch(argv: [string]) -> Result<int, string> {
     }
     if verb == "switch" {
         return cmd_switch(argv)
+    }
+    if verb == "merge" {
+        return cmd_merge(argv)
     }
     if verb == "serve" {
         return cmd_serve(argv)

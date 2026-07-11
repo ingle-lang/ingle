@@ -48,6 +48,12 @@ undid switch — back on main
 $ quog branch
   experiment
 * main
+$ quog merge experiment
+fast-forwarded main to d706d5131a
+$ quog log
+d706d5131a  t=1000000000  experiment work
+d90b9dae79  t=1000000000  resync
+1b403862b3  t=1000000000  initial import
 $ quog discard
 discarded working changes — recoverable with: quog restore 1
 $ quog restore

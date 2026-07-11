@@ -170,12 +170,13 @@ Constraints to plan around:
 `undo` over the SQLite store, with the safety invariants written as executable contracts. Goal:
 prove append-only and universal undo actually hold, machine-checked, end to end.
 
-**Phase 2 — working with change** *(status, diff, branch, switch done)*. `status`, `diff` (line-level,
-via a new `std/diff` LCS engine — CLI **and** a GitHub-style colored web diff), plus `branch`
-(create/list) and `switch` — which checks out the target snapshot (writing its files, pruning the
-rest) and, per invariant #4, **auto-snapshots any uncommitted work first so nothing is lost**;
-`undo` of a switch restores the prior branch. Still to come: `restore` from the attic, `merge`
-(additive, new-head-on-conflict).
+**Phase 2 — working with change** *(DONE)*. `status`, `diff` (line-level, via a new `std/diff` LCS
+engine — CLI **and** a GitHub-style colored web diff); `branch` (create/list) and `switch` (checks
+out the target snapshot, pruning stale files; per invariant #4 **auto-snapshots uncommitted work
+first**, undo of a switch restores the prior branch); `discard`/`restore` over a recoverable **attic**
+(invariant #6); and `merge` — fast-forward when possible, else a 3-way merge against the common
+ancestor, and per invariant #5 **additive: a real conflict is declined, not clobbered — both branch
+heads survive intact.** All six safety invariants are live.
 
 **Phase W1 — the web content leaf** *(done)*. `std/html` renders Markdown/AST to HTML; Quog's
 history/diff/file views render as pages.

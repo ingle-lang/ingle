@@ -132,6 +132,28 @@ fn ends_with(s: string, suffix: string) -> bool {
 }
 
 
+// less reports whether `a` sorts before `b` in byte (lexicographic) order — the total order for
+// sorting paths, keys, ids, etc. `sort(xs, |a, b| less(a, b))` gives ascending order. A shorter string
+// that is a prefix of the other sorts first ("ab" < "abc").
+fn less(a: string, b: string) -> bool {
+    let ab = a.bytes()
+    let bb = b.bytes()
+    var i = 0
+    loop {
+        if i == ab.len() {
+            return bb.len() > ab.len()
+        }
+        if i == bb.len() {
+            return false
+        }
+        if ab[i] != bb[i] {
+            return ab[i] < bb[i]
+        }
+        i = i + 1
+    }
+}
+
+
 
 
 

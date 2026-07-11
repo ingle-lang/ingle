@@ -53,6 +53,8 @@ q() { ( cd "$WORK" && "$BIN" --emit=run "$QUOG" "$@" ); }
     echo '$ quog log';                   q log
     echo '$ quog undo';                  q undo
     echo '$ quog branch';                q branch
+    echo '$ quog merge experiment';      q merge experiment
+    echo '$ quog log';                   q log
     printf 'a scratch edit\n' >> "$WORK/README.md"
     echo '$ quog discard';               q discard
     echo '$ quog restore';               q restore
