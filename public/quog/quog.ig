@@ -909,7 +909,7 @@ fn cmd_merge(argv: [string]) -> Result<int, string> {
 
 // serve_log renders the branch history as an HTML page — each commit a link to its detail page.
 fn serve_log(db: sql.Db, conn: hs.Conn) -> Result<int, string> {
-    var md = "# Quog — history\n\n"
+    var md = "# Quog — history\n\n[verify integrity](/verify) · branch `" + head_branch(db)? + "`\n\n"
     var id = get_ref(db, tip_ref(db)?)?
     if id == "" {
         md = md + "_No saves yet._\n"
@@ -990,6 +990,28 @@ fn render_diff_html(db: sql.Db, this_text: string) -> Result<string, string> {
 }
 
 
+// serve_verify renders the integrity report as a page — the "provably safe" badge in the browser.
+fn serve_verify(db: sql.Db, conn: hs.Conn) -> Result<int, string> {
+    let problems = verify_problems(db)?
+    var md = "# Integrity\n\n"
+    if problems.len() == 0 {
+        let nc = count_kind(db, "commit")?
+        let nt = count_kind(db, "tree")?
+        let nb = count_kind(db, "blob")?
+        md = md + "**Verified.** Every object's content still hashes to its id, and every commit, tree, and ref link resolves — this history is intact and untampered.\n\n"
+        md = md + "{nc} commits · {nt} trees · {nb} blobs checked.\n"
+    } else {
+        md = md + "**FAILED — {problems.len()} problem(s):**\n\n"
+        for p in problems {
+            md = md + "- `" + p + "`\n"
+        }
+    }
+    md = md + "\n[← back to history](/)\n"
+    let _ = hs.ok_html(conn, html.page("Quog — integrity", html.render_markdown(md)))
+    return Ok(0)
+}
+
+
 // serve_commit renders one commit: its metadata, a link to its parent, and the files in its snapshot.
 fn serve_commit(db: sql.Db, conn: hs.Conn, id: string) -> Result<int, string> {
     match get_object(db, id) {
@@ -1029,6 +1051,9 @@ fn serve_commit(db: sql.Db, conn: hs.Conn, id: string) -> Result<int, string> {
 fn route(db: sql.Db, conn: hs.Conn, path: string) -> Result<int, string> {
     if path == "/" {
         return serve_log(db, conn)
+    }
+    if path == "/verify" {
+        return serve_verify(db, conn)
     }
     if str.starts_with(path, "/commit/") {
         return serve_commit(db, conn, str.substring(path, 8, str.cp_count(path)))
@@ -1088,20 +1113,14 @@ fn cmd_serve(argv: [string]) -> Result<int, string> {
 }
 
 
-// cmd_verify proves the repo's integrity — the safety/security backbone that content addressing makes
-// cheap. (1) Every object's stored bytes must still hash to its id: a mismatch means corruption or
-// tampering (someone edited history in place). (2) Every commit's tree + parent and every tree's blobs
-// must resolve, and (3) every branch tip must exist — no dangling links. Exits non-zero on any problem,
-// so it drops straight into CI or a pre-sync check.
-fn cmd_verify() -> Result<int, string> {
-    let db = sql.open(DB_PATH)?
-    var ids = map.Map<string, string>{ buckets: [], count: 0 }   // id -> kind; doubles as the exists-set
-    var n_blob = 0
-    var n_tree = 0
-    var n_commit = 0
-    var problems = 0
-
-    // (1) content-address integrity: id must equal SHA-256(data).
+// verify_problems runs the integrity checks and returns a list of problem descriptions (empty = the
+// repo is fully intact) — shared by the `verify` command and the /verify web view. The safety/security
+// backbone content addressing makes cheap: (1) every object's stored bytes must still hash to its id
+// (a mismatch = corruption or an in-place history rewrite); (2) every commit's tree + all parents and
+// every tree's blobs must resolve; (3) every branch tip must exist. No dangling or forged links.
+fn verify_problems(db: sql.Db) -> Result<[string], string> {
+    var ids = map.Map<string, string>{ buckets: [], count: 0 }   // id set (also holds kind)
+    var problems: [string] = []
     let st = sql.prepare(db, "SELECT id, kind, data FROM object")?
     loop {
         let more = sql.step(st)?
@@ -1109,22 +1128,11 @@ fn cmd_verify() -> Result<int, string> {
             break
         }
         let id = sql.column_text(st, 0)
-        let kind = sql.column_text(st, 1)
-        ids.set(id, kind)
+        ids.set(id, sql.column_text(st, 1))
         if object_id(sql.column_blob(st, 2)) != id {
-            println("  TAMPERED  {_short(id)} — its content no longer hashes to its id")
-            problems = problems + 1
-        }
-        if kind == "blob" {
-            n_blob = n_blob + 1
-        } else if kind == "tree" {
-            n_tree = n_tree + 1
-        } else if kind == "commit" {
-            n_commit = n_commit + 1
+            problems.append("TAMPERED " + _short(id) + " — its content no longer hashes to its id")
         }
     }
-
-    // (2) link integrity: commit -> tree/parent, tree -> blobs.
     let cs = sql.prepare(db, "SELECT id, data FROM object WHERE kind = 'commit'")?
     loop {
         let more = sql.step(cs)?
@@ -1134,13 +1142,12 @@ fn cmd_verify() -> Result<int, string> {
         let cid = sql.column_text(cs, 0)
         let text = from_bytes(sql.column_blob(cs, 1))
         if !ids.has(commit_header(text, "tree ")) {
-            println("  BROKEN    commit {_short(cid)} points at a missing tree")
-            problems = problems + 1
+            problems.append("BROKEN commit " + _short(cid) + " points at a missing tree")
         }
-        let parent = commit_header(text, "parent ")
-        if parent != "" && !ids.has(parent) {
-            println("  BROKEN    commit {_short(cid)} points at a missing parent {_short(parent)}")
-            problems = problems + 1
+        for p in commit_parents(text) {
+            if !ids.has(p) {
+                problems.append("BROKEN commit " + _short(cid) + " points at a missing parent " + _short(p))
+            }
         }
     }
     let ts = sql.prepare(db, "SELECT id, data FROM object WHERE kind = 'tree'")?
@@ -1154,14 +1161,11 @@ fn cmd_verify() -> Result<int, string> {
             if line != "" {
                 let parts = line.split("\t")
                 if parts.len() == 2 && !ids.has(parts[1]) {
-                    println("  BROKEN    tree {_short(tid)} references a missing blob for {parts[0]}")
-                    problems = problems + 1
+                    problems.append("BROKEN tree " + _short(tid) + " references a missing blob for " + parts[0])
                 }
             }
         }
     }
-
-    // (3) refs: every branch tip must exist.
     let rs = sql.prepare(db, "SELECT name, target FROM ref WHERE name LIKE 'branch:%'")?
     loop {
         let more = sql.step(rs)?
@@ -1170,16 +1174,37 @@ fn cmd_verify() -> Result<int, string> {
         }
         let target = sql.column_text(rs, 1)
         if target != "" && !ids.has(target) {
-            println("  BROKEN    {sql.column_text(rs, 0)} points at a missing commit")
-            problems = problems + 1
+            problems.append("BROKEN " + sql.column_text(rs, 0) + " points at a missing commit")
         }
     }
+    return Ok(problems)
+}
 
-    if problems == 0 {
-        println("verified {n_commit} commits, {n_tree} trees, {n_blob} blobs — every object intact, every link resolves")
+
+// count_kind returns how many objects of a given kind (blob/tree/commit) the store holds.
+fn count_kind(db: sql.Db, kind: string) -> Result<int, string> {
+    let st = sql.prepare(db, "SELECT count(*) FROM object WHERE kind = ?")?
+    let _ = sql.bind_text(st, 1, kind)
+    let _ = sql.step(st)?
+    return Ok(sql.column_int(st, 0))
+}
+
+
+// cmd_verify prints the integrity report and exits non-zero on any problem — for CI or a pre-sync gate.
+fn cmd_verify() -> Result<int, string> {
+    let db = sql.open(DB_PATH)?
+    let problems = verify_problems(db)?
+    if problems.len() == 0 {
+        let nc = count_kind(db, "commit")?
+        let nt = count_kind(db, "tree")?
+        let nb = count_kind(db, "blob")?
+        println("verified {nc} commits, {nt} trees, {nb} blobs — every object intact, every link resolves")
         return Ok(0)
     }
-    println("FAILED — {problems} integrity problem(s) found")
+    for p in problems {
+        println("  " + p)
+    }
+    println("FAILED — {problems.len()} integrity problem(s) found")
     return Ok(1)
 }
 
