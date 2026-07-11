@@ -1086,6 +1086,99 @@ fn cmd_pull(argv: [string]) -> Result<int, string> {
 }
 
 
+// cmd_push sends this repo's objects + branch refs to a remote Quog server. Every object reachable from
+// a local branch is POSTed (the remote re-hashes and INSERT-OR-IGNOREs, so it is additive and safe to
+// repeat); then each branch ref is pushed — the remote fast-forwards it or keeps its own under
+// `pushed/<branch>`, never clobbered.
+fn cmd_push(argv: [string]) -> Result<int, string> {
+    if argv.len() < 3 {
+        return Err("usage: quog push <host> <port>")
+    }
+    let db = sql.open(DB_PATH)?
+    let host = argv[1]
+    let port = _atoi(argv[2])
+    // Collect every object reachable from a local branch tip.
+    var seen = map.Map<string, string>{ buckets: [], count: 0 }
+    var queue: [string] = []
+    let st = sql.prepare(db, "SELECT target FROM ref WHERE name LIKE 'branch:%'")?
+    loop {
+        let more = sql.step(st)?
+        if !more {
+            break
+        }
+        let tgt = sql.column_text(st, 0)
+        if tgt != "" && !seen.has(tgt) {
+            seen.set(tgt, "1")
+            queue.append(tgt)
+        }
+    }
+    var sent = 0
+    var i = 0
+    loop {
+        if i >= queue.len() {
+            break
+        }
+        let id = queue[i]
+        i = i + 1
+        let kind = object_kind(db, id)?
+        let data = get_object(db, id)?
+        var pbody: [u8] = []
+        for b in (kind + "\n").bytes() {
+            pbody.append(b)
+        }
+        for b in data {
+            pbody.append(b)
+        }
+        let resp = hs.post(host, port, "/sync/object/" + id, pbody)?
+        if resp.status == 200 {
+            sent = sent + 1
+        }
+        if kind == "commit" {
+            let text = from_bytes(data)
+            let tid = commit_header(text, "tree ")
+            if tid != "" && !seen.has(tid) {
+                seen.set(tid, "1")
+                queue.append(tid)
+            }
+            for p in commit_parents(text) {
+                if !seen.has(p) {
+                    seen.set(p, "1")
+                    queue.append(p)
+                }
+            }
+        } else if kind == "tree" {
+            for line in from_bytes(data).split("\n") {
+                if line != "" {
+                    let parts = line.split("\t")
+                    if parts.len() == 2 && !seen.has(parts[1]) {
+                        seen.set(parts[1], "1")
+                        queue.append(parts[1])
+                    }
+                }
+            }
+        }
+    }
+    // Push each branch ref.
+    let rs = sql.prepare(db, "SELECT name, target FROM ref WHERE name LIKE 'branch:%'")?
+    loop {
+        let more = sql.step(rs)?
+        if !more {
+            break
+        }
+        let target = sql.column_text(rs, 1)
+        if target != "" {
+            var rbody: [u8] = []
+            for b in (sql.column_text(rs, 0) + "\t" + target).bytes() {
+                rbody.append(b)
+            }
+            let _ = hs.post(host, port, "/sync/ref", rbody)?
+        }
+    }
+    println("pushed {sent} objects to {host}:{port}")
+    return Ok(0)
+}
+
+
 // serve_log renders the branch history as an HTML page — each commit a link to its detail page.
 fn serve_log(db: sql.Db, conn: hs.Conn) -> Result<int, string> {
     var md = "# Quog — history\n\n[verify integrity](/verify) · branch `" + head_branch(db)? + "`\n\n"
@@ -1202,6 +1295,49 @@ fn serve_sync_object(db: sql.Db, conn: hs.Conn, id: string) -> Result<int, strin
 }
 
 
+// serve_push_object receives a pushed object ("kind\n" + bytes) and stores it — re-hashed first, so a
+// client can never push a forged/corrupt object (store_raw_object rejects a mismatch).
+fn serve_push_object(db: sql.Db, conn: hs.Conn, id: string, body: [u8]) -> Result<int, string> {
+    let nl = _byte_nl(body)
+    let kind = from_bytes(_byte_sub(body, 0, nl))
+    match store_raw_object(db, id, kind, _byte_sub(body, nl + 1, body.len())) {
+        case Ok(n) {
+            let _ = hs.respond(conn, 200, "OK", "text/plain", "stored")
+        }
+        case Err(e) {
+            let _ = hs.respond(conn, 400, "Bad Request", "text/plain", e)
+        }
+    }
+    return Ok(0)
+}
+
+
+// serve_push_ref applies a pushed branch ref ADDITIVELY: fast-forward when the pushed tip is strictly
+// ahead of ours, else keep ours and land the pushed tip under `pushed/<branch>` (never clobbered).
+fn serve_push_ref(db: sql.Db, conn: hs.Conn, body: [u8]) -> Result<int, string> {
+    let parts = from_bytes(body).split("\t")
+    if parts.len() != 2 {
+        let _ = hs.respond(conn, 400, "Bad Request", "text/plain", "bad ref")
+        return Ok(0)
+    }
+    let name = parts[0]
+    let target = parts[1]
+    let cur = get_ref(db, name)?
+    if cur == "" || cur == target {
+        let _ = set_ref(db, name, target)?
+        let _ = hs.respond(conn, 200, "OK", "text/plain", "updated")
+    } else if collect_ancestors(db, target)?.has(cur) {
+        let _ = set_ref(db, name, target)?
+        let _ = hs.respond(conn, 200, "OK", "text/plain", "fast-forwarded")
+    } else {
+        let bname = str.substring(name, 7, str.cp_count(name))
+        let _ = set_ref(db, "pushed/" + bname, target)?
+        let _ = hs.respond(conn, 200, "OK", "text/plain", "diverged: kept under pushed/" + bname)
+    }
+    return Ok(0)
+}
+
+
 // serve_verify renders the integrity report as a page — the "provably safe" badge in the browser.
 fn serve_verify(db: sql.Db, conn: hs.Conn) -> Result<int, string> {
     let problems = verify_problems(db)?
@@ -1259,8 +1395,20 @@ fn serve_commit(db: sql.Db, conn: hs.Conn, id: string) -> Result<int, string> {
 }
 
 
-// route dispatches a request path to the page that serves it.
-fn route(db: sql.Db, conn: hs.Conn, path: string) -> Result<int, string> {
+// route dispatches a request to the handler that serves it. POST goes to the sync push endpoints;
+// everything else is a read-only GET (the web view + sync fetch).
+fn route(db: sql.Db, conn: hs.Conn, req: hs.Request) -> Result<int, string> {
+    let path = req.path
+    if req.method == "POST" {
+        if str.starts_with(path, "/sync/object/") {
+            return serve_push_object(db, conn, str.substring(path, 13, str.cp_count(path)), req.body)
+        }
+        if path == "/sync/ref" {
+            return serve_push_ref(db, conn, req.body)
+        }
+        let _ = hs.not_found(conn, "unknown endpoint")
+        return Ok(0)
+    }
     if path == "/" {
         return serve_log(db, conn)
     }
@@ -1294,7 +1442,7 @@ fn serve_loop(db: sql.Db, server: hs.Server, port: int, public: bool) -> Result<
             case Ok(conn) {
                 match hs.read_request(conn) {
                     case Ok(req) {
-                        let _ = route(db, conn, req.path)
+                        let _ = route(db, conn, req)
                     }
                     case Err(e) {}
                 }
@@ -1430,7 +1578,7 @@ fn cmd_verify() -> Result<int, string> {
 // dispatch runs the requested verb, returning a Result so any store error routes to one place.
 fn dispatch(argv: [string]) -> Result<int, string> {
     if argv.len() == 0 {
-        println("usage: quog <init|save|status|diff|log|show|undo|discard|restore|branch|switch|merge|verify|pull|serve> [args]")
+        println("usage: quog <init|save|status|diff|log|show|undo|discard|restore|branch|switch|merge|verify|pull|push|serve> [args]")
         return Ok(0)
     }
     let verb = argv[0]
@@ -1442,6 +1590,9 @@ fn dispatch(argv: [string]) -> Result<int, string> {
     }
     if verb == "pull" {
         return cmd_pull(argv)
+    }
+    if verb == "push" {
+        return cmd_push(argv)
     }
     if verb == "discard" {
         return cmd_discard()

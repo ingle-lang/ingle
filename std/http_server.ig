@@ -37,11 +37,12 @@ resource struct Conn {
 }
 
 
-// A parsed request — just the method and path from the request line, which is all a read-only view
-// needs. (Headers and body are read off the wire but not surfaced yet.)
+// A parsed request — the method + path from the request line, and the raw request body (byte-exact,
+// empty for a GET). Enough for both the read-only web view and the sync POST endpoints.
 struct Request {
     method: string
     path: string
+    body: [u8]
 }
 
 
@@ -93,11 +94,35 @@ fn _chunk(buf: [u8], n: int) -> string {
 }
 
 
-// read_request reads the request head (up to the blank line ending the headers, or a size cap) and
-// parses the request line into a method + path. A malformed or empty request errs.
+// _content_length parses the Content-Length header value from the (ASCII) header block, or 0.
+fn _content_length(header: string) -> int {
+    let idx = str.index_of(header, "Content-Length:")
+    if idx < 0 {
+        return 0
+    }
+    var n = 0
+    var started = false
+    for c in str.substring(header, idx + 15, str.cp_count(header)).bytes() {
+        if c >= 48u8 && c <= 57u8 {
+            n = n * 10 + (i64(c) - 48)
+            started = true
+        } else if started {
+            break
+        }
+    }
+    return n
+}
+
+
+// read_request reads a whole request byte-exact: the header block (to the CR-LF-CR-LF terminator),
+// then the body extended to Content-Length. Byte-based so a binary POST body (an object push) is
+// preserved. Parses the request line into method + path.
 fn read_request(conn: Conn) -> Result<Request, string> {
-    var acc = ""
+    var raw: [u8] = []
     loop {
+        if _crlfcrlf(raw) >= 0 || raw.len() > 65536 {
+            break
+        }
         var buf: [u8] = []
         var i = 0
         loop {
@@ -109,23 +134,78 @@ fn read_request(conn: Conn) -> Result<Request, string> {
         }
         let n = em_recv(conn.fd, buf)
         if n <= 0 {
-            break                                    // peer closed or error
+            break
         }
-        acc = acc + _chunk(buf, n)
-        if str.contains(acc, "\r\n\r\n") || acc.len() > 65536 {
-            break                                    // whole header block in hand (or too big)
+        var k = 0
+        loop {
+            if k == n {
+                break
+            }
+            raw.append(buf[k])
+            k = k + 1
         }
     }
-    let line_end = str.index_of(acc, "\r\n")
-    var line = acc
+    let sep = _crlfcrlf(raw)
+    if sep < 0 {
+        return Err("malformed request")
+    }
+    var hb: [u8] = []
+    var h = 0
+    loop {
+        if h >= sep {
+            break
+        }
+        hb.append(raw[h])
+        h = h + 1
+    }
+    let header = from_bytes(hb)
+    let line_end = str.index_of(header, "\r\n")
+    var line = header
     if line_end >= 0 {
-        line = str.substring(acc, 0, line_end)       // the request line: "METHOD PATH HTTP/1.1"
+        line = str.substring(header, 0, line_end)
     }
     let parts = line.split(" ")
     if parts.len() < 2 {
         return Err("malformed request line")
     }
-    return Ok(Request { method: parts[0], path: parts[1] })
+    // Body: whatever followed the header terminator, extended to the full Content-Length.
+    let clen = _content_length(header)
+    var body: [u8] = []
+    var b = sep + 4
+    loop {
+        if b >= raw.len() {
+            break
+        }
+        body.append(raw[b])
+        b = b + 1
+    }
+    loop {
+        if body.len() >= clen {
+            break
+        }
+        var buf: [u8] = []
+        var i = 0
+        loop {
+            if i == 8192 {
+                break
+            }
+            buf.append(0u8)
+            i = i + 1
+        }
+        let n = em_recv(conn.fd, buf)
+        if n <= 0 {
+            break
+        }
+        var k = 0
+        loop {
+            if k == n {
+                break
+            }
+            body.append(buf[k])
+            k = k + 1
+        }
+    }
+    return Ok(Request { method: parts[0], path: parts[1], body: body })
 }
 
 
