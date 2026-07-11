@@ -69,9 +69,9 @@ default (`--public` to expose deliberately). Generic auth/TLS is table-stakes, d
 | `merge` | join two histories (additive; conflict → new head) |
 | `undo` | revert the last operation (from the op-log) |
 | `verify` | prove the repo is intact + untampered (content-address integrity + link/ref checks) |
-| `restore` | bring something back from the attic |
-| `sync` | exchange objects with a remote (additive) |
-| `serve` | run the web view (loopback by default; `--public` to expose) + sync endpoint |
+| `discard` / `restore` | throw work to a recoverable attic, and bring it back |
+| `pull` / `push` | exchange objects + refs with a remote over HTTP (additive; every object re-hashed) |
+| `serve` | run the web view + sync endpoints (loopback by default; `--public` to expose) |
 
 ## Storage model
 
@@ -181,11 +181,15 @@ heads survive intact.** All six safety invariants are live.
 **Phase W1 — the web content leaf** *(done)*. `std/html` renders Markdown/AST to HTML; Quog's
 history/diff/file views render as pages.
 
-**Phase W2 — the server** *(server done)*. Socket FFI + HTTP/1.1 + router in pure Ingle (OFI-211);
-`quog serve` renders the read-only web view (history + per-commit pages) via `std/html` — dogfooded
-in a browser. Sequential for now (per-connection fibers = follow-on). Still to come: `sync` as
-additive object/ref exchange over HTTP (Fossil-style). This is the phase that exercises Ingle as a
-server-side web language — and it does.
+**Phase W2 — the server + sync** *(DONE)*. Socket FFI + HTTP/1.1 + router in pure Ingle (OFI-211);
+`quog serve` renders the read-only web view (history, per-commit colored diffs, an integrity badge)
+via `std/html`. **`pull`/`push` are done** — additive object/ref exchange over HTTP (a pure-Ingle
+HTTP *client* over sockets, since the db build has no libcurl), Fossil-style: fetch/send only what's
+missing, every object **re-hashed on receipt** so a corrupt or forged remote is rejected, and refs
+applied additively (fast-forward or a `remote/`/`pushed/` head — local work never clobbered). A fresh
+repo can clone another's full history + working tree over the wire. Sequential server for now
+(per-connection fibers = follow-on). This is the phase that exercises Ingle as a server-side web
+language — and it does, both directions.
 
 **Phase W3 — full component isomorphism.** The Flare HTML backend (OFI-212): every Flare component
 renders native *or* web from one source — a Quog UI written once, shipped as desktop and website.
