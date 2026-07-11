@@ -20,6 +20,8 @@ import "std/encoding" as enc
 import "std/string" as str
 import "std/time" as time
 import "std/fs" as fs
+import "std/html" as html
+import "std/http_server" as hs
 
 
 let DB_PATH = ".quog/quog.db"
@@ -304,15 +306,113 @@ fn cmd_undo() -> Result<int, string> {
 }
 
 
+// serve_log renders the branch history as an HTML page — each commit a link to its detail page.
+fn serve_log(db: sql.Db, conn: hs.Conn) -> Result<int, string> {
+    var md = "# Quog — history\n\n"
+    var id = get_ref(db, TIP_REF)?
+    if id == "" {
+        md = md + "_No saves yet._\n"
+    } else {
+        loop {
+            if id == "" {
+                break
+            }
+            let text = from_bytes(get_object(db, id)?)
+            md = md + "- [`" + _short(id) + "`](/commit/" + id + ") — " + commit_message(text) + "\n"
+            id = commit_header(text, "parent ")
+        }
+    }
+    let _ = hs.ok_html(conn, html.page("Quog — history", html.render_markdown(md)))
+    return Ok(0)
+}
+
+
+// serve_commit renders one commit: its metadata, a link to its parent, and the files in its snapshot.
+fn serve_commit(db: sql.Db, conn: hs.Conn, id: string) -> Result<int, string> {
+    match get_object(db, id) {
+        case Ok(bytes) {
+            let text = from_bytes(bytes)
+            let ts = _atoi(commit_header(text, "time "))
+            var md = "# Commit `" + _short(id) + "`\n\n"
+            md = md + "**message:** " + commit_message(text) + "\n\n"
+            md = md + "**time:** {ts}\n\n"
+            let parent = commit_header(text, "parent ")
+            if parent != "" {
+                md = md + "**parent:** [`" + _short(parent) + "`](/commit/" + parent + ")\n\n"
+            }
+            md = md + "## Files\n\n"
+            for line in from_bytes(get_object(db, commit_header(text, "tree "))?).split("\n") {
+                if line != "" {
+                    let parts = line.split("\t")
+                    if parts.len() == 2 {
+                        md = md + "- `" + parts[0] + "` — `" + _short(parts[1]) + "`\n"
+                    }
+                }
+            }
+            md = md + "\n[← back to history](/)\n"
+            let _ = hs.ok_html(conn, html.page("Commit " + _short(id), html.render_markdown(md)))
+            return Ok(0)
+        }
+        case Err(e) {
+            let _ = hs.not_found(conn, html.page("Not found", html.render_markdown("# 404\n\nNo such commit.\n\n[← history](/)")))
+            return Ok(0)
+        }
+    }
+}
+
+
+// route dispatches a request path to the page that serves it.
+fn route(db: sql.Db, conn: hs.Conn, path: string) -> Result<int, string> {
+    if path == "/" {
+        return serve_log(db, conn)
+    }
+    if str.starts_with(path, "/commit/") {
+        return serve_commit(db, conn, str.substring(path, 8, str.cp_count(path)))
+    }
+    let _ = hs.not_found(conn, html.page("Not found", html.render_markdown("# 404\n\nNo such path.\n\n[← history](/)")))
+    return Ok(0)
+}
+
+
+// cmd_serve runs the read-only web view: a Fossil-style local server over the repo's history. It
+// serves one connection at a time (per-connection fibers are a follow-on); a bad request or transient
+// accept error is swallowed so the server stays up.
+fn cmd_serve(argv: [string]) -> Result<int, string> {
+    let db = sql.open(DB_PATH)?
+    var port = 8017
+    if argv.len() >= 2 {
+        port = _atoi(argv[1])
+    }
+    let server = hs.listen(port)?
+    println("quog serving on http://localhost:{port}  —  Ctrl-C to stop")
+    loop {
+        match hs.accept(server) {
+            case Ok(conn) {
+                match hs.read_request(conn) {
+                    case Ok(req) {
+                        let _ = route(db, conn, req.path)
+                    }
+                    case Err(e) {}
+                }
+            }
+            case Err(e) {}
+        }
+    }
+}
+
+
 // dispatch runs the requested verb, returning a Result so any store error routes to one place.
 fn dispatch(argv: [string]) -> Result<int, string> {
     if argv.len() == 0 {
-        println("usage: quog <init|save|log|show|undo> [args]")
+        println("usage: quog <init|save|log|show|undo|serve> [args]")
         return Ok(0)
     }
     let verb = argv[0]
     if verb == "init" {
         return cmd_init()
+    }
+    if verb == "serve" {
+        return cmd_serve(argv)
     }
     if verb == "save" {
         if argv.len() < 2 {

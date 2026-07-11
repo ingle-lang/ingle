@@ -167,9 +167,11 @@ prove append-only and universal undo actually hold, machine-checked, end to end.
 **Phase W1 — the web content leaf** *(done)*. `std/html` renders Markdown/AST to HTML; Quog's
 history/diff/file views render as pages.
 
-**Phase W2 — the server.** Socket FFI + HTTP/1.1 + router in pure Ingle (OFI-211); `serve` the
-read-only web view; `sync` as additive object/ref exchange over HTTP (Fossil-style). This is the
-phase that exercises Ingle as a server-side web language.
+**Phase W2 — the server** *(server done)*. Socket FFI + HTTP/1.1 + router in pure Ingle (OFI-211);
+`quog serve` renders the read-only web view (history + per-commit pages) via `std/html` — dogfooded
+in a browser. Sequential for now (per-connection fibers = follow-on). Still to come: `sync` as
+additive object/ref exchange over HTTP (Fossil-style). This is the phase that exercises Ingle as a
+server-side web language — and it does.
 
 **Phase W3 — full component isomorphism.** The Flare HTML backend (OFI-212): every Flare component
 renders native *or* web from one source — a Quog UI written once, shipped as desktop and website.

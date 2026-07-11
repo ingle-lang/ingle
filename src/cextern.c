@@ -7,6 +7,9 @@
 #include <string.h>
 #include <time.h>        // std/time: wall-clock seconds since the Unix epoch (time())
 #include <sys/stat.h>    // std/fs: mkdir() for repo layout (.quog/)
+#include <sys/socket.h>  // std/http_server: TCP sockets (socket/bind/listen/accept/recv/send)
+#include <netinet/in.h>  // std/http_server: sockaddr_in / INADDR_ANY / htonl / htons
+#include <signal.h>      // std/http_server: ignore SIGPIPE so a send to a closed peer can't kill us
 #include <errno.h>       // std/proc: EAGAIN/EINTR on the non-blocking pipe drain
 #include <fcntl.h>       // std/proc: O_NONBLOCK on the capture pipes
 #include <poll.h>        // std/proc: drain stdout+stderr concurrently (no pipe-buffer deadlock)
@@ -164,6 +167,70 @@ static int w_em_now_unix(const Value *a, Value *o) {
 // OFI-190 (the broader path/filesystem helper set is the remainder).
 static int w_em_mkdir(const Value *a, Value *o) {
     o[0] = INT_VAL((int64_t)mkdir(AS_CSTRING(a[0]), 0777));
+    return 1;
+}
+
+// --- TCP sockets (std/http_server) — a server-side networking slice, libc/POSIX, DEFAULT build (no
+// dependency). Purpose-built so no sockaddr struct crosses the FFI: em_tcp_listen hides socket +
+// SO_REUSEADDR + bind(INADDR_ANY:port) + listen behind one "listen on this port" call. --------------
+
+// em_tcp_listen(port) -> int. Open a listening TCP socket on `port` (all interfaces). Returns the
+// listener fd, or -1 on any error. Ignores SIGPIPE once so a later send to a hung-up peer returns an
+// error instead of killing the process.
+static int w_em_tcp_listen(const Value *a, Value *o) {
+    signal(SIGPIPE, SIG_IGN);
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { o[0] = INT_VAL(-1); return 1; }
+    int yes = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons((uint16_t)AS_INT(a[0]));
+    if (bind(fd, (struct sockaddr *)&addr, sizeof addr) < 0 || listen(fd, 64) < 0) {
+        close(fd);
+        o[0] = INT_VAL(-1);
+        return 1;
+    }
+    o[0] = INT_VAL((int64_t)fd);
+    return 1;
+}
+
+// em_tcp_accept(listen_fd) -> int. Block for the next connection; returns the client fd, or -1.
+static int w_em_tcp_accept(const Value *a, Value *o) {
+    o[0] = INT_VAL((int64_t)accept((int)AS_INT(a[0]), NULL, NULL));
+    return 1;
+}
+
+// em_recv(fd, mut [u8]) -> int. Read up to the buffer's length bytes into it (written in place).
+// Returns the byte count, 0 when the peer closed, or -1 on error.
+static int w_em_recv(const Value *a, Value *o) {
+    ObjArray *buf = AS_ARR(a[1]);                               // mut [u8]
+    ssize_t n = recv((int)AS_INT(a[0]), buf->data, buf->length, 0);
+    o[0] = INT_VAL((int64_t)n);
+    return 1;
+}
+
+// em_send(fd, [u8]) -> int. Send the whole buffer, looping over partial writes; returns the bytes
+// sent (< length only if the peer hung up mid-write).
+static int w_em_send(const Value *a, Value *o) {
+    int fd = (int)AS_INT(a[0]);
+    ObjArray *buf = AS_ARR(a[1]);                              // [u8] — read only
+    const char *p = (const char *)buf->data;
+    size_t total = buf->length, off = 0;
+    while (off < total) {
+        ssize_t s = send(fd, p + off, total - off, 0);
+        if (s <= 0) { break; }
+        off += (size_t)s;
+    }
+    o[0] = INT_VAL((int64_t)off);
+    return 1;
+}
+
+// em_close(fd) -> int. Close a socket (or any fd). 0 on success, -1 on error.
+static int w_em_close(const Value *a, Value *o) {
+    o[0] = INT_VAL((int64_t)close((int)AS_INT(a[0])));
     return 1;
 }
 
@@ -904,6 +971,12 @@ static const CExternSig g_sigs[] = {
     // wall-clock time (std/time) + mkdir (std/fs) — DEFAULT build:
     { "em_now_unix", 0, { 0 },   1, { 'i' }, 0, 0 },
     { "em_mkdir",    1, { 'p' }, 1, { 'i' }, 0, 0 },
+    // TCP sockets (std/http_server) — DEFAULT build:
+    { "em_tcp_listen", 1, { 'i' },      1, { 'i' }, 0, 0 },
+    { "em_tcp_accept", 1, { 'i' },      1, { 'i' }, 0, 0 },
+    { "em_recv",       2, { 'i', 'b' }, 1, { 'i' }, 0, 0 },
+    { "em_send",       2, { 'i', 'b' }, 1, { 'i' }, 0, 0 },
+    { "em_close",      1, { 'i' },      1, { 'i' }, 0, 0 },
 #if EMBER_NET
     // HTTPS POST (make net): url, headers ('\n'-separated lines), body → response string.
     { "http_post", 3, { 'p', 'p', 'p' }, 1, { 'p' }, 0, 1 },
@@ -954,6 +1027,7 @@ static const CExternFn g_fns[] = {
     w_strlen, w_strncmp, w_fopen, w_fread, w_fwrite, w_fclose,
     w_proc_run, w_proc_exit, w_proc_stdout, w_proc_stderr, w_proc_free,
     w_em_now_unix, w_em_mkdir,
+    w_em_tcp_listen, w_em_tcp_accept, w_em_recv, w_em_send, w_em_close,
 #if EMBER_NET
     w_http_post,
     w_http_get,
