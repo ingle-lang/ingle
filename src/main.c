@@ -924,6 +924,24 @@ static int compile_native(const TokenList *tokens, const char *name,
              "-I'%s' '%s' '%s/libember_rt_net_gfx.a' `pkg-config --libs raylib freetype2` "
              "`curl-config --libs` -pthread -lm -o '%s'",
              incdir, cpath, libdir, out_path);
+#elif EMBER_SQLITE
+    // A db-flavored compiler (inglec-db, built -DEMBER_SQLITE) links the SQLite runtime variant
+    // (libember_rt_db.a = runtime.c + cextern.c built -DEMBER_SQLITE + the vendored sqlite3.o), so
+    // `inglec-db -o app app.ig` yields a STANDALONE binary with the std/sqlite FFI resolved and SQLite
+    // statically linked in — no external libsqlite3, no toolchain to run it. The em_ffi registry indices
+    // baked into the emitted C match this table because both carry the same -DEMBER_SQLITE. Built serial:
+    // the vendored SQLite is THREADSAFE=0, so a program that ALSO uses spawn/channels is rejected here
+    // rather than mis-linked against a single-threaded runtime.
+    if (concurrent) {
+        fprintf(stderr, "inglec: a native binary that uses both std/sqlite and spawn/channels is not "
+                        "supported yet (the vendored SQLite is built single-threaded). Run it on the "
+                        "VM with --emit=run, or remove the concurrency.\n");
+        remove(cpath);
+        return 1;
+    }
+    snprintf(cmd, sizeof cmd,
+             "cc -std=c17 -O2 -D_DEFAULT_SOURCE -I'%s' '%s' '%s/libember_rt_db.a' -lm -o '%s'",
+             incdir, cpath, libdir, out_path);
 #else
     if (concurrent) {
         snprintf(cmd, sizeof cmd,

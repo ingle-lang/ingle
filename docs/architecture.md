@@ -702,6 +702,34 @@ as **OFI-051**.
 
 ---
 
+## Decision: the native `-o` link picks a runtime-library variant by the compiler's own build flags
+
+**Rule.** `compile_native` (`src/main.c`) links the emitted C against a **static runtime archive that
+matches the compiler binary's build flavor**, selected by preprocessor macro of the *compiler itself*:
+`#if EMBER_GRAPHICS` → `libember_rt_net_gfx.a` (+ raylib/FreeType/libcurl), `#elif EMBER_SQLITE` →
+`libember_rt_db.a` (with the vendored `sqlite3.o` archived in), `#else` → `libember_rt.a`
+(serial) or `libember_rt_par.a` (`-pthread`) chosen at runtime by whether the *program* uses
+spawn/channels. Each variant archives `runtime.c`+`cextern.c` compiled with the **same `-D` set** the
+compiler carries, which is the load-bearing invariant: the FFI is dispatched by **numeric registry
+index** (`em_ffi(&g_em, idx, …)`), and those indices are baked into the emitted C at compile time, so
+the linked `cextern.c`'s `g_sigs`/`g_fns` table must be built with an identical define set or the
+indices desync. A db-flavored compiler is built serial (the vendored SQLite is `THREADSAFE=0`), so a
+program that uses **both** `std/sqlite` and concurrency is rejected with a clear message rather than
+mis-linked against a single-threaded runtime.
+
+**Why.** The alternative — one universal runtime archive with every FFI family compiled in — would drag
+libcurl, raylib, and SQLite into *every* native binary, defeating the "a default build has an empty
+dependency tree" decision above and bloating a trivial program. Keying the link on the compiler's own
+`-D` flags means the flavor of compiler you invoke (`inglec`, `inglec-db`, `inglec-net-gfx`) picks
+exactly the runtime it needs and nothing more, and — because the *emit* step and the *linked cextern*
+are the same binary's flags — the registry indices are aligned by construction rather than by
+convention. This is what lets `inglec-db -o app app.ig` produce a standalone binary with SQLite
+statically inside and no external `libsqlite3` (closing OFI-143); Quog (`public/quog`) is the first
+real app shipped this way, guarded by `make test-quog-native` (the native binary must reproduce the
+VM's integration golden byte-for-byte).
+
+---
+
 ## Decision: value-type structs lower to real C structs in the native backend
 
 **Rule.** A value-type (all-scalar) Ingle struct is emitted as a **real C struct**

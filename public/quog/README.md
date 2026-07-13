@@ -59,10 +59,10 @@ Put `~/.ingle/bin` on your `PATH` (or copy `build/quog` anywhere you like — `/
 quog init
 ```
 
-Under the hood `make quog` compiles [`quog.ig`](quog.ig) through Ingle's native backend
-(`inglec --emit=c`) and links the emitted C against the runtime + the vendored SQLite — the
-same path that produces the Ingle compiler itself. The binary is self-contained and
-relocatable.
+Under the hood `make quog` is just the compiler's own one-shot native path —
+`inglec-db -o build/quog quog.ig` — which lowers [`quog.ig`](quog.ig) to C and links it
+against the SQLite-enabled runtime, with SQLite compiled statically into the binary. Same
+path that produces the Ingle compiler itself. The binary is self-contained and relocatable.
 
 ### Running from source (no binary)
 

@@ -44,6 +44,11 @@ RT_LIB_PAR := build/libember_rt_par.a
 # drives raylib, hits the Anthropic API over libcurl, and runs its async transport on threads.
 # Linked by compile_native when the compiler itself is graphics-flavored (#if EMBER_GRAPHICS).
 RT_LIB_NETGFX := build/libember_rt_net_gfx.a
+# The SQLITE runtime variant (OFI-143): runtime + cextern built -DEMBER_SQLITE=1, archived together
+# with the vendored SQLite object, so `inglec-db -o app app.ig` links a STANDALONE native binary with
+# the std/sqlite FFI resolved and SQLite statically inside it — no external libsqlite3, no toolchain to
+# run it. Linked by compile_native when the compiler itself is db-flavored (#elif EMBER_SQLITE).
+RT_LIB_DB := build/libember_rt_db.a
 
 # F3 (Ingle rebrand): `emberc` stays a permanent compatibility alias for `inglec`. Each binary recipe
 # emits a relative symlink build/emberc* -> inglec* via $(call LINK_COMPAT,<the-inglec-path>), so
@@ -156,7 +161,7 @@ DEPS    := $(OBJECTS:.o=.d)
 GEN_BIN := build/gen_editor_assets
 GRAMMAR := editors/vscode/syntaxes/ember.tmLanguage.json
 
-.PHONY: all test test-update test-lsp doctor help release asan asan-par asan-trace install install-vscode build-zed install-zed parallel mn tsan-mn asan-mn mn-stress mn-graphics mn-net-graphics graphics net net-graphics db test-db test-quog quog install-quog test-graphics test-net test-parallel kernel test-kernel selfhost crucible ceilings ledger opcheck verify docs string-diff bench parbench gen-editor-assets check-editor-sync clean
+.PHONY: all test test-update test-lsp doctor help release asan asan-par asan-trace install install-vscode build-zed install-zed parallel mn tsan-mn asan-mn mn-stress mn-graphics mn-net-graphics graphics net net-graphics db test-db test-quog test-quog-native quog install-quog test-graphics test-net test-parallel kernel test-kernel selfhost crucible ceilings ledger opcheck verify docs string-diff bench parbench gen-editor-assets check-editor-sync clean
 
 all: $(BIN) $(RT_LIB) $(RT_LIB_PAR)
 
@@ -198,6 +203,18 @@ $(RT_LIB_NETGFX): src/runtime.c src/cextern.c src/graphics.c include/ember_rt.h 
 	$(CC) $(RT_FLAGS) $(NETGFX_RT_DEFS) $(NETGFX_RT_CFLAGS) -c src/cextern.c -o build/cextern_rt_netgfx.o
 	$(CC) $(RT_FLAGS) $(NETGFX_RT_DEFS) $(NETGFX_RT_CFLAGS) -c src/graphics.c -o build/graphics_rt_netgfx.o
 	ar rcs $@ build/runtime_rt_netgfx.o build/cextern_rt_netgfx.o build/graphics_rt_netgfx.o
+
+# The SQLite runtime variant (OFI-143): runtime + cextern built -DEMBER_SQLITE=1, archived with the
+# vendored SQLite object, so `inglec-db -o app app.ig` links a standalone native binary with the
+# std/sqlite FFI resolved (SQLite statically inside). Built SERIAL (no -DEMBER_PARALLEL): the vendored
+# SQLite is THREADSAFE=0, so compile_native rejects a concurrent+sqlite program rather than mis-linking.
+# The -DEMBER_SQLITE here matches the db compiler, so the em_ffi registry indices baked into the emitted
+# C line up with this cextern table. runtime.c/cextern.c compile clean under -Werror + sqlite (verified),
+# so RT_FLAGS is used unchanged; only third-party sqlite3.c needs relaxed flags (its own $(SQLITE_OBJ) rule).
+$(RT_LIB_DB): src/runtime.c src/cextern.c $(SQLITE_OBJ) include/ember_rt.h include/value.h include/program.h include/cextern.h | build
+	$(CC) $(RT_FLAGS) -DEMBER_SQLITE=1 -Ithird_party/sqlite -c src/runtime.c -o build/runtime_rt_db.o
+	$(CC) $(RT_FLAGS) -DEMBER_SQLITE=1 -Ithird_party/sqlite -c src/cextern.c -o build/cextern_rt_db.o
+	ar rcs $@ build/runtime_rt_db.o build/cextern_rt_db.o $(SQLITE_OBJ)
 
 build:
 	mkdir -p build
@@ -425,7 +442,7 @@ $(SQLITE_OBJ): third_party/sqlite/sqlite3.c third_party/sqlite/sqlite3.h | build
 
 # Database compiler (see DB_FLAGS): registers the std/sqlite FFI wrappers and links the vendored
 # SQLite object. Run a SQL program with: build/inglec-db --emit=run <file.ig>
-db: $(SQLITE_OBJ) | build
+db: $(SQLITE_OBJ) $(RT_LIB_DB) | build
 	$(CC) $(DB_FLAGS) -Ithird_party/sqlite $(SOURCES) $(SQLITE_OBJ) $(LDLIBS_MATH) -o $(DB_BIN)
 	@$(call LINK_COMPAT,$(DB_BIN))
 
@@ -439,21 +456,25 @@ test-db: db
 test-quog: db
 	@tests/run-quog.sh
 
+# The SAME integration golden, exercised against the STANDALONE NATIVE binary (build/quog) rather than
+# the VM — the regression guard for OFI-143's native std/sqlite path. If the FFI registry, the RT_LIB_DB
+# link, or the native backend ever regresses the sqlite path, the native transcript diverges from the
+# golden and this fails. The native binary must behave byte-identically to `--emit=run`.
+test-quog-native: quog
+	@QUOG_NATIVE_BIN="$(CURDIR)/$(QUOG_BIN)" tests/run-quog.sh
+
 # ── Quog as a SHIPPABLE native binary ──────────────────────────────────────────────────────
 # The adoption story: a user should get one `quog` executable to drop on their PATH, not "install
-# the Ingle toolchain and run a .ig through the VM". This emits public/quog/quog.ig to C via the
-# native backend (`--emit=c`) and links it against the runtime (src/runtime.c + src/cextern.c, the
-# same pair as $(RT_LIB)) with the SQLite FFI enabled, plus the vendored SQLite object. The socket /
-# time / fs FFI (em_tcp_*/em_now_unix/em_mkdir/em_remove) is unconditional in cextern.c, so nothing
-# extra is needed for `quog serve` or sync. Result: build/quog — a self-contained executable whose
-# only runtime dependency is the system libc (SQLite is statically linked in). No toolchain to run it.
+# the Ingle toolchain and run a .ig through the VM". Since OFI-143 closed, this is just the compiler's
+# own one-shot native path: `inglec-db -o` emits public/quog/quog.ig to C and links it against the
+# SQLite runtime variant ($(RT_LIB_DB), built by the `db` dep), with SQLite statically inside. The
+# socket/time/fs FFI (em_tcp_*/em_now_unix/em_mkdir/em_remove) is unconditional in cextern.c, so
+# `quog serve` and sync need nothing extra. Result: build/quog — a self-contained executable whose
+# only runtime dependency is the system libc. No toolchain to run it.
 QUOG_SRC    := public/quog/quog.ig
-QUOG_C      := build/quog.c
 QUOG_BIN    := build/quog
-QUOG_CFLAGS := -std=c17 -O2 -DNDEBUG -DEMBER_SQLITE=1 $(PORTABLE_DEFS) -Iinclude -Ithird_party/sqlite
 quog: db
-	$(DB_BIN) --emit=c $(QUOG_SRC) > $(QUOG_C)
-	$(CC) $(QUOG_CFLAGS) $(QUOG_C) src/runtime.c src/cextern.c $(SQLITE_OBJ) $(LDLIBS_MATH) -o $(QUOG_BIN)
+	$(DB_BIN) -o $(QUOG_BIN) $(QUOG_SRC)
 	@echo "built $(QUOG_BIN) — a standalone native binary; 'make install-quog' puts it on your PATH"
 
 # Install the standalone quog onto the PATH (rm-then-cp for a fresh inode — see the `install` target's
