@@ -40,24 +40,38 @@ feature. Everything reversible; everything checkable.
 
 ---
 
-## Build & run
+## Install
 
-Quog needs the SQLite-enabled Ingle build (its store is a single SQLite file):
+Quog builds to **one standalone native binary** — drop it on your `PATH` and you are done.
+There is no runtime, no interpreter, and no toolchain to install alongside it; the only thing
+it links against at run time is your system C library (the SQLite engine is compiled *into*
+the binary).
 
 ```sh
-make db          # produces build/inglec-db
+make quog            # emits Quog to C, links it -> build/quog (a ~1.5 MB executable)
+make install-quog    # copies build/quog to ~/.ingle/bin/quog
 ```
 
-Run it through the Ingle interpreter:
+Put `~/.ingle/bin` on your `PATH` (or copy `build/quog` anywhere you like — `/usr/local/bin`,
+`~/bin`, …) and every example below just works:
 
 ```sh
+quog init
+```
+
+Under the hood `make quog` compiles [`quog.ig`](quog.ig) through Ingle's native backend
+(`inglec --emit=c`) and links the emitted C against the runtime + the vendored SQLite — the
+same path that produces the Ingle compiler itself. The binary is self-contained and
+relocatable.
+
+### Running from source (no binary)
+
+If you would rather run Quog straight through the Ingle VM without producing a binary — handy
+while hacking on it — build the SQLite-enabled compiler and interpret the source:
+
+```sh
+make db
 build/inglec-db --emit=run public/quog/quog.ig <verb> [args]
-```
-
-For the examples below, define a shell alias so `quog` just works:
-
-```sh
-alias quog='/ABSOLUTE/PATH/TO/ember/build/inglec-db --emit=run /ABSOLUTE/PATH/TO/ember/public/quog/quog.ig'
 ```
 
 All state lives in **`.quog/quog.db`** at the root of your repo — one file, easy to back up,

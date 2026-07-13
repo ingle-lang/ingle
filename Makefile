@@ -156,7 +156,7 @@ DEPS    := $(OBJECTS:.o=.d)
 GEN_BIN := build/gen_editor_assets
 GRAMMAR := editors/vscode/syntaxes/ember.tmLanguage.json
 
-.PHONY: all test test-update test-lsp doctor help release asan asan-par asan-trace install install-vscode build-zed install-zed parallel mn tsan-mn asan-mn mn-stress mn-graphics mn-net-graphics graphics net net-graphics db test-db test-quog test-graphics test-net test-parallel kernel test-kernel selfhost crucible ceilings ledger opcheck verify docs string-diff bench parbench gen-editor-assets check-editor-sync clean
+.PHONY: all test test-update test-lsp doctor help release asan asan-par asan-trace install install-vscode build-zed install-zed parallel mn tsan-mn asan-mn mn-stress mn-graphics mn-net-graphics graphics net net-graphics db test-db test-quog quog install-quog test-graphics test-net test-parallel kernel test-kernel selfhost crucible ceilings ledger opcheck verify docs string-diff bench parbench gen-editor-assets check-editor-sync clean
 
 all: $(BIN) $(RT_LIB) $(RT_LIB_PAR)
 
@@ -438,6 +438,31 @@ test-db: db
 # fixed clock (QUOG_NOW). Needs the db build, so it is separate from the dependency-free `make test`.
 test-quog: db
 	@tests/run-quog.sh
+
+# ── Quog as a SHIPPABLE native binary ──────────────────────────────────────────────────────
+# The adoption story: a user should get one `quog` executable to drop on their PATH, not "install
+# the Ingle toolchain and run a .ig through the VM". This emits public/quog/quog.ig to C via the
+# native backend (`--emit=c`) and links it against the runtime (src/runtime.c + src/cextern.c, the
+# same pair as $(RT_LIB)) with the SQLite FFI enabled, plus the vendored SQLite object. The socket /
+# time / fs FFI (em_tcp_*/em_now_unix/em_mkdir/em_remove) is unconditional in cextern.c, so nothing
+# extra is needed for `quog serve` or sync. Result: build/quog — a self-contained executable whose
+# only runtime dependency is the system libc (SQLite is statically linked in). No toolchain to run it.
+QUOG_SRC    := public/quog/quog.ig
+QUOG_C      := build/quog.c
+QUOG_BIN    := build/quog
+QUOG_CFLAGS := -std=c17 -O2 -DNDEBUG -DEMBER_SQLITE=1 $(PORTABLE_DEFS) -Iinclude -Ithird_party/sqlite
+quog: db
+	$(DB_BIN) --emit=c $(QUOG_SRC) > $(QUOG_C)
+	$(CC) $(QUOG_CFLAGS) $(QUOG_C) src/runtime.c src/cextern.c $(SQLITE_OBJ) $(LDLIBS_MATH) -o $(QUOG_BIN)
+	@echo "built $(QUOG_BIN) — a standalone native binary; 'make install-quog' puts it on your PATH"
+
+# Install the standalone quog onto the PATH (rm-then-cp for a fresh inode — see the `install` target's
+# note on macOS ad-hoc code-signature caching and "Killed: 9").
+install-quog: quog
+	mkdir -p "$(PREFIX)/bin"
+	rm -f "$(PREFIX)/bin/quog"
+	cp $(QUOG_BIN) "$(PREFIX)/bin/quog"
+	@echo "installed quog -> $(PREFIX)/bin/quog  (ensure $(PREFIX)/bin is on your PATH)"
 
 # Bare-metal kernel image (OFI-167 / kernel milestone 1). Uses the DEFAULT emberc with
 # `--emit=c --freestanding` (bare entry, no stdio/argv; main's int result = the exit code), then
