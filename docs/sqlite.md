@@ -84,13 +84,13 @@ them (closing the connection / finalizing the statement) for you, on every path.
 | `open(path) -> Result<Db, string>` | Open/create the database; the `Db` closes itself at scope exit. `":memory:"` for a private in-memory DB. |
 | `exec(db, sql) -> Result<int, string>` | Run statement(s) returning no rows (DDL / writes); `Ok(rows-changed)`. Multi-statement. |
 | `prepare(db, sql) -> Result<Stmt, string>` | Compile the first statement; the `Stmt` finalizes itself at scope exit. |
-| `bind_int / bind_f64 / bind_text / bind_null(st, idx, val)` | Bind a value to parameter `idx` (1-based). |
+| `bind_int / bind_f64 / bind_text / bind_blob / bind_null(st, idx, val)` | Bind a value to parameter `idx` (1-based); `bind_blob` takes a `[u8]`. |
 | `step(st) -> Result<bool, string>` | Advance to the next row. `Ok(true)` = row, `Ok(false)` = done. |
 | `reset(st) -> int` | Rewind + clear bindings to reuse a compiled statement. |
 | `column_count(st) -> int` | Result columns in the current row. |
 | `column_type(st, col) -> int` | Storage class: 1 INTEGER, 2 FLOAT, 3 TEXT, 4 BLOB, 5 NULL. |
 | `column_is_null(st, col) -> bool` | Is column `col` a true SQL NULL? |
-| `column_int / column_f64 / column_text(st, col)` | Read column `col` (0-based) of the current row. |
+| `column_int / column_f64 / column_text / column_blob(st, col)` | Read column `col` (0-based) of the current row; `column_blob` returns a `[u8]` and `column_bytes(st, col)` its length. |
 | `column_name(st, col) -> string` | The name of result column `col`. |
 | `changes(db) -> int` | Rows changed by the most recent statement. |
 | `last_insert_id(db) -> int` | ROWID of the most recent INSERT. |

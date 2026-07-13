@@ -2448,7 +2448,46 @@ fn run() -> Result<int, string> {
 ```
 
 It links only under the database build (`make db`), the same way the UI modules need the graphics
-build and `std/http` the networking one.
+build and `std/http` the networking one. Binding and reading cover every SQLite type, raw bytes
+included: `bind_blob` stores a `[u8]` and `column_blob` reads one back (with `column_bytes` for its
+length), so a hash or a packed record round-trips through a `BLOB` column without the first `NUL`
+truncating it.
+
+A handful of small, dependency-free utilities round out the kit — each pure Ingle over at most a
+thin libc call, and all on the **default build** (no special flag):
+
+**`std/encoding`** — hex and base64 text codecs for binary data: `to_hex`/`from_hex` and
+`to_base64`/`from_base64` (the decoders return a `Result`, since encoded text can be malformed).
+
+**`std/sha256`** — SHA-256 (FIPS 180-4), written in pure Ingle on the width-aware bitwise operators
+and `wrapping_add`. `digest([u8])` and `digest_str(string)` each return the 32-byte digest as a
+`[u8]` — the content-addressing primitive for a Git-style store (a hash that names its own content).
+
+**`std/diff`** — a line-oriented diff over the longest common subsequence: `diff_lines(old, new)`
+returns a list of `Edit`s, and `unified` renders them in the familiar `+`/`-` unified-diff format.
+
+**`std/time`** — `now()`: whole seconds since the Unix epoch, for timestamps.
+
+**`std/fs`** — the filesystem helpers beyond the built-in `read_file`/`write_file`/`list_dir`:
+`mkdir` and `remove`.
+
+A quick taste — hash a string and print the digest in hex, all on the default build:
+
+```ember
+import "std/sha256" as sha
+import "std/encoding" as enc
+
+fn main() -> int {
+    let sum = sha.digest_str("abc")   // 32-byte SHA-256 digest, as [u8]
+    println(enc.to_hex(sum))          // hex-encode it for display
+    return 0
+}
+```
+
+```
+ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+=> 0
+```
 
 The next several modules are the answer to a fair question — *can you build a real, networked,
 graphical program in this language?* — and each is small, pure where it can be, and written in
@@ -2483,6 +2522,20 @@ build (`make net`), the same way the UI modules need the graphics build.
 You feed it the raw response-body chunks `http.next` hands you; it returns the **complete** events
 framed so far and buffers the trailing partial across feeds. That's what turns a token-by-token API
 stream into a clean sequence of events your loop can act on.
+
+Two more turn Ingle around from *reading* the web to *serving* it:
+
+**`std/html`** — renders `std/markdown`'s parsed tree to HTML. `render_markdown(text)` does the whole
+trip (parse, then emit), `escape` makes arbitrary text safe to drop into a page, and `page(title,
+body)` wraps a body in a styled, self-contained document. It walks the very same `Block`/`Span` `enum`
+the Markdown parser produces, so rendering is one more exhaustive `match`.
+
+**`std/http_server`** — a minimal HTTP/1.1 server written in pure Ingle over a tiny TCP-socket FFI, on
+the **default build** (libc sockets, no dependency). `listen(port)` hands back a `Server` — a
+`resource struct` that closes its socket on drop — and then `accept`, `read_request`, and `respond`
+(with `ok_html`, `not_found`, and `redirect` as shortcuts) drive the request loop. True to Ingle's
+safe default, `listen` binds **loopback only** (`127.0.0.1`, reachable only from this machine);
+exposing the server to the network is a deliberate, separate `listen_public`.
 
 Then the graphics and UI stack, all resting on one immediate-mode idea — *the UI is a pure function
 of state, redrawn fresh every frame, with no retained widget tree to keep in sync* — which is
@@ -4169,6 +4222,13 @@ one-level nested destructuring like `case Some(Point(x, y))`), **method-style ca
 scalars** (`o.unwrap_or(0)` is `unwrap_or(o, 0)`), and the **`Option`/`Result` combinators** —
 `is_some`/`is_none`/`is_ok`/`is_err`, `unwrap_or`, `map`, `and_then`, `ok_or` — provided as ordinary
 prelude functions.
+
+A later pass — the standard library growing sideways while a small version-control tool was
+dogfooded entirely in Ingle — folded in a run of small, pure, default-build modules: **`std/encoding`**
+(hex + base64), **`std/sha256`** (content addressing), **`std/diff`** (a line diff), **`std/time`**
+(epoch seconds), `mkdir`/`remove` in **`std/fs`**, **`std/html`** (Markdown → HTML for server-side
+rendering), and **`std/http_server`** (a pure-Ingle HTTP/1.1 server, loopback-safe by default).
+`std/sqlite` also gained `bind_blob`/`column_blob`, so raw bytes round-trip through a `BLOB` column.
 
 Ingle will have grown since you read this. Treat the *spirit* — safe by default, simple by
 default, fast to build, honest about its edges — as the durable part, and check the current

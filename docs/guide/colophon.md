@@ -58,6 +58,13 @@ scalars** (`o.unwrap_or(0)` is `unwrap_or(o, 0)`), and the **`Option`/`Result` c
 `is_some`/`is_none`/`is_ok`/`is_err`, `unwrap_or`, `map`, `and_then`, `ok_or` — provided as ordinary
 prelude functions.
 
+A later pass — the standard library growing sideways while a small version-control tool was
+dogfooded entirely in Ingle — folded in a run of small, pure, default-build modules: **`std/encoding`**
+(hex + base64), **`std/sha256`** (content addressing), **`std/diff`** (a line diff), **`std/time`**
+(epoch seconds), `mkdir`/`remove` in **`std/fs`**, **`std/html`** (Markdown → HTML for server-side
+rendering), and **`std/http_server`** (a pure-Ingle HTTP/1.1 server, loopback-safe by default).
+`std/sqlite` also gained `bind_blob`/`column_blob`, so raw bytes round-trip through a `BLOB` column.
+
 Ingle will have grown since you read this. Treat the *spirit* — safe by default, simple by
 default, fast to build, honest about its edges — as the durable part, and check the current
 spec and examples for the details. The fire's only just been lit.
