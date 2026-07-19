@@ -1542,8 +1542,8 @@ its users discovering the holes.
 
 Here is a question that quietly decides whether a young language's editor support lives or dies:
 *when your editor shows a type on hover, whose analysis is it showing?* The cautionary tale is
-rust-analyzer — a heroic, separate reimplementation of Rust's frontend that the Rust team itself
-describes as an unsustainable maintenance burden. Every language server that stayed healthy
+rust-analyzer — a heroic, separate reimplementation of Rust's frontend, and a well-known
+maintenance burden. Every language server that stayed healthy
 (clangd, gopls, tsserver) shares its compiler's actual frontend. Ingle's
 [architecture decision](architecture.md) draws the conclusion without drama: the language server
 **is the compiler** — `inglec --lsp`, same binary, same lexer, parser, and checker, speaking

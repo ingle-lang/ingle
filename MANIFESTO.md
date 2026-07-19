@@ -75,7 +75,7 @@ Experts stop complaining — but the funnel loses people before they become expe
 
 ### 3.2 Async is a second, harder language ("function coloring")
 Async/await splits the world into colored functions; async can't be called from sync without
-ceremony; the ecosystem fragmented around runtimes (Tokio won by momentum; async-std was
+ceremony; the ecosystem fragmented around runtimes (Tokio became the de-facto runtime; async-std was
 discontinued in 2025); and you **lose the stack trace** when debugging. Async Rust "has many
 more rough edges than sync Rust and requires a different mindset."
 
@@ -381,9 +381,9 @@ fn clamp(x: int, lo: int, hi: int) -> int
 ```
 
 **Why this, and why now — the reason traces to §5b (LLM-first).** Coding is moving to AI, and the
-2025–26 evidence is blunt: LLMs generate Python well because its syntax is free, and generate
-Rust poorly because *its ownership/mutability syntax is hard for a model to comprehend and
-produce*. Ingle's bet is to be the first language that is **both** memory-safe-without-GC **and**
+2025–26 pattern is consistent: LLMs generate Python fluently because its syntax is free, and
+struggle with Rust because *its ownership/mutability syntax is hard for a model to produce
+correctly*. Ingle's bet is to be the first language that is **both** memory-safe-without-GC **and**
 LLM-legible. Contracts complete that bet, because the AI-native-language frontier converges on two
 requirements: **structured tracing as a first-class effect** (Ingle already has it — §5c, the
 tape) and **every function carrying a formal specification** — because a model is far better at
@@ -439,7 +439,7 @@ is the concrete shape of the **mutable value semantics** Ingle shares with the p
 ## 5g. Graphics & the native backend — *decided June 2026*
 
 **Ingle does graphics, and it does them immediate-mode.** This is a deliberate bet that the place
-Rust most visibly fails — GUI — is where an LLM-first language can most visibly win.
+Rust struggles most — GUI — is where an LLM-first language can most visibly win.
 
 **Why immediate-mode.** A UI is graph-shaped, shared, mutable state, which is the single worst case
 for *any* ownership model (Rust's borrow checker and Ingle's move/borrow alike). Rust's GUIs
@@ -611,7 +611,7 @@ for OS/WASI sandboxing against genuinely adversarial native code.
 
 ## 5j. The verification & determinism loop — *decided June 2026 (the lead AI-era differentiator)*
 
-**This is the strongest, most universal, most defensible bet for the agent era — and Ingle is already
+**This is a strong, general, and defensible bet for the agent era — and Ingle is already
 half-built for it.** The pre-mortem (§5i) found that *running* model code safely is largely a solved,
 platform-level problem (WASI, microVMs); what *every* agent interaction needs, and what no mainstream
 language gives, is a **closed correctness loop**: the model writes code + a machine-checkable

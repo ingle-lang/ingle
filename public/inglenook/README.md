@@ -30,8 +30,8 @@ Conversations | Chat | Editor 1  | Inspector
 
 ## The Verified Loop — the moat, made visible
 
-This is the part that takes friendly aim at Cursor. **Cursor shows you what the AI *said*. Inglenook
-shows you what the code *did*** — checked by the real compiler, not vibes.
+This is the part that takes friendly aim at the vibes-coding workflow. **Most AI IDEs show you what
+the model *said*. Inglenook shows you what the code *did*** — checked by the real compiler, not vibes.
 
 When the agent produces Ingle code, a worker fiber (over [`std/proc`](../../docs/proc.md)) runs the
 actual compiler over it and renders a verdict strip under the reply:
@@ -44,10 +44,10 @@ actual compiler over it and renders a verdict strip under the reply:
 A green strip reads `✓ compiles · ✓ 3 contracts hold · ✓ runs clean`. A red one names the failure and,
 for a broken contract, shows the counterexample. And a red verdict **routes the fault back to the model
 automatically** — it fixes the real bug and tries again, capped at three rounds so a genuinely hard bug
-can't spiral. The model literally can't hand you code that doesn't hold. Toggle it in Settings (⌘,).
+can't spiral. The upshot: contract-violating code doesn't reach you silently. Toggle it in Settings (⌘,).
 
-No other AI IDE can build this, because the languages they serve have no verification story. Ingle was
-built for exactly this loop.
+This is only possible because Ingle *has* a verification story to build on — the compiler proves
+contracts, it doesn't just parse code. Ingle was built for exactly this loop.
 
 ## The Run panel — a *time* window
 
@@ -55,7 +55,8 @@ Hit **▶ Run** and the bottom pane becomes a time machine. Inglenook runs your 
 tape (`inglec --emit=trace` — one event per bytecode step, each carrying its source line) and lets you
 **scrub** it: drag the slider or step ◂ ▸, and the editor **spotlights the exact line that was executing**
 at that moment, with the function and opcode shown beside it. Because Ingle's tape is deterministic and
-total, this is real time-travel debugging — Cursor debugs with `console.log`; Inglenook scrubs the tape.
+total, this is real time-travel debugging — you replay the exact execution step by step, not a
+post-mortem stack trace.
 
 ## Contract-first Implement
 
@@ -81,11 +82,11 @@ No key? It still runs — choose **Ollama (local)** in Settings (⌘,) to chat w
   `~/.inglenook-workspace.json`).
 - `EMBER_TAPE=/path` records the UI tape (one JSON line per frame) for diagnosis.
 
-## Where it's going
+## The road here
 
-Phase 2 grows a real editable `f.code_editor` widget in Flare. Phase 3 adds `std/proc` and the
+Phase 2 grew a real editable `f.code_editor` widget in Flare. Phase 3 added `std/proc` and the
 **Verified Loop** — agent-proposed code is compiled, contract-checked (`--check`), and run
 before you see it, with the verdict strip rendered in the chat and red verdicts routed back to
-the model until green. Phase 4 makes the bottom pane a *time window*: the execution tape,
-scrubbable, with deterministic replay. Cursor shows you what the AI said; Inglenook shows you
-what the code did.
+the model until green. Phase 4 made the bottom pane a *time window*: the execution tape,
+scrubbable, with deterministic replay. Most AI IDEs show you what the model said; Inglenook shows
+you what the code did.

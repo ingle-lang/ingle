@@ -177,7 +177,7 @@ short form.
 ### Undoing and recovering — the safety net
 
 **`quog undo`** — walk back the most recent state change. It knows what it is undoing and
-tells you, and it never loses anything:
+tells you, and it's designed so nothing is lost:
 ```console
 $ quog undo
 undid save — tip bc003bd838 → 1b403862b3 (nothing lost)
@@ -219,7 +219,7 @@ created branch experiment at d90b9dae79
 ```
 
 **`quog switch <name>`** — move to another branch. Your current work is snapshotted before
-the move, so switching can never lose uncommitted changes.
+the move, so switching parks uncommitted changes rather than dropping them.
 ```console
 $ quog switch experiment
 switched to experiment
@@ -236,7 +236,7 @@ fast-forwarded main to d706d5131a
 ### Integrity
 
 **`quog verify`** — re-hash every object and re-resolve every link. This is the
-tamper-evidence guarantee: because objects are content-addressed, any in-place edit to
+tamper-evidence property: because objects are content-addressed, any in-place edit to
 history — corruption or a deliberate rewrite — makes an object stop hashing to its own id,
 and `verify` finds it.
 ```console

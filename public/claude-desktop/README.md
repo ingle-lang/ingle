@@ -36,8 +36,8 @@ a genuine networked, interactive program.
   toggle in Settings switches between **Claude (API)** and **Ollama (local)**. With Ollama selected,
   the app discovers the chat models installed on your machine (`GET /api/tags`) and lists them to
   pick from; messages then stream from the local model over Ollama's OpenAI‑compatible
-  `/v1/chat/completions` endpoint — **no API key, nothing leaves the machine**. This is the one thing
-  Anthropic's own Claude Desktop can't ship: a provider‑agnostic client that also runs fully local.
+  `/v1/chat/completions` endpoint — **no API key, nothing leaves the machine**. This is something
+  Anthropic's first‑party client doesn't do: a provider‑agnostic client that also runs fully local.
   See *Local models (Ollama)* below.
 
 ## Features
