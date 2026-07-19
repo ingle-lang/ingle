@@ -2116,8 +2116,8 @@ doesn't slowly accumulate garbage. And here's the property that makes reference-
 *complete* rather than leaky: because the only mutable things (structs and arrays) are uniquely
 owned, and everything shared is immutable, **no reference cycle can ever form.** Cycles are the
 one thing naive reference-counting can't collect; Ingle's value model makes them impossible to
-build in the first place. There is nothing a tracing garbage collector would catch that this
-misses.
+build in the first place. For the programs Ingle's ownership model allows, there is nothing a
+tracing garbage collector would reclaim that this misses.
 
 ### When you do want sharing: `rc struct` and `std/slotmap`
 
