@@ -5,17 +5,20 @@
 // serialised worker drops it to FOUR fibers and one response channel to drain per frame. The three
 // tasks rarely overlap, so serialising them costs nothing and buys stability.
 //
-// Each request is tagged with a one-character kind ("V" verify · "R" run · "L" lint) then the payload;
-// the response echoes the kind so the render loop can route it back to chat / runner / linter.
+// Each request is tagged with a one-character kind ("V" verify · "R" run · "L" lint · "Q" quog/SCM)
+// then the payload; the response echoes the kind so the render loop can route it back to the right
+// consumer (chat / runner / linter / source panel).
 import "verify" as verify
 import "run" as run
 import "lint" as lint
+import "scm" as scm
 import "std/string" as sstr
 
 
 let KIND_VERIFY = "V"
 let KIND_RUN    = "R"
 let KIND_LINT   = "L"
+let KIND_QUOG   = "Q"
 
 
 // tool_worker is the single tooling fiber: receive a tagged request, dispatch to the right task, send a
@@ -32,6 +35,8 @@ fn tool_worker(req_ch: Channel<string>, resp_ch: Channel<string>) {
                     send(resp_ch, KIND_RUN + run.run_trace(payload))
                 } else if kind == KIND_LINT {
                     send(resp_ch, KIND_LINT + lint.run_lint(payload))
+                } else if kind == KIND_QUOG {
+                    send(resp_ch, KIND_QUOG + scm.run_scm(payload))
                 }
             }
             case None {
@@ -55,6 +60,12 @@ fn run_req(path: string) -> string {
 
 fn lint_req(code: string) -> string {
     return KIND_LINT + code
+}
+
+
+// quog_req tags a Source-panel request: "" refreshes, "init" initialises a repo first, then queries.
+fn quog_req(payload: string) -> string {
+    return KIND_QUOG + payload
 }
 
 

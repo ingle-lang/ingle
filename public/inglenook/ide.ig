@@ -20,6 +20,7 @@ import "../claude-desktop/ollama" as oll
 import "chat" as chat
 import "editor" as editor
 import "files" as files
+import "scm" as scm
 import "verify" as verify
 import "run" as run
 import "lint" as lint
@@ -192,10 +193,11 @@ fn main() -> int {
     var tree = files.new_tree()
     var runner = run.new_runner()            // the tape scrubber (Run panel)
     var linter = lint.new_linter()           // live diagnostics (editor squiggles)
+    var scmp = scm.new_scm()                 // the Source panel (Quog VCS, shelled out to)
     var dock = build_workspace()
     var dark = true
     var zoom = 80
-    var side = 0                              // sidebar tab: 0 = Chats, 1 = Files
+    var side = 0                              // sidebar tab: 0 = Chats, 1 = Files, 2 = Source
     let saved = read_file(store_path())
     if saved.len() > 0 {
         match json.parse(saved) {
@@ -240,7 +242,7 @@ fn main() -> int {
     if zoom < 60 || zoom > 220 {
         zoom = 80
     }
-    if side != 0 && side != 1 {
+    if side < 0 || side > 2 {
         side = 0
     }
     if dark {
@@ -289,6 +291,7 @@ fn main() -> int {
         ch.begin_frame()
         runner.begin_frame()
         linter.begin_frame()
+        scmp.begin_frame()
         ch.drain(resp_ch, req_ch, oll_req_ch)
         ch.drain_disco(disco_resp_ch)
         // One tooling-response drain, routed by the kind tag back to chat / runner / linter.
@@ -302,6 +305,8 @@ fn main() -> int {
                     runner.apply_tape(p)
                 } else if k == tools.KIND_LINT {
                     linter.apply_result(p)
+                } else if k == tools.KIND_QUOG {
+                    scmp.apply_result(p)
                 }
             }
             case None {}
@@ -465,16 +470,20 @@ fn main() -> int {
             f.row(flare.START, flare.CENTER)
             f.heading("Inglenook")
             f.end()
-            let nside = f.segmented("sidetabs", ["Chats", "Files"], side)
-            if nside >= 0 && nside <= 1 {
+            let nside = f.segmented("sidetabs", ["Chats", "Files", "Source"], side)
+            if nside >= 0 && nside <= 2 {
                 side = nside
             }
             if side == 0 {
                 ch.build_chats(f)
-            } else {
+            } else if side == 1 {
                 f.scroll_begin("filetree")
                 tree.build(f, project)
                 f.scroll_end("filetree")
+            } else {
+                f.scroll_begin("scmtree")
+                scmp.build(f)
+                f.scroll_end("scmtree")
             }
             f.dock_panel_end()
         }
@@ -688,7 +697,7 @@ fn main() -> int {
         // The linter's debounce fits inside the post-input coast (LINT_SETTLE 7 < coast 12), so typing's
         // own had_input keeps enough frames running for a check to fire — only an IN-FLIGHT check
         // (linter.checking) or a run needs to hold the loop awake beyond that.
-        if had_input() || f.is_animating() || ch.pending || ch.discovering || ch.verifying || runner.running || linter.checking {
+        if had_input() || f.is_animating() || ch.pending || ch.discovering || ch.verifying || runner.running || linter.checking || scmp.refreshing {
             coast = 12
         } else if coast > 0 {
             coast = coast - 1
@@ -742,6 +751,13 @@ fn main() -> int {
         }
         if linter.pend_code.len() > 0 {        // the editor buffer settled → live-check it for squiggles
             send(tool_req_ch, tools.lint_req(linter.pend_code))
+        }
+        if scmp.want_init {                    // the Source panel's Initialize button → quog init + query
+            scmp.refreshing = true
+            send(tool_req_ch, tools.quog_req("init"))
+        } else if scmp.want_refresh {          // the Source panel needs fresh VCS state → query quog
+            scmp.refreshing = true
+            send(tool_req_ch, tools.quog_req(""))
         }
         if tree.open_path.len() > 0 {          // a file-tree click → open in the chosen pane
             panes.open(tree.open_pane, tree.open_path)

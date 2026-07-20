@@ -17,5 +17,13 @@ export EMBER_TAPE
 # built so they work without a separately-installed `inglec` on PATH (override with INGLENOOK_INGLEC=).
 : "${INGLENOOK_INGLEC:=$ROOT/build/inglec}"
 export INGLENOOK_INGLEC
+# The Source panel shells out to the `quog` VCS (a sibling Ingle app). Build it and point the panel at
+# it so it works without a separately-installed `quog` on PATH (override with INGLENOOK_QUOG=). Kept
+# non-fatal: if the db build is unavailable, the panel just reports quog missing.
+make quog >/dev/null 2>&1 || true
+if [ -x "$ROOT/build/quog" ]; then
+    : "${INGLENOOK_QUOG:=$ROOT/build/quog}"
+    export INGLENOOK_QUOG
+fi
 echo "Inglenook: UI tape → $EMBER_TAPE   (tail -f it to watch; EMBER_TAPE= to disable)" >&2
 exec build/inglec-net-gfx --emit=run public/inglenook/ide.ig
