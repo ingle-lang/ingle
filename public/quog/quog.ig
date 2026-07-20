@@ -25,6 +25,7 @@ import "std/http_server" as hs
 import "std/map" as map
 import "std/diff" as diff
 import "std/list" as list
+import "std/json" as json
 
 
 let DB_PATH = ".quog/quog.db"
@@ -270,11 +271,16 @@ fn cmd_save(message: string) -> Result<int, string> {
 
 
 // cmd_log walks the current branch from its tip back through parent links, newest first.
-fn cmd_log() -> Result<int, string> {
+fn cmd_log(json_out: bool) -> Result<int, string> {
     let db = sql.open(DB_PATH)?
     var id = get_ref(db, tip_ref(db)?)?
+    var commits: [json.Json] = []
     if id == "" {
-        println("no saves yet")
+        if json_out {
+            println(json.stringify(json.obj([json.member("commits", json.arr(commits))])))
+        } else {
+            println("no saves yet")
+        }
         return Ok(0)
     }
     loop {
@@ -283,8 +289,21 @@ fn cmd_log() -> Result<int, string> {
         }
         let text = from_bytes(get_object(db, id)?)
         let ts = _atoi(commit_header(text, "time "))
-        println("{_short(id)}  t={ts}  {commit_message(text)}")
+        let msg = commit_message(text)
+        if json_out {
+            commits.append(json.obj([
+                json.member("id", json.str(id)),
+                json.member("short", json.str(_short(id))),
+                json.member("time", json.num(ts)),
+                json.member("message", json.str(msg))
+            ]))
+        } else {
+            println("{_short(id)}  t={ts}  {msg}")
+        }
         id = commit_header(text, "parent ")
+    }
+    if json_out {
+        println(json.stringify(json.obj([json.member("commits", json.arr(commits))])))
     }
     return Ok(0)
 }
@@ -418,29 +437,71 @@ fn tip_tree_text(db: sql.Db) -> Result<string, string> {
 }
 
 
+// wants_json reports whether the `--json` porcelain flag is present anywhere in the argument list.
+// The read commands (status / log / branch) emit a single machine-readable JSON line when it is set —
+// the surface Inglenook's Source panel parses. It is purely additive: no other flag is affected.
+fn wants_json(argv: [string]) -> bool {
+    for a in argv {
+        if a == "--json" {
+            return true
+        }
+    }
+    return false
+}
+
+
+// _change_obj builds one `{status, path}` JSON object for a status change (added / modified / deleted).
+fn _change_obj(status: string, path: string) -> json.Json {
+    return json.obj([
+        json.member("status", json.str(status)),
+        json.member("path", json.str(path))
+    ])
+}
+
+
 // cmd_status reports what changed in the working tree since the last save: added / modified / deleted.
-fn cmd_status() -> Result<int, string> {
+fn cmd_status(json_out: bool) -> Result<int, string> {
     let db = sql.open(DB_PATH)?
+    let branch = head_branch(db)?
     let old_tree = tree_map(tip_tree_text(db)?)
     let new_tree = tree_map(scan(".", ""))
+    var changes: [json.Json] = []
     var n = 0
     for path in new_tree.keys() {
         let was = map_get(old_tree, path)
         if was == "" {
-            println("  added     {path}")
             n = n + 1
+            if json_out {
+                changes.append(_change_obj("added", path))
+            } else {
+                println("  added     {path}")
+            }
         } else if was != map_get(new_tree, path) {
-            println("  modified  {path}")
             n = n + 1
+            if json_out {
+                changes.append(_change_obj("modified", path))
+            } else {
+                println("  modified  {path}")
+            }
         }
     }
     for path in old_tree.keys() {
         if !new_tree.has(path) {
-            println("  deleted   {path}")
             n = n + 1
+            if json_out {
+                changes.append(_change_obj("deleted", path))
+            } else {
+                println("  deleted   {path}")
+            }
         }
     }
-    if n == 0 {
+    if json_out {
+        println(json.stringify(json.obj([
+            json.member("branch", json.str(branch)),
+            json.member("clean", json.boolean(n == 0)),
+            json.member("changes", json.arr(changes))
+        ])))
+    } else if n == 0 {
         println("clean — nothing changed since the last save")
     }
     return Ok(0)
@@ -572,11 +633,26 @@ fn ref_exists(db: sql.Db, name: string) -> Result<bool, string> {
 
 
 // cmd_branch lists branches (marking the current with '*'), or with a name creates one at the current tip.
-fn cmd_branch(argv: [string]) -> Result<int, string> {
+fn cmd_branch(argv: [string], json_out: bool) -> Result<int, string> {
     let db = sql.open(DB_PATH)?
-    if argv.len() < 2 {
+    // The branch NAME to create is the first non-flag argument after the verb, if any; without one
+    // (e.g. `quog branch` or `quog branch --json`) we LIST branches rather than create.
+    var name = ""
+    var i = 1
+    loop {
+        if i == argv.len() {
+            break
+        }
+        if !str.starts_with(argv[i], "--") {
+            name = argv[i]
+            break
+        }
+        i = i + 1
+    }
+    if name == "" {
         let cur = head_branch(db)?
         let st = sql.prepare(db, "SELECT name FROM ref WHERE name LIKE 'branch:%' ORDER BY name")?
+        var names: [json.Json] = []
         loop {
             let more = sql.step(st)?
             if !more {
@@ -584,15 +660,22 @@ fn cmd_branch(argv: [string]) -> Result<int, string> {
             }
             let full = sql.column_text(st, 0)
             let bname = str.substring(full, 7, str.cp_count(full))
-            if bname == cur {
+            if json_out {
+                names.append(json.str(bname))
+            } else if bname == cur {
                 println("* {bname}")
             } else {
                 println("  {bname}")
             }
         }
+        if json_out {
+            println(json.stringify(json.obj([
+                json.member("current", json.str(cur)),
+                json.member("branches", json.arr(names))
+            ])))
+        }
         return Ok(0)
     }
-    let name = argv[1]
     let tip = get_ref(db, tip_ref(db)?)?
     let _ = set_ref(db, "branch:" + name, tip)?
     if tip == "" {
@@ -1354,7 +1437,7 @@ fn action_save(conn: hs.Conn, body: [u8]) -> Result<int, string> {
 fn action_branch(conn: hs.Conn, body: [u8]) -> Result<int, string> {
     let name = _form_value(body, "name")
     if name != "" {
-        let _ = cmd_branch(["branch", name])?
+        let _ = cmd_branch(["branch", name], false)?
     }
     let _ = hs.redirect(conn, "/")
     return Ok(0)
@@ -1796,6 +1879,7 @@ fn dispatch(argv: [string]) -> Result<int, string> {
         return Ok(0)
     }
     let verb = argv[0]
+    let jsonf = wants_json(argv)
     if verb == "init" {
         return cmd_init()
     }
@@ -1818,13 +1902,13 @@ fn dispatch(argv: [string]) -> Result<int, string> {
         return cmd_restore(argv)
     }
     if verb == "status" {
-        return cmd_status()
+        return cmd_status(jsonf)
     }
     if verb == "diff" {
         return cmd_diff()
     }
     if verb == "branch" {
-        return cmd_branch(argv)
+        return cmd_branch(argv, jsonf)
     }
     if verb == "switch" {
         return cmd_switch(argv)
@@ -1842,7 +1926,7 @@ fn dispatch(argv: [string]) -> Result<int, string> {
         return cmd_save(argv[1])
     }
     if verb == "log" {
-        return cmd_log()
+        return cmd_log(jsonf)
     }
     if verb == "show" {
         return cmd_show(argv)

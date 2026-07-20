@@ -68,6 +68,9 @@ fi
     echo '$ quog branch';                q branch
     echo '$ quog merge experiment';      q merge experiment
     echo '$ quog log';                   q log
+    echo '$ quog status --json';         q status --json
+    echo '$ quog log --json';            q log --json
+    echo '$ quog branch --json';         q branch --json
     printf 'a scratch edit\n' >> "$WORK/README.md"
     echo '$ quog discard';               q discard
     echo '$ quog restore';               q restore

@@ -54,6 +54,12 @@ $ quog log
 d706d5131a  t=1000000000  experiment work
 d90b9dae79  t=1000000000  resync
 1b403862b3  t=1000000000  initial import
+$ quog status --json
+{"branch":"main","clean":true,"changes":[]}
+$ quog log --json
+{"commits":[{"id":"d706d5131a662634b33d275b6bb9d4166d46451cef99ca616df6211871c068f5","short":"d706d5131a","time":1000000000,"message":"experiment work"},{"id":"d90b9dae7900e557d83c6261c88f214fbc2d3bab255d0a575e75df3420803d69","short":"d90b9dae79","time":1000000000,"message":"resync"},{"id":"1b403862b32ee0b31b44208edd430b59e771710fc408fb09c7ca4918f58836c0","short":"1b403862b3","time":1000000000,"message":"initial import"}]}
+$ quog branch --json
+{"current":"main","branches":["experiment","main"]}
 $ quog discard
 discarded working changes — recoverable with: quog restore 1
 $ quog restore
