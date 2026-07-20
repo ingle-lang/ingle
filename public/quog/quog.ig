@@ -774,12 +774,42 @@ fn cmd_discard() -> Result<int, string> {
 }
 
 
-// cmd_restore lists the attic (no arg) or brings an attic entry back into the working tree. Restoring
-// first stashes any current uncommitted work to the attic, so restore itself can never lose work.
-fn cmd_restore(argv: [string]) -> Result<int, string> {
+// cmd_restore lists the attic (no seq) or brings an attic entry back into the working tree. Restoring
+// first stashes any current uncommitted work to the attic, so restore itself can never lose work. The
+// seq to restore is the first non-flag argument; `--json` lists the attic as machine-readable JSON
+// (the surface Inglenook's Source panel shows so a user can restore a chosen entry).
+fn cmd_restore(argv: [string], json_out: bool) -> Result<int, string> {
     let db = sql.open(DB_PATH)?
-    if argv.len() < 2 {
+    var seq_arg = ""
+    var ai = 1
+    loop {
+        if ai == argv.len() {
+            break
+        }
+        if !str.starts_with(argv[ai], "--") {
+            seq_arg = argv[ai]
+            break
+        }
+        ai = ai + 1
+    }
+    if seq_arg == "" {
         let st = sql.prepare(db, "SELECT seq, ts, reason FROM attic ORDER BY seq DESC")?
+        if json_out {
+            var entries: [json.Json] = []
+            loop {
+                let more = sql.step(st)?
+                if !more {
+                    break
+                }
+                entries.append(json.obj([
+                    json.member("seq", json.num(sql.column_int(st, 0))),
+                    json.member("ts", json.num(sql.column_int(st, 1))),
+                    json.member("reason", json.str(sql.column_text(st, 2)))
+                ]))
+            }
+            println(json.stringify(json.obj([json.member("entries", json.arr(entries))])))
+            return Ok(0)
+        }
         var any = 0
         loop {
             let more = sql.step(st)?
@@ -796,7 +826,7 @@ fn cmd_restore(argv: [string]) -> Result<int, string> {
         }
         return Ok(0)
     }
-    let seq = _atoi(argv[1])
+    let seq = _atoi(seq_arg)
     let st = sql.prepare(db, "SELECT tree FROM attic WHERE seq = ?")?
     let _ = sql.bind_int(st, 1, seq)
     let found = sql.step(st)?
@@ -1899,7 +1929,7 @@ fn dispatch(argv: [string]) -> Result<int, string> {
         return cmd_discard()
     }
     if verb == "restore" {
-        return cmd_restore(argv)
+        return cmd_restore(argv, jsonf)
     }
     if verb == "status" {
         return cmd_status(jsonf)

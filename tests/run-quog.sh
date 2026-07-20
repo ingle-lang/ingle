@@ -74,6 +74,7 @@ fi
     printf 'a scratch edit\n' >> "$WORK/README.md"
     echo '$ quog discard';               q discard
     echo '$ quog restore';               q restore
+    echo '$ quog restore --json';        q restore --json
     echo '$ quog verify';                q verify
 } > "$TRANSCRIPT" 2>&1
 

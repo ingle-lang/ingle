@@ -65,5 +65,7 @@ discarded working changes — recoverable with: quog restore 1
 $ quog restore
   1  t=1000000000  discarded working changes
 restore one with: quog restore <n>
+$ quog restore --json
+{"entries":[{"seq":1,"ts":1000000000,"reason":"discarded working changes"}]}
 $ quog verify
 verified 4 commits, 4 trees, 6 blobs — every object intact, every link resolves
