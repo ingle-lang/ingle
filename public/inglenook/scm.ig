@@ -31,6 +31,14 @@ struct Commit {
 }
 
 
+// Attic is one recoverable discarded snapshot (invariant #6): its seq (restore key) and why it was
+// stashed. Showing these makes "discard is recoverable" concrete — the safety net, visible.
+struct Attic {
+    seq: int
+    reason: string
+}
+
+
 // Scm is the Source tab's whole state. The state fields are refreshed from `quog --json` off-thread;
 // want_refresh / want_init are per-frame action flags cleared by begin_frame, set during build, and
 // read + acted on by ide.ig post-frame.
@@ -44,22 +52,37 @@ struct Scm {
     commits: [Commit]        // the branch history
     branches: [string]       // every branch name
     current: string          // the current branch (from branch list)
+    attic: [Attic]           // recoverable discarded snapshots (invariant #6)
     err: string              // a diagnostic to surface when there's no repo
+    msg_draft: string        // the commit-message input buffer (persists across frames)
+    action_msg: string       // the last mutation's result line, surfaced under the header
+    action_ok: bool          // whether that last mutation succeeded
     refreshing: bool         // a quog query is in flight
     want_refresh: bool       // action: re-query quog
     want_init: bool          // action: initialise a repo here, then query
+    want_save: bool          // action: save the working tree (message = msg_draft)
+    want_discard: bool       // action: discard working changes (to the recoverable attic)
+    want_restore_seq: int    // action: restore this attic entry (-1 = none this frame)
+    want_undo: bool          // action: undo the last operation (the op-log spine)
 
 
-    // begin_frame clears the per-frame action flags before the panel builds.
+    // begin_frame clears the per-frame action flags before the panel builds (msg_draft / action_msg
+    // persist — they are editing/result state, not one-shot intents).
     fn begin_frame(mut self) {
         self.want_refresh = false
         self.want_init = false
+        self.want_save = false
+        self.want_discard = false
+        self.want_restore_seq = 0 - 1
+        self.want_undo = false
     }
 
 
-    // build renders the Source tab: a header (branch + Refresh), the working-tree status, the branch
-    // history, and the branch list. On first view it requests a refresh so the panel self-loads.
-    fn build(mut self, mut f: flare.Flare) {
+    // build renders the Source tab: a header (branch + Refresh), the Save box (when there are changes),
+    // the working-tree status, the branch history, and the branch list — plus Undo/Restore, the safety
+    // net. `cw` is the panel's content width for wrapping. On first view it requests a refresh so the
+    // panel self-loads. Mutating controls set want_* action flags, applied by ide.ig after layout.
+    fn build(mut self, mut f: flare.Flare, cw: int) {
         f.row(flare.START, flare.CENTER)
         f.text_muted("Source")
         f.spacer()
@@ -79,12 +102,12 @@ struct Scm {
         }
 
         if self.missing {
-            f.paragraph("Couldn't run quog. Install it (make install-quog) or set INGLENOOK_QUOG.", 240)
+            f.paragraph("Couldn't run quog. Install it (make install-quog) or set INGLENOOK_QUOG.", cw)
             return
         }
 
         if !self.repo {
-            f.paragraph("No Quog repo in this folder yet.", 240)
+            f.paragraph("No Quog repo in this folder yet.", cw)
             f.spacer()
             if f.primary("Initialize Quog repo") {
                 self.want_init = true
@@ -105,7 +128,41 @@ struct Scm {
             f.badge("{self.changes.len()} change(s)", 0)
         }
         f.end()
+
+        // --- last action's result (saved / discarded — recoverable / undone) ---
+        if self.action_msg.len() > 0 {
+            if self.action_ok {
+                f.paragraph(self.action_msg, cw)
+            } else {
+                f.row(flare.START, flare.CENTER)
+                f.badge("error", 2)
+                f.strut(6, 0)
+                f.paragraph(self.action_msg, cw - 48)
+                f.end()
+            }
+        }
         f.divider()
+
+        // --- save the working tree (only meaningful when something changed) ---
+        if !self.clean {
+            f.text_muted("Message")
+            self.msg_draft = f.text_field("scm_msg", self.msg_draft)
+            let submitted = f.submit()
+            f.row(flare.START, flare.CENTER)
+            if sstr.trim(self.msg_draft).len() > 0 {
+                if f.primary("Save") || submitted {
+                    self.want_save = true
+                }
+            } else {
+                f.text_muted("enter a message to save")
+            }
+            f.spacer()
+            if f.danger("Discard") {                 // safe: discard goes to a recoverable attic
+                self.want_discard = true
+            }
+            f.end()
+            f.divider()
+        }
 
         // --- working-tree status ---
         f.text_muted("Changes")
@@ -128,8 +185,14 @@ struct Scm {
         }
         f.divider()
 
-        // --- branch history ---
+        // --- branch history + undo (the op-log spine: any operation is reversible) ---
+        f.row(flare.START, flare.CENTER)
         f.text_muted("History — {self.branch}")
+        f.spacer()
+        if f.ghost_button("Undo") {
+            self.want_undo = true
+        }
+        f.end()
         if self.commits.len() == 0 {
             f.label("no saves yet")
         } else {
@@ -168,6 +231,29 @@ struct Scm {
                 b = b + 1
             }
         }
+
+        // --- the attic: discarded work is recoverable, not gone (invariant #6, made visible) ---
+        if self.attic.len() > 0 {
+            f.divider()
+            f.text_muted("Attic — recoverable")
+            var k = 0
+            loop {
+                if k == self.attic.len() {
+                    break
+                }
+                let a = self.attic[k]
+                f.row(flare.START, flare.CENTER)
+                f.paragraph(a.reason, cw - 80)
+                f.spacer()
+                f.key("atrestore:{a.seq}")
+                if f.ghost_button("Restore") {
+                    self.want_restore_seq = a.seq
+                }
+                f.key_clear()
+                f.end()
+                k = k + 1
+            }
+        }
     }
 
 
@@ -178,15 +264,19 @@ struct Scm {
         self.changes = []
         self.commits = []
         self.branches = []
+        self.attic = []
         match json.parse(s) {
             case Ok(root) {
                 self.repo = json.as_bool(json.get(root, "repo"))
                 self.missing = json.as_bool(json.get(root, "missing"))
                 self.err = json.as_str(json.get(root, "err"))
+                self.action_ok = json.as_bool(json.get(root, "action_ok"))
+                self.action_msg = json.as_str(json.get(root, "action_msg"))
                 if self.repo {
                     self.parse_status(json.as_str(json.get(root, "status")))
                     self.parse_log(json.as_str(json.get(root, "log")))
                     self.parse_branch(json.as_str(json.get(root, "branch")))
+                    self.parse_attic(json.as_str(json.get(root, "attic")))
                 }
             }
             case Err(e) {
@@ -265,6 +355,29 @@ struct Scm {
             case Err(e) {}
         }
     }
+
+
+    // parse_attic reads `quog restore --json` into the recoverable-snapshot list (newest first).
+    fn parse_attic(mut self, s: string) {
+        match json.parse(s) {
+            case Ok(at) {
+                let arr = json.get(at, "entries")
+                var i = 0
+                loop {
+                    if i == json.length(arr) {
+                        break
+                    }
+                    let it = json.at(arr, i)
+                    self.attic.append(Attic {
+                        seq: json.as_int(json.get(it, "seq")),
+                        reason: json.as_str(json.get(it, "reason"))
+                    })
+                    i = i + 1
+                }
+            }
+            case Err(e) {}
+        }
+    }
 }
 
 
@@ -292,14 +405,51 @@ fn quog_path() -> string {
 }
 
 
-// run_scm is the tooling-worker task (tools.ig kind "Q"): shell out to quog and pack the three read
-// commands' JSON into one reply. payload "init" runs `quog init` first, then queries. Repo detection
-// keys off `status`: exit 0 with a JSON object means a repo is present; a shell "command not found"
-// (exit 127) means quog itself is missing, told apart from an ordinary "no repo here" error.
+// _first_line returns the first line of `s` (its most useful summary — quog's action messages are
+// one line), trimmed. Keeps a multi-line stderr from bloating the panel's status line.
+fn _first_line(s: string) -> string {
+    let t = sstr.trim(s)
+    let nl = sstr.index_of(t, "\n")
+    if nl < 0 {
+        return t
+    }
+    return sstr.trim(sstr.cp_slice(t, 0, nl))
+}
+
+
+// run_scm is the tooling-worker task (tools.ig kind "Q"): optionally apply ONE mutation, then shell
+// out to the three read commands and pack their JSON into a single reply. The payload names the intent:
+// "" refreshes; "init" creates a repo; "discard"/"restore"/"undo" run that verb; "save\t<message>"
+// commits. A mutation's result line (and whether it succeeded) rides back so the panel can surface it —
+// this is where Quog's safety shows: a discard reports it is recoverable, an undo confirms the revert.
+// Repo detection keys off `status`: exit 0 with a JSON object means a repo is present; a shell
+// "command not found" (exit 127) means quog itself is missing, told apart from a plain "no repo" error.
 fn run_scm(payload: string) -> string {
     let q = proc.shell_quote(quog_path())
+    var action_ok = true
+    var action_msg = ""
     if payload == "init" {
-        let _ = proc.run(q + " init")
+        let r = proc.run(q + " init")
+        action_ok = r.ok()
+        action_msg = _first_line(r.combined())
+    } else if payload == "discard" {
+        let r = proc.run(q + " discard")
+        action_ok = r.ok()
+        action_msg = _first_line(r.combined())
+    } else if sstr.starts_with(payload, "restore\t") {
+        let seq = sstr.cp_slice(payload, 8, payload.char_count())
+        let r = proc.run(q + " restore " + proc.shell_quote(seq))
+        action_ok = r.ok()
+        action_msg = _first_line(r.combined())
+    } else if payload == "undo" {
+        let r = proc.run(q + " undo")
+        action_ok = r.ok()
+        action_msg = _first_line(r.combined())
+    } else if sstr.starts_with(payload, "save\t") {
+        let msg = sstr.cp_slice(payload, 5, payload.char_count())
+        let r = proc.run(q + " save " + proc.shell_quote(msg))
+        action_ok = r.ok()
+        action_msg = _first_line(r.combined())
     }
     let r_status = proc.run(q + " status --json")
     var missing = false
@@ -314,17 +464,22 @@ fn run_scm(payload: string) -> string {
     }
     var log_out = ""
     var branch_out = ""
+    var attic_out = ""
     if repo {
         log_out = proc.run(q + " log --json").out()
         branch_out = proc.run(q + " branch --json").out()
+        attic_out = proc.run(q + " restore --json").out()
     }
     return json.stringify(json.obj([
         json.member("repo", json.boolean(repo)),
         json.member("missing", json.boolean(missing)),
         json.member("err", json.str(err)),
+        json.member("action_ok", json.boolean(action_ok)),
+        json.member("action_msg", json.str(action_msg)),
         json.member("status", json.str(r_status.out())),
         json.member("log", json.str(log_out)),
-        json.member("branch", json.str(branch_out))
+        json.member("branch", json.str(branch_out)),
+        json.member("attic", json.str(attic_out))
     ]))
 }
 
@@ -341,9 +496,17 @@ fn new_scm() -> Scm {
         commits: [],
         branches: [],
         current: "",
+        attic: [],
         err: "",
+        msg_draft: "",
+        action_msg: "",
+        action_ok: true,
         refreshing: false,
         want_refresh: false,
-        want_init: false
+        want_init: false,
+        want_save: false,
+        want_discard: false,
+        want_restore_seq: 0 - 1,
+        want_undo: false
     }
 }

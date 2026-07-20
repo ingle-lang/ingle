@@ -307,6 +307,11 @@ fn main() -> int {
                     linter.apply_result(p)
                 } else if k == tools.KIND_QUOG {
                     scmp.apply_result(p)
+                    if scmp.action_msg.len() > 0 {   // a mutation may have rewritten the working tree
+                        tree.refresh()
+                        panes.reload_if_open(panes.active_path(0))
+                        panes.reload_if_open(panes.active_path(1))
+                    }
                 }
             }
             case None {}
@@ -481,8 +486,9 @@ fn main() -> int {
                 tree.build(f, project)
                 f.scroll_end("filetree")
             } else {
+                let scw = panel_cw(f, "Conversations", 180, 600)
                 f.scroll_begin("scmtree")
-                scmp.build(f)
+                scmp.build(f, scw)
                 f.scroll_end("scmtree")
             }
             f.dock_panel_end()
@@ -755,6 +761,19 @@ fn main() -> int {
         if scmp.want_init {                    // the Source panel's Initialize button → quog init + query
             scmp.refreshing = true
             send(tool_req_ch, tools.quog_req("init"))
+        } else if scmp.want_save {             // Save → commit the working tree with the typed message
+            scmp.refreshing = true
+            send(tool_req_ch, tools.quog_req("save\t" + scmp.msg_draft))
+            scmp.msg_draft = ""                // consumed; the field clears (the message rides in the request)
+        } else if scmp.want_discard {          // Discard → throw working changes to the recoverable attic
+            scmp.refreshing = true
+            send(tool_req_ch, tools.quog_req("discard"))
+        } else if scmp.want_restore_seq >= 0 { // Restore → bring a chosen attic snapshot back
+            scmp.refreshing = true
+            send(tool_req_ch, tools.quog_req("restore\t{scmp.want_restore_seq}"))
+        } else if scmp.want_undo {             // Undo → revert the last operation (the op-log spine)
+            scmp.refreshing = true
+            send(tool_req_ch, tools.quog_req("undo"))
         } else if scmp.want_refresh {          // the Source panel needs fresh VCS state → query quog
             scmp.refreshing = true
             send(tool_req_ch, tools.quog_req(""))
