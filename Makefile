@@ -49,6 +49,12 @@ RT_LIB_NETGFX := build/libember_rt_net_gfx.a
 # the std/sqlite FFI resolved and SQLite statically inside it — no external libsqlite3, no toolchain to
 # run it. Linked by compile_native when the compiler itself is db-flavored (#elif EMBER_SQLITE).
 RT_LIB_DB := build/libember_rt_db.a
+# The WEB runtime variant (OFI-212): runtime + cextern + the raylib-free graphics stubs, built with
+# -DEMBER_GRAPHICS -DEMBER_GFX_HEADLESS, so `inglec-web -o server server.ig` links a STANDALONE native
+# Flare web server that links only libSystem — no raylib/FreeType/GL, no display. The gfx FFI resolves to
+# graphics_headless.c's SSR stubs; TCP + HTTP come from cextern. Linked by compile_native when the
+# compiler is web-flavored (#if EMBER_GRAPHICS && EMBER_GFX_HEADLESS).
+RT_LIB_WEB := build/libember_rt_web.a
 
 # F3 (Ingle rebrand): `emberc` stays a permanent compatibility alias for `inglec`. Each binary recipe
 # emits a relative symlink build/emberc* -> inglec* via $(call LINK_COMPAT,<the-inglec-path>), so
@@ -223,6 +229,16 @@ $(RT_LIB_DB): src/runtime.c src/cextern.c $(SQLITE_OBJ) include/ember_rt.h inclu
 	$(CC) $(RT_FLAGS) -DEMBER_SQLITE=1 -Ithird_party/sqlite -c src/runtime.c -o build/runtime_rt_db.o
 	$(CC) $(RT_FLAGS) -DEMBER_SQLITE=1 -Ithird_party/sqlite -c src/cextern.c -o build/cextern_rt_db.o
 	ar rcs $@ build/runtime_rt_db.o build/cextern_rt_db.o $(SQLITE_OBJ)
+
+# The WEB runtime variant (see RT_LIB_WEB): runtime + cextern + graphics_headless (the raylib-free gfx
+# stubs), all built -DEMBER_GRAPHICS -DEMBER_GFX_HEADLESS so the em_ffi indices match what inglec-web
+# bakes into the emitted C. No raylib/FreeType — the archive is pure first-party + libSystem.
+WEB_RT_DEFS := -DEMBER_GRAPHICS=1 -DEMBER_GFX_HEADLESS=1
+$(RT_LIB_WEB): src/runtime.c src/cextern.c src/graphics_headless.c include/ember_rt.h include/value.h include/program.h include/cextern.h include/graphics.h | build
+	$(CC) $(RT_FLAGS) $(WEB_RT_DEFS) -c src/runtime.c -o build/runtime_rt_web.o
+	$(CC) $(RT_FLAGS) $(WEB_RT_DEFS) -c src/cextern.c -o build/cextern_rt_web.o
+	$(CC) $(RT_FLAGS) $(WEB_RT_DEFS) -c src/graphics_headless.c -o build/graphics_headless_rt_web.o
+	ar rcs $@ build/runtime_rt_web.o build/cextern_rt_web.o build/graphics_headless_rt_web.o
 
 build:
 	mkdir -p build
@@ -436,7 +452,7 @@ graphics: $(RT_LIB_NETGFX) | build
 # std/http_server — headless, no window, no GL, no third-party dependency (graphics_headless.c stubs
 # the gfx runtime). This is the raylib-free retarget the WASM client (OFI-213) also needs. Serve a
 # Flare page with: build/inglec-web --emit=run <server.ig>
-web: | build
+web: $(RT_LIB_WEB) | build
 	$(CC) $(WEB_FLAGS) $(SOURCES) $(LDLIBS_MATH) -o $(WEB_BIN)
 	@$(call LINK_COMPAT,$(WEB_BIN))
 

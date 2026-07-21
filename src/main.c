@@ -913,7 +913,20 @@ static int compile_native(const TokenList *tokens, const char *name,
     //                      (folded into libc on macOS) — it must follow the objects on the link
     //                      line.  -pthread (portable spelling, both platforms) for the parallel rt.
     char cmd[16384];
-#if EMBER_GRAPHICS
+#if EMBER_GRAPHICS && EMBER_GFX_HEADLESS
+    // A web-flavored compiler (inglec-web, built -DEMBER_GRAPHICS -DEMBER_GFX_HEADLESS) links the
+    // raylib-free web runtime (libember_rt_web.a = runtime.c + cextern.c + graphics_headless.c built with
+    // those defines), so `inglec-web -o server server.ig` yields a STANDALONE native Flare web server that
+    // links only libSystem — no raylib/FreeType/GL, no display. The gfx builtins resolve to the pure-C SSR
+    // stubs; TCP + HTTP come from cextern. The em_ffi registry indices baked into the emitted C match this
+    // table because both carry the same defines. Serial: inglec-web has no EMBER_PARALLEL, so spawn/channels
+    // do not type-check and `concurrent` is never set on this path.
+    (void)concurrent;
+    snprintf(cmd, sizeof cmd,
+             "cc -std=c17 -O2 -D_DEFAULT_SOURCE -DEMBER_GRAPHICS=1 -DEMBER_GFX_HEADLESS=1 "
+             "-I'%s' '%s' '%s/libember_rt_web.a' -lm -o '%s'",
+             incdir, cpath, libdir, out_path);
+#elif EMBER_GRAPHICS
     // A graphics-flavored compiler (inglec-net-gfx / inglec-gfx) links the graphics+net runtime plus
     // raylib + FreeType + libcurl, so `inglec -o app app.ig` yields a STANDALONE native GUI binary that
     // drives raylib and reaches the Anthropic API. The runtime is built -DEMBER_PARALLEL so the app's

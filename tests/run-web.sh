@@ -54,6 +54,24 @@ for src in "$ROOT"/tests/web/*.ig; do
         echo "FAIL $(basename "$src")"
         fail=$((fail + 1))
     fi
+
+    # Native path (RT_LIB_WEB): `inglec-web -o` must produce a standalone binary whose output is
+    # byte-identical to --emit=run (a native binary prints no `=> N` trailer). Guards compile_native's
+    # web branch + the runtime archive. Skipped only if cc is somehow unavailable.
+    nbin=$(mktemp)
+    if "$BIN" -o "$nbin" "$src" >/dev/null 2>&1; then
+        nactual=$("$nbin" 2>/dev/null | grep -vE '^=> ')
+        if [ "$nactual" = "$(cat "$golden")" ]; then
+            pass=$((pass + 1))
+        else
+            echo "FAIL $(basename "$src") (native binary output != golden)"
+            fail=$((fail + 1))
+        fi
+    else
+        echo "FAIL $(basename "$src") (native compile via inglec-web -o failed)"
+        fail=$((fail + 1))
+    fi
+    rm -f "$nbin"
 done
 
 if [ "$UPDATE" -eq 1 ]; then
