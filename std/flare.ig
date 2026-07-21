@@ -102,6 +102,7 @@ let _EDITOR = 54       // an editable monospace code editor: line-number gutter 
                        // (text = source; id = packed "lang\nwidget-id" — scroll/marks/hot are read from
                        // encapsulated state by the widget-id at paint time, not carried in the id)
 let _BADGE = 55        // a compact rounded status pill (id = kind: "0" neutral · "1" ok · "2" bad · "3" pending)
+let _DIFFLINE = 56     // one unified-diff line: a subtle green/red wash + mono text with a +/-/· gutter (id = op)
 
 // HANDLE_W is the on-screen thickness (px) of a splitter's hit band — wide enough to grab, a hairline to look
 // at. Public so a caller can account for it when computing the remaining content width beside a resized pane.
@@ -3027,6 +3028,16 @@ struct Flare {
     }
 
 
+    // diff_line renders one line of a unified diff: a subtle green/red wash for an added / removed line
+    // and the text in the mono face behind a +/-/· gutter. `op` is "add" / "remove" / "keep" (context).
+    // The leaf STRETCHES to the panel width, so consecutive calls stack into a diff block; a long line
+    // clips to the panel rather than wrapping (a diff reads line-for-line).
+    fn diff_line(mut self, op: string, text: string) {
+        let node = self.lo.leaf(0, self.ui.style.text_size + 6, 0)
+        self._queue(node, _DIFFLINE, text, op)
+    }
+
+
     // text_muted is secondary text (hints, counts) in the muted ink.
     fn text_muted(mut self, s: string) {
         let node = self.lo.leaf(measure_text(s, self.ui.style.text_size), self.ui.style.row_h, 0)
@@ -3719,6 +3730,31 @@ struct Flare {
     }
 
 
+    // _paint_diff_line draws one diff line: a low-alpha green (add) / red (remove) wash across the full
+    // width, then a +/-/· gutter and the line text in the mono face. Context ("keep") lines get no wash
+    // and muted ink, so added / removed lines pop the way a GitHub diff reads.
+    fn _paint_diff_line(mut self, text: string, op: string, x: int, y: int, w: int, h: int) {
+        self._ensure_fonts()                                     // lazily load the mono face at paint time
+        let st = self.ui.style
+        let size = st.text_size - 1
+        let ty = y + (h - size) / 2
+        var ink = st.muted_ink
+        var gutter = "  "
+        if op == "add" {
+            fill_round(x, y, w, h, 0, ui.rgb(122, 162, 92), 40)   // subtle leaf-green wash
+            ink = st.ink
+            gutter = "+ "
+        } else if op == "remove" {
+            fill_round(x, y, w, h, 0, st.danger, 40)              // subtle red wash
+            ink = st.ink
+            gutter = "- "
+        }
+        set_font(self.mono)
+        draw_text(gutter + text, x + 6, ty, size, ink)
+        set_font(0)
+    }
+
+
     // _quote_block pre-wraps the text (indented for the bar) and reserves its height; the _QUOTE paint
     // node draws the accent bar + the muted lines.
     fn _quote_block(mut self, text: string, width: int) {
@@ -4112,6 +4148,8 @@ struct Flare {
             self._paint_code_editor(text, id, x, y, w, h)
         } else if kind == _BADGE {
             self._paint_badge(text, id, x, y, w, h)
+        } else if kind == _DIFFLINE {
+            self._paint_diff_line(text, id, x, y, w, h)
         } else if kind == _QUOTE {
             // a blockquote: an accent bar + indented muted lines (text = pre-wrapped, '\n'-joined)
             let size = st.text_size
@@ -4661,6 +4699,27 @@ struct DockTree {
         if self.dk_kind[leaf] != 1 { return }
         self.dk_active[leaf] = idx
         self._sync_panel(leaf)
+    }
+
+
+    // activate_panel brings docked panel `name` to the front of its leaf's tab group (a no-op if it
+    // isn't docked). Lets code focus a tab by name — e.g. surface the Diff tab when a file is clicked.
+    fn activate_panel(mut self, name: string) {
+        let leaf = self.leaf_of(name)
+        if leaf < 0 {
+            return
+        }
+        var i = 0
+        loop {
+            if i == self.dk_tabs[leaf].len() {
+                break
+            }
+            if self.dk_tabs[leaf][i] == name {
+                self.set_active(leaf, i)
+                return
+            }
+            i = i + 1
+        }
     }
 
 
