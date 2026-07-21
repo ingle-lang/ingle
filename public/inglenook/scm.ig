@@ -55,6 +55,7 @@ struct Scm {
     attic: [Attic]           // recoverable discarded snapshots (invariant #6)
     err: string              // a diagnostic to surface when there's no repo
     msg_draft: string        // the commit-message input buffer (persists across frames)
+    branch_draft: string     // the new-branch-name input buffer (persists across frames)
     action_msg: string       // the last mutation's result line, surfaced under the header
     action_ok: bool          // whether that last mutation succeeded
     refreshing: bool         // a quog query is in flight
@@ -64,10 +65,13 @@ struct Scm {
     want_discard: bool       // action: discard working changes (to the recoverable attic)
     want_restore_seq: int    // action: restore this attic entry (-1 = none this frame)
     want_undo: bool          // action: undo the last operation (the op-log spine)
+    want_branch: bool        // action: create a branch (name = branch_draft)
+    want_switch_name: string // action: switch to this branch ("" = none this frame)
+    want_merge_name: string  // action: merge this branch into the current one ("" = none this frame)
 
 
-    // begin_frame clears the per-frame action flags before the panel builds (msg_draft / action_msg
-    // persist — they are editing/result state, not one-shot intents).
+    // begin_frame clears the per-frame action flags before the panel builds (msg_draft / branch_draft /
+    // action_msg persist — they are editing/result state, not one-shot intents).
     fn begin_frame(mut self) {
         self.want_refresh = false
         self.want_init = false
@@ -75,6 +79,9 @@ struct Scm {
         self.want_discard = false
         self.want_restore_seq = 0 - 1
         self.want_undo = false
+        self.want_branch = false
+        self.want_switch_name = ""
+        self.want_merge_name = ""
     }
 
 
@@ -211,26 +218,42 @@ struct Scm {
             }
         }
 
-        // --- branch list (display only in Phase 1; switching arrives in Phase 3) ---
-        if self.branches.len() > 1 {
-            f.divider()
-            f.text_muted("Branches")
-            var b = 0
-            loop {
-                if b == self.branches.len() {
-                    break
+        // --- branches: switch (auto-snapshots first, invariant #4) and merge (additive: a real
+        //     conflict is declined, not clobbered, invariant #5) ---
+        f.divider()
+        f.text_muted("Branches")
+        var b = 0
+        loop {
+            if b == self.branches.len() {
+                break
+            }
+            let name = self.branches[b]
+            f.key("br:{name}")
+            f.row(flare.START, flare.CENTER)
+            if name == self.current {
+                f.label("* {name}")
+            } else {
+                f.label("  {name}")
+                f.spacer()
+                if f.ghost_button("Switch") {
+                    self.want_switch_name = name
                 }
-                let name = self.branches[b]
-                f.row(flare.START, flare.CENTER)
-                if name == self.current {
-                    f.label("* {name}")
-                } else {
-                    f.label("  {name}")
+                if f.ghost_button("Merge") {
+                    self.want_merge_name = name
                 }
-                f.end()
-                b = b + 1
+            }
+            f.end()
+            f.key_clear()
+            b = b + 1
+        }
+        f.row(flare.START, flare.CENTER)
+        self.branch_draft = f.text_field("scm_branch", self.branch_draft)
+        if sstr.trim(self.branch_draft).len() > 0 {
+            if f.ghost_button("Create") {
+                self.want_branch = true
             }
         }
+        f.end()
 
         // --- the attic: discarded work is recoverable, not gone (invariant #6, made visible) ---
         if self.attic.len() > 0 {
@@ -450,6 +473,21 @@ fn run_scm(payload: string) -> string {
         let r = proc.run(q + " save " + proc.shell_quote(msg))
         action_ok = r.ok()
         action_msg = _first_line(r.combined())
+    } else if sstr.starts_with(payload, "branch\t") {
+        let name = sstr.cp_slice(payload, 7, payload.char_count())
+        let r = proc.run(q + " branch " + proc.shell_quote(name))
+        action_ok = r.ok()
+        action_msg = _first_line(r.combined())
+    } else if sstr.starts_with(payload, "switch\t") {
+        let name = sstr.cp_slice(payload, 7, payload.char_count())
+        let r = proc.run(q + " switch " + proc.shell_quote(name))
+        action_ok = r.ok()
+        action_msg = _first_line(r.combined())
+    } else if sstr.starts_with(payload, "merge\t") {
+        let name = sstr.cp_slice(payload, 6, payload.char_count())
+        let r = proc.run(q + " merge " + proc.shell_quote(name))
+        action_ok = r.ok()
+        action_msg = _first_line(r.combined())
     }
     let r_status = proc.run(q + " status --json")
     var missing = false
@@ -499,6 +537,7 @@ fn new_scm() -> Scm {
         attic: [],
         err: "",
         msg_draft: "",
+        branch_draft: "",
         action_msg: "",
         action_ok: true,
         refreshing: false,
@@ -507,6 +546,9 @@ fn new_scm() -> Scm {
         want_save: false,
         want_discard: false,
         want_restore_seq: 0 - 1,
-        want_undo: false
+        want_undo: false,
+        want_branch: false,
+        want_switch_name: "",
+        want_merge_name: ""
     }
 }

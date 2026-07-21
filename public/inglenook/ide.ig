@@ -774,6 +774,16 @@ fn main() -> int {
         } else if scmp.want_undo {             // Undo → revert the last operation (the op-log spine)
             scmp.refreshing = true
             send(tool_req_ch, tools.quog_req("undo"))
+        } else if scmp.want_branch {           // Create → make a new branch at the current tip
+            scmp.refreshing = true
+            send(tool_req_ch, tools.quog_req("branch\t" + scmp.branch_draft))
+            scmp.branch_draft = ""
+        } else if scmp.want_switch_name.len() > 0 {   // Switch → check out a branch (auto-snapshots first)
+            scmp.refreshing = true
+            send(tool_req_ch, tools.quog_req("switch\t" + scmp.want_switch_name))
+        } else if scmp.want_merge_name.len() > 0 {    // Merge → join a branch into the current (additive)
+            scmp.refreshing = true
+            send(tool_req_ch, tools.quog_req("merge\t" + scmp.want_merge_name))
         } else if scmp.want_refresh {          // the Source panel needs fresh VCS state → query quog
             scmp.refreshing = true
             send(tool_req_ch, tools.quog_req(""))
