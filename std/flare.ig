@@ -4326,6 +4326,9 @@ struct Flare {
         if n.leaf {
             return self._html_leaf(i, eof)
         }
+        if self._is_prose_block(i, eof) {       // a wrapped rich_text paragraph -> one reflowing <p>
+            return self._html_prose(i, eof)
+        }
         var dir = "column"
         if n.dir == ROW {
             dir = "row"
@@ -4415,6 +4418,85 @@ struct Flare {
     }
 
 
+    // _inline_kind is true for the widget kinds rich_text emits as inline runs (plain/bold/italic/mono
+    // words and links) — the ones that should FLOW inside a paragraph rather than each own a line.
+    fn _inline_kind(self, k: int) -> bool {
+        return k == _LABEL || k == _MUTED || k == _BOLD || k == _EM || k == _ICODE || k == _LINK
+    }
+
+
+    // _is_prose_block detects a wrapped rich_text paragraph: a COL whose children are all ROWs (the
+    // build-time greedy-wrapped lines) that hold ONLY inline runs. rich_text pre-wraps to a pixel width
+    // for the native renderer; on the web that fixes the text at build time and stops it reflowing. When
+    // this matches, html() collapses those lines back into one flowing <p> and lets the BROWSER wrap.
+    fn _is_prose_block(self, i: int, eof: [int]) -> bool {
+        let n = self.lo.nodes[i]
+        if n.dir != COL {
+            return false
+        }
+        var c = n.first_child
+        if c < 0 {
+            return false                        // an empty container is not prose
+        }
+        loop {
+            if c < 0 {
+                break
+            }
+            let row = self.lo.nodes[c]
+            if row.leaf || row.dir != ROW {
+                return false                    // every child must be a wrapped LINE (a row)
+            }
+            var g = row.first_child
+            if g < 0 {
+                return false
+            }
+            loop {
+                if g < 0 {
+                    break
+                }
+                if !self.lo.nodes[g].leaf {
+                    return false                // a line holds only leaves...
+                }
+                if eof[g] < 0 || !self._inline_kind(self.rkind[eof[g]]) {
+                    return false                // ...and only inline-run leaves
+                }
+                g = self.lo.nodes[g].next_sibling
+            }
+            c = self.lo.nodes[c].next_sibling
+        }
+        return true
+    }
+
+
+    // _html_prose emits a detected paragraph as a single reflowing <p>: every run across every wrapped
+    // line, in order, separated by one space — which reconstructs the original text, because rich_text's
+    // line rows put exactly one space (the row gap) between adjacent runs. The browser re-wraps to width.
+    fn _html_prose(self, i: int, eof: [int]) -> string {
+        var out = "<p class=\"fl-prose\">"
+        var first = true
+        var c = self.lo.nodes[i].first_child
+        loop {
+            if c < 0 {
+                break
+            }
+            var g = self.lo.nodes[c].first_child
+            loop {
+                if g < 0 {
+                    break
+                }
+                if !first {
+                    out = out + " "
+                }
+                out = out + self._html_leaf(g, eof)
+                first = false
+                g = self.lo.nodes[g].next_sibling
+            }
+            c = self.lo.nodes[c].next_sibling
+        }
+        return out + "</p>"
+    }
+
+
     // _css_justify / _css_align translate Flare's flex enums (START/CENTER/END/STRETCH) to their CSS
     // property values. justify has no STRETCH; align has no distinct END-vs-STRETCH default.
     fn _css_justify(self, v: int) -> string {
@@ -4459,6 +4541,7 @@ struct Flare {
             "h1,h2,h3\{margin:0;font-weight:700;line-height:1.2\}" +
             "h1\{font-size:1.7rem\}h2\{font-size:1.35rem\}h3\{font-size:1.1rem\}" +
             ".fl-heading\{font-size:1.15rem;font-weight:700\}.fl-muted\{color:#9aa0a6\}" +
+            ".fl-prose\{margin:0\}" +           // a reflowing paragraph: inline runs wrap to the container
             ".fl-panel\{background:#212228;border:1px solid #33353b;border-radius:10px\}" +
             ".fl-bubble\{background:#212228;border:1px solid #33353b;border-radius:14px\}" +
             ".fl-btn\{align-self:flex-start;font:inherit;padding:.4em .9em;border:1px solid #33353b;" +
