@@ -71,3 +71,5 @@ $ quog restore --json
 {"entries":[{"seq":1,"ts":1000000000,"reason":"discarded working changes"}]}
 $ quog verify
 verified 4 commits, 4 trees, 6 blobs — every object intact, every link resolves
+$ quog verify --json
+{"ok":true,"message":"verified 4 commits, 4 trees, 6 blobs — every object intact, every link resolves","problems":[]}

@@ -77,6 +77,7 @@ fi
     echo '$ quog restore';               q restore
     echo '$ quog restore --json';        q restore --json
     echo '$ quog verify';                q verify
+    echo '$ quog verify --json';         q verify --json
 } > "$TRANSCRIPT" 2>&1
 
 rc=0

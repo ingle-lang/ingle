@@ -1950,9 +1950,32 @@ fn count_kind(db: sql.Db, kind: string) -> Result<int, string> {
 
 
 // cmd_verify prints the integrity report and exits non-zero on any problem — for CI or a pre-sync gate.
-fn cmd_verify() -> Result<int, string> {
+fn cmd_verify(json_out: bool) -> Result<int, string> {
     let db = sql.open(DB_PATH)?
     let problems = verify_problems(db)?
+    if json_out {
+        var parr: [json.Json] = []
+        for p in problems {
+            parr.append(json.str(p))
+        }
+        var ok = problems.len() == 0
+        var msg = "{problems.len()} integrity problem(s) found"
+        if ok {
+            let nc = count_kind(db, "commit")?
+            let nt = count_kind(db, "tree")?
+            let nb = count_kind(db, "blob")?
+            msg = "verified {nc} commits, {nt} trees, {nb} blobs — every object intact, every link resolves"
+        }
+        println(json.stringify(json.obj([
+            json.member("ok", json.boolean(ok)),
+            json.member("message", json.str(msg)),
+            json.member("problems", json.arr(parr))
+        ])))
+        if ok {
+            return Ok(0)
+        }
+        return Ok(1)
+    }
     if problems.len() == 0 {
         let nc = count_kind(db, "commit")?
         let nt = count_kind(db, "tree")?
@@ -1983,7 +2006,7 @@ fn dispatch(argv: [string]) -> Result<int, string> {
         return cmd_auth(argv)
     }
     if verb == "verify" {
-        return cmd_verify()
+        return cmd_verify(jsonf)
     }
     if verb == "pull" {
         return cmd_pull(argv)
