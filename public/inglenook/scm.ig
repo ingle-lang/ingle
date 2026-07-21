@@ -70,6 +70,10 @@ struct Scm {
     action_msg: string       // the last mutation's result line, surfaced under the header
     action_ok: bool          // whether that last mutation succeeded
     fs_changed: bool         // the last reply was a mutation that may have rewritten the working tree
+    verify_ran: bool         // `quog verify` has run at least once
+    verify_ok: bool          // the store verified intact (content-addressed integrity + link checks)
+    verify_msg: string       // verify's summary line ("verified N … intact" / "N integrity problem(s)")
+    verify_problems: [string]// the specific problems when verify failed (tamper / broken link)
     refreshing: bool         // a quog query is in flight
     want_refresh: bool       // action: re-query quog
     want_init: bool          // action: initialise a repo here, then query
@@ -81,10 +85,11 @@ struct Scm {
     want_switch_name: string // action: switch to this branch ("" = none this frame)
     want_merge_name: string  // action: merge this branch into the current one ("" = none this frame)
     want_diff_path: string   // action: load this file's diff into the Diff panel ("" = none this frame)
+    want_verify: bool        // action: re-run `quog verify` (tamper-evidence)
 
 
     // begin_frame clears the per-frame action flags before the panel builds (msg_draft / branch_draft /
-    // action_msg / diff state persist — they are editing/result state, not one-shot intents).
+    // action_msg / diff / verify state persist — they are editing/result state, not one-shot intents).
     fn begin_frame(mut self) {
         self.want_refresh = false
         self.want_init = false
@@ -96,6 +101,7 @@ struct Scm {
         self.want_switch_name = ""
         self.want_merge_name = ""
         self.want_diff_path = ""
+        self.want_verify = false
     }
 
 
@@ -149,6 +155,37 @@ struct Scm {
             f.badge("{self.changes.len()} change(s)", 0)
         }
         f.end()
+
+        // --- provably safe: quog verify's content-addressed tamper-evidence, made visible (the moat) ---
+        if !self.verify_ran && !self.refreshing {
+            self.want_verify = true              // lazily verify once when the repo is first shown
+        }
+        f.row(flare.START, flare.CENTER)
+        if !self.verify_ran {
+            f.badge("not verified", 0)
+        } else if self.verify_ok {
+            f.badge("provably safe", 1)
+        } else {
+            f.badge("integrity problem", 2)
+        }
+        f.spacer()
+        if f.ghost_button("Verify") {
+            self.want_verify = true
+        }
+        f.end()
+        if self.verify_ran && self.verify_msg.len() > 0 {
+            f.paragraph(self.verify_msg, cw)     // wrap the full "receipt" — the narrow panel truncates a label
+        }
+        if self.verify_ran && !self.verify_ok {
+            var vi = 0
+            loop {
+                if vi == self.verify_problems.len() {
+                    break
+                }
+                f.paragraph(self.verify_problems[vi], cw - 8)
+                vi = vi + 1
+            }
+        }
 
         // --- last action's result (saved / discarded — recoverable / undone) ---
         if self.action_msg.len() > 0 {
@@ -311,6 +348,11 @@ struct Scm {
                     self.apply_diff(json.as_str(dj))
                     return
                 }
+                let vj = json.get(root, "verify")
+                if !json.is_null(vj) {
+                    self.apply_verify(json.as_str(vj))
+                    return
+                }
                 self.loaded = true
                 self.changes = []
                 self.commits = []
@@ -367,6 +409,32 @@ struct Scm {
                 }
             }
             case Err(e) {}
+        }
+    }
+
+
+    // apply_verify folds a `quog verify --json` reply ({ok, message, problems}) into the panel state.
+    fn apply_verify(mut self, s: string) {
+        self.verify_ran = true
+        self.verify_problems = []
+        match json.parse(s) {
+            case Ok(root) {
+                self.verify_ok = json.as_bool(json.get(root, "ok"))
+                self.verify_msg = json.as_str(json.get(root, "message"))
+                let arr = json.get(root, "problems")
+                var i = 0
+                loop {
+                    if i == json.length(arr) {
+                        break
+                    }
+                    self.verify_problems.append(json.as_str(json.at(arr, i)))
+                    i = i + 1
+                }
+            }
+            case Err(e) {
+                self.verify_ok = false
+                self.verify_msg = "could not run verify"
+            }
         }
     }
 
@@ -546,6 +614,11 @@ fn run_scm(payload: string) -> string {
         let d = proc.run(q + " diff " + proc.shell_quote(path) + " --json")
         return json.stringify(json.obj([json.member("diff", json.str(d.out()))]))
     }
+    // A verify request re-hashes the store (tamper-evidence) — also a separate, read-only reply.
+    if payload == "verify" {
+        let v = proc.run(q + " verify --json")
+        return json.stringify(json.obj([json.member("verify", json.str(v.out()))]))
+    }
     var action_ok = true
     var action_msg = ""
     if payload == "init" {
@@ -642,6 +715,10 @@ fn new_scm() -> Scm {
         action_msg: "",
         action_ok: true,
         fs_changed: false,
+        verify_ran: false,
+        verify_ok: false,
+        verify_msg: "",
+        verify_problems: [],
         refreshing: false,
         want_refresh: false,
         want_init: false,
@@ -652,6 +729,7 @@ fn new_scm() -> Scm {
         want_branch: false,
         want_switch_name: "",
         want_merge_name: "",
-        want_diff_path: ""
+        want_diff_path: "",
+        want_verify: false
     }
 }

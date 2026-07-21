@@ -329,6 +329,7 @@ fn main() -> int {
                         tree.refresh()
                         panes.reload_if_open(panes.active_path(0))
                         panes.reload_if_open(panes.active_path(1))
+                        scmp.want_verify = true      // re-prove the store is intact after every change
                     }
                 }
             }
@@ -788,6 +789,9 @@ fn main() -> int {
             scmp.refreshing = true
             send(tool_req_ch, tools.quog_req("diff\t" + scmp.want_diff_path))
             dock.activate_panel("Diff")
+        } else if scmp.want_verify {           // Verify → re-hash the store (tamper-evidence, read-only)
+            scmp.refreshing = true
+            send(tool_req_ch, tools.quog_req("verify"))
         } else if scmp.want_init {             // the Source panel's Initialize button → quog init + query
             scmp.refreshing = true
             send(tool_req_ch, tools.quog_req("init"))
