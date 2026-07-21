@@ -99,6 +99,14 @@ MN_NETGFX_FLAGS := -std=c17 -Wall -Wextra -Iinclude -O2 -DNDEBUG -DEMBER_NET=1 -
 GRAPHICS_BIN   := build/inglec-gfx
 GRAPHICS_FLAGS := -std=c17 -Wall -Wextra -Iinclude -O2 -DNDEBUG -DEMBER_GRAPHICS=1 $(PORTABLE_DEFS)
 
+# Web compiler (server-side rendering): EMBER_GRAPHICS so Flare type-checks and the gfx builtins
+# resolve, EMBER_GFX_HEADLESS so graphics.c's raylib body is swapped for graphics_headless.c's pure-C
+# SSR stubs. Links NO raylib / FreeType / libcurl — a Flare web server is a clean, display-free binary;
+# TCP comes from the default cextern FFI (std/http_server). All first-party here, so -Werror stays on.
+# Serve Flare over HTTP: build/inglec-web --emit=run <server.ig>
+WEB_BIN   := build/inglec-web
+WEB_FLAGS := -std=c17 -Wall -Wextra -Werror -Iinclude -O2 -DNDEBUG -DEMBER_GRAPHICS=1 -DEMBER_GFX_HEADLESS=1 $(PORTABLE_DEFS)
+
 # Bare-metal kernel target (OFI-167 / kernel milestone 1): a freestanding aarch64 image booted under
 # QEMU `virt`. Opt-in — needs the LLVM cross toolchain (Apple clang cross-compiles aarch64-none-elf;
 # the ELF link needs ld.lld) + qemu; the DEFAULT build stays dependency-free and never touches these.
@@ -120,9 +128,9 @@ KERNEL_ELF      := kernel/kernel.elf
 NET_BIN          := build/inglec-net
 NET_FLAGS        := -std=c17 -Wall -Wextra -Iinclude -O2 -DNDEBUG -DEMBER_NET=1 $(PORTABLE_DEFS)
 NETGFX_BIN       := build/inglec-net-gfx
-# The desktop app also builds with -DEMBER_PARALLEL so it can run its blocking HTTPS fetch on a
+# The net-graphics app also builds with -DEMBER_PARALLEL so it can run its blocking HTTPS fetch on a
 # spawned worker fiber (its own OS thread) while the raylib render loop stays responsive on the
-# main thread — see public/claude-desktop/gui.ig (nursery + try_recv). pthread is in libc on
+# main thread — see public/inglenook/anthropic.ig (stream_worker: nursery + try_recv). pthread is in libc on
 # macOS, so no extra link flag is needed.
 NETGFX_FLAGS     := -std=c17 -Wall -Wextra -Iinclude -O2 -DNDEBUG -DEMBER_NET=1 -DEMBER_GRAPHICS=1 -DEMBER_PARALLEL=1 $(PORTABLE_DEFS) -pthread
 
@@ -161,7 +169,7 @@ DEPS    := $(OBJECTS:.o=.d)
 GEN_BIN := build/gen_editor_assets
 GRAMMAR := editors/vscode/syntaxes/ember.tmLanguage.json
 
-.PHONY: all test test-update test-lsp doctor help release asan asan-par asan-trace install install-vscode build-zed install-zed parallel mn tsan-mn asan-mn mn-stress mn-graphics mn-net-graphics graphics net net-graphics db test-db test-quog test-quog-native quog install-quog test-graphics test-net test-parallel kernel test-kernel selfhost crucible ceilings ledger opcheck verify docs string-diff bench parbench gen-editor-assets check-editor-sync clean
+.PHONY: all test test-update test-lsp doctor help release asan asan-par asan-trace install install-vscode build-zed install-zed parallel mn tsan-mn asan-mn mn-stress mn-graphics mn-net-graphics graphics web net net-graphics db test-db test-quog test-quog-native quog install-quog test-graphics test-web test-net test-parallel kernel test-kernel selfhost crucible ceilings ledger opcheck verify docs string-diff bench parbench gen-editor-assets check-editor-sync clean
 
 all: $(BIN) $(RT_LIB) $(RT_LIB_PAR)
 
@@ -424,6 +432,14 @@ graphics: $(RT_LIB_NETGFX) | build
 	$(CC) $(GRAPHICS_FLAGS) `pkg-config --cflags raylib freetype2` $(SOURCES) `pkg-config --libs raylib freetype2` $(LDLIBS_MATH) -o $(GRAPHICS_BIN)
 	@$(call LINK_COMPAT,$(GRAPHICS_BIN))
 
+# Web compiler (see WEB_FLAGS): renders Flare components to HTML via flare.html() and serves them over
+# std/http_server — headless, no window, no GL, no third-party dependency (graphics_headless.c stubs
+# the gfx runtime). This is the raylib-free retarget the WASM client (OFI-213) also needs. Serve a
+# Flare page with: build/inglec-web --emit=run <server.ig>
+web: | build
+	$(CC) $(WEB_FLAGS) $(SOURCES) $(LDLIBS_MATH) -o $(WEB_BIN)
+	@$(call LINK_COMPAT,$(WEB_BIN))
+
 # Networking compiler (see NET_FLAGS): links libcurl via curl-config, registers the http_post
 # FFI wrapper. Run an HTTPS program with: build/inglec-net --emit=run <file.ig>
 net: | build
@@ -522,6 +538,11 @@ test-kernel: kernel
 # from the dependency-free `make test`). Builds the graphics compiler first.
 test-graphics: graphics
 	@tests/run-graphics.sh
+
+# Regression for the Flare -> HTML web backend (OFI-212). Builds the raylib-free web compiler and
+# golden-checks each tests/web/*.ig's rendered page. Bless updates with: tests/run-web.sh --update
+test-web: web
+	@tests/run-web.sh
 
 # Networking regression suite (std/http + the reusable Anthropic client). Needs the libcurl build,
 # so it's separate from the dependency-free `make test`; the cases make no live request. Builds the

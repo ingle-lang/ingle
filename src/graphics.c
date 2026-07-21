@@ -5,7 +5,9 @@
 // non-graphics build this is an (almost) empty translation unit.
 typedef int ember_gfx_unit_placeholder;   // keeps the TU non-empty when graphics off
 
-#if EMBER_GRAPHICS
+// EMBER_GFX_HEADLESS (the `web` flavor) compiles this raylib body out; the ember_gfx_* symbols are
+// then supplied by graphics_headless.c as pure-C SSR stubs — no window, no GL, no dependency.
+#if EMBER_GRAPHICS && !EMBER_GFX_HEADLESS
 #include "raylib.h"
 #include "rlgl.h"         // rlDrawRenderBatchActive — flush the batch before a screenshot
 #include "font_inter.h"   // embedded Inter Regular (TrueType) — see header
@@ -551,6 +553,15 @@ static Font *gfx_font_for(int slot, int px, const char *text) {
 
 
 void ember_gfx_window_open(int width, int height, const char *title) {
+    // INGLE_HEADLESS: server / SSR mode — never open a window or a GL context. The Flare build pass
+    // still runs (measure_text falls back to a codepoint estimate below; the HTML/SSR walk in
+    // flare.html() ignores pixel widths and lets the browser lay out), so a Flare component tree can be
+    // rendered to HTML on a machine with no display. This mirrors the getenv() toggles already used in
+    // this function (EMBER_CAPTURE / EMBER_MEASURE_STATS).
+    if (getenv("INGLE_HEADLESS") != NULL) {
+        g_scale = 1.0f;
+        return;
+    }
     SetTraceLogLevel(LOG_WARNING);   // hush raylib's INFO startup spam on stdout
     // FLAG_WINDOW_HIGHDPI (OFI-060): on a Retina panel this opens a physical-resolution
     // framebuffer so text is rasterised at true device pixels instead of being upscaled by
@@ -627,7 +638,9 @@ void ember_gfx_window_close(void) {
     memset(g_fonts, 0, sizeof(g_fonts));
     g_font_count = 0;
     g_cur_font = 0;
-    CloseWindow();
+    if (IsWindowReady()) {      // headless (INGLE_HEADLESS) never opened one — nothing to close
+        CloseWindow();
+    }
     // g_ft (the FreeType library) is kept process-lifetime so a window can be reopened.
 }
 
@@ -1201,7 +1214,25 @@ int ember_gfx_mouse_right_down(void) {
 
 
 
+// gfx_estimate_width approximates a text width with no font and no GL context — the headless
+// (INGLE_HEADLESS / SSR) fallback for measure_text. The HTML backend discards widths (the browser
+// measures and wraps), so this only has to be non-degenerate for any build-pass wrap heuristic:
+// roughly a 0.55em average advance per codepoint.
+static int gfx_estimate_width(const char *text, int size) {
+    int cps = 0;
+    for (const unsigned char *p = (const unsigned char *)text; *p != '\0'; p++) {
+        if ((*p & 0xC0) != 0x80) {          // count UTF-8 lead bytes = codepoints
+            cps++;
+        }
+    }
+    return cps * size * 55 / 100;
+}
+
+
 int ember_gfx_measure_text(const char *text, int size) {
+    if (!IsWindowReady()) {                 // headless / pre-window: no baked atlas → estimate (SSR)
+        return gfx_estimate_width(text, size);
+    }
     g_measure_calls++;
     if (g_scale != g_measure_cache_scale) {            // DPI/display change → cached widths are stale
         gfx_measure_cache_flush();
@@ -1396,6 +1427,9 @@ const char *ember_gfx_dropped_files(void) {
 
 
 int ember_gfx_screen_width(void) {
+    if (!IsWindowReady()) {                  // headless / SSR: a sane default page width for the build pass
+        return 1280;
+    }
     return GetScreenWidth();
 }
 
@@ -1405,6 +1439,9 @@ int ember_gfx_screen_width(void) {
 
 
 int ember_gfx_screen_height(void) {
+    if (!IsWindowReady()) {
+        return 800;
+    }
     return GetScreenHeight();
 }
 

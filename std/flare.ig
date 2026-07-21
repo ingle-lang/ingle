@@ -29,6 +29,7 @@ import "std/markdown" as md
 import "std/highlight" as hl
 import "std/string" as str
 import "std/json" as json
+import "std/html" as html
 
 
 // Layout constants, re-exported so an app only imports std/flare. (Mirror std/layout's values.)
@@ -4275,6 +4276,209 @@ struct Flare {
         self.rkind.append(kind)
         self.rtext.append(text)
         self.rid.append(id)
+    }
+
+
+    // html renders the frame just built — the layout-intent tree plus the paint queue — to a
+    // self-contained HTML+CSS page. This is the SSR terminal walk (OFI-212 / W3): a SECOND walk of the
+    // exact structures finish() paints, so a component's build code is byte-identical on both surfaces.
+    // Unlike finish() it NEVER solves or measures: each layout node's flex intent (COL/ROW, gap, pad,
+    // grow, align) maps 1:1 onto CSS flexbox and each queued widget kind maps to a semantic tag
+    // (_BUTTON -> <button>, _H1 -> <h1>, _LINK -> <a>), then the browser lays out, wraps, and hands a
+    // real accessibility tree to a screen reader for free. Call it in place of finish(): begin() ->
+    // build components -> html(). Because widths are the browser's job here, an HTML-mode measure_text
+    // can be a cheap stub — the SSR path needs no font and no window (that stub is the follow-on).
+    fn html(mut self) -> string {
+        self.lo.close()                         // mirror finish(): close the root container (node 0)
+        // A node -> paint-queue-index table, so a leaf (or a surface-bearing container) can recover its
+        // kind / text / id from its layout node. Last writer wins; bracket markers (node 0) are inert
+        // because node 0 is the root container and is never read as a leaf.
+        var eof: [int] = []
+        var j = 0
+        loop {
+            if j == self.lo.nodes.len() {
+                break
+            }
+            eof.append(-1)
+            j = j + 1
+        }
+        var q = 0
+        loop {
+            if q == self.rnode.len() {
+                break
+            }
+            let nd = self.rnode[q]
+            if nd >= 0 && nd < eof.len() {
+                eof[nd] = q
+            }
+            q = q + 1
+        }
+        let body = self._html_node(0, eof)
+        return self._html_page("Ingle · Flare on the web", body)
+    }
+
+
+    // _html_node renders one layout node and its subtree: a container becomes a flex <div> carrying its
+    // intent as inline CSS, a leaf becomes its widget tag. It recurses first_child -> next_sibling —
+    // the very tree begin()/open()/leaf() built this frame.
+    fn _html_node(self, i: int, eof: [int]) -> string {
+        let n = self.lo.nodes[i]
+        if n.leaf {
+            return self._html_leaf(i, eof)
+        }
+        var dir = "column"
+        if n.dir == ROW {
+            dir = "row"
+        }
+        let g = n.gap
+        let p = n.pad
+        var style = "display:flex;flex-direction:{dir};gap:{g}px;padding:{p}px"
+        if n.grow > 0 {
+            let gr = n.grow
+            style = style + ";flex-grow:{gr};min-width:0;min-height:0"
+        }
+        style = style + ";justify-content:" + self._css_justify(n.justify)
+        style = style + ";align-items:" + self._css_align(n.align)
+        var cls = ""                            // a container may carry a painted surface on its own node
+        if eof[i] >= 0 {
+            let k = self.rkind[eof[i]]
+            if k == _PANEL {
+                cls = " class=\"fl-panel\""
+            } else if k == _BUBBLE {
+                cls = " class=\"fl-bubble\""
+            }
+        }
+        var out = "<div" + cls + " style=\"" + style + "\">"
+        var c = n.first_child
+        loop {
+            if c < 0 {
+                break
+            }
+            out = out + self._html_node(c, eof)
+            c = self.lo.nodes[c].next_sibling
+        }
+        return out + "</div>"
+    }
+
+
+    // _html_leaf maps one widget kind to a semantic HTML element — the tag-for-pixel mirror of _paint's
+    // per-kind switch. An unmapped kind is never dropped silently: it emits a visible span tagged with
+    // its numeric kind so a gap in this table shows up in the page instead of vanishing.
+    fn _html_leaf(self, i: int, eof: [int]) -> string {
+        if eof[i] < 0 {
+            return ""                           // a spacer / blank slot carries no widget
+        }
+        let k = self.rkind[eof[i]]
+        let t = html.escape(self.rtext[eof[i]])
+        if k == _LABEL {
+            return "<span>" + t + "</span>"
+        } else if k == _MUTED {
+            return "<span class=\"fl-muted\">" + t + "</span>"
+        } else if k == _HEADING {
+            return "<div class=\"fl-heading\">" + t + "</div>"
+        } else if k == _H1 {
+            return "<h1>" + t + "</h1>"
+        } else if k == _H2 {
+            return "<h2>" + t + "</h2>"
+        } else if k == _H3 {
+            return "<h3>" + t + "</h3>"
+        } else if k == _BUTTON {
+            return "<button class=\"fl-btn\">" + t + "</button>"
+        } else if k == _PRIMARY {
+            return "<button class=\"fl-btn fl-primary\">" + t + "</button>"
+        } else if k == _DANGER {
+            return "<button class=\"fl-btn fl-danger\">" + t + "</button>"
+        } else if k == _GHOST {
+            return "<button class=\"fl-btn fl-ghost\">" + t + "</button>"
+        } else if k == _NAVITEM {
+            return "<a class=\"fl-nav\" href=\"#\">" + t + "</a>"
+        } else if k == _NAVITEM_ON {
+            return "<a class=\"fl-nav fl-nav-on\" href=\"#\">" + t + "</a>"
+        } else if k == _LINK {
+            return "<a class=\"fl-link\" href=\"#\">" + t + "</a>"
+        } else if k == _BOLD {
+            return "<strong>" + t + "</strong>"
+        } else if k == _EM {
+            return "<em>" + t + "</em>"
+        } else if k == _ICODE {
+            return "<code class=\"fl-icode\">" + t + "</code>"
+        } else if k == _DIVIDER {
+            return "<hr>"
+        } else if k == _BADGE {
+            return "<span class=\"fl-badge\">" + t + "</span>"
+        } else if k == _QUOTE {
+            return "<blockquote class=\"fl-quote\">" + str.replace(t, "\n", "<br>") + "</blockquote>"
+        } else if k == _CODE {
+            return "<pre class=\"fl-code\"><code>" + t + "</code></pre>"
+        }
+        return "<span data-fl-kind=\"{k}\">" + t + "</span>"
+    }
+
+
+    // _css_justify / _css_align translate Flare's flex enums (START/CENTER/END/STRETCH) to their CSS
+    // property values. justify has no STRETCH; align has no distinct END-vs-STRETCH default.
+    fn _css_justify(self, v: int) -> string {
+        if v == CENTER {
+            return "center"
+        } else if v == END {
+            return "flex-end"
+        }
+        return "flex-start"
+    }
+
+
+    fn _css_align(self, v: int) -> string {
+        if v == CENTER {
+            return "center"
+        } else if v == END {
+            return "flex-end"
+        } else if v == STRETCH {
+            return "stretch"
+        }
+        return "flex-start"
+    }
+
+
+    // _html_page wraps the rendered body in a self-contained document: a dark Flare-styled theme inlined
+    // so the page has zero external dependencies (the artifact/CSP-friendly shape the web roadmap wants).
+    fn _html_page(self, title: string, body: string) -> string {
+        return "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">" +
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" +
+            "<title>" + html.escape(title) + "</title><style>" + self._flare_css() + "</style></head>" +
+            "<body>" + body + "</body></html>\n"
+    }
+
+
+    // _flare_css is the inlined Flare dark theme — one class per emitted kind. Literal braces are \{ \}
+    // (the string is interpolating). This is the web mirror of ui.Style; a later pass can derive it from
+    // the live theme instead of hard-coding it.
+    fn _flare_css(self) -> string {
+        return "*\{box-sizing:border-box\}" +
+            "body\{margin:0;min-height:100vh;background:#17181c;color:#e6e7ea;" +
+            "font:15px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif\}" +
+            "h1,h2,h3\{margin:0;font-weight:700;line-height:1.2\}" +
+            "h1\{font-size:1.7rem\}h2\{font-size:1.35rem\}h3\{font-size:1.1rem\}" +
+            ".fl-heading\{font-size:1.15rem;font-weight:700\}.fl-muted\{color:#9aa0a6\}" +
+            ".fl-panel\{background:#212228;border:1px solid #33353b;border-radius:10px\}" +
+            ".fl-bubble\{background:#212228;border:1px solid #33353b;border-radius:14px\}" +
+            ".fl-btn\{align-self:flex-start;font:inherit;padding:.4em .9em;border:1px solid #33353b;" +
+            "border-radius:8px;background:#2a2c33;color:#e6e7ea;cursor:pointer\}.fl-btn:hover\{background:#33353b\}" +
+            ".fl-primary\{background:#d9743f;border-color:#d9743f;color:#fff\}.fl-primary:hover\{background:#e07f4b\}" +
+            ".fl-danger\{background:#d9534f;border-color:#d9534f;color:#fff\}.fl-danger:hover\{background:#e0605c\}" +
+            ".fl-ghost\{background:transparent;border-color:transparent\}.fl-ghost:hover\{background:#2a2c33\}" +
+            ".fl-nav\{display:block;width:100%;text-align:left;padding:.45em .7em;border-radius:8px;" +
+            "color:#c8cace;text-decoration:none\}.fl-nav:hover\{background:#2a2c33\}" +
+            ".fl-nav-on\{background:#d9743f;color:#fff\}" +
+            ".fl-link\{color:#5ab0ff;text-decoration:none\}.fl-link:hover\{text-decoration:underline\}" +
+            "code,.fl-icode\{font:.9em ui-monospace,SFMono-Regular,Menlo,monospace;" +
+            "background:#2a2c33;padding:.12em .35em;border-radius:5px\}" +
+            ".fl-code\{background:#0f1013;border:1px solid #33353b;border-radius:10px;padding:1em;" +
+            "overflow-x:auto\}.fl-code code\{background:none;padding:0\}" +
+            ".fl-quote\{margin:0;padding:.3em 1em;border-left:3px solid #d9743f;color:#9aa0a6\}" +
+            ".fl-badge\{align-self:flex-start;font-size:.8em;padding:.15em .5em;border-radius:999px;" +
+            "background:#2a2c33;color:#c8cace\}" +
+            "hr\{width:100%;border:none;border-top:1px solid #33353b;margin:0\}" +
+            "strong\{font-weight:700\}em\{font-style:italic\}"
     }
 
 
