@@ -15,7 +15,7 @@ Conversations | Chat | Editor 1  | Inspector
 
 - **Conversations** — your chats, plus a **Files** tab: a live project tree over the new
   `list_dir` builtin (sorted, replay-recorded — a directory listing is an input).
-- **Chat** — the full agent from the claude-desktop example: streaming replies, the
+- **Chat** — the full chat agent: streaming replies, the
   tool_use → tool_result loop, and both providers (Anthropic API / local Ollama). The agent's
   tools are `list_dir`, `read_file`, and `write_file` over the project the IDE was launched in —
   it browses before it guesses.

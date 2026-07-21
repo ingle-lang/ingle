@@ -4,7 +4,7 @@
 // (menu_item_accel), separators group them (menu_sep), and a submenu (▸) nests a second menu to the right.
 //
 // The bar is a floating overlay that takes no layout space, so the body starts f.menubar_height() pixels
-// down — the same pattern the Claude-desktop app uses to sit its dock under the menus.
+// down — the same pattern Inglenook uses to sit its dock under the menus.
 //
 //   make graphics && build/inglec-gfx --emit=run examples/graphics/21_flare_menubar.ig
 

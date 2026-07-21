@@ -1,5 +1,5 @@
-// anthropic.ig — a reusable client for the Anthropic Messages API, lifted out of the Claude
-// desktop app so any Ingle program can talk to Claude without reinventing the wire format. It
+// anthropic.ig — a reusable client for the Anthropic Messages API, so any Ingle program can
+// talk to Claude without reinventing the wire format. It
 // owns three things: the conversation MODEL (the Turn struct + constructors), the REQUEST builder
 // (build_request — multi-turn, optional system prompt, app-supplied tool catalogue), and the
 // async STREAMING TRANSPORT (stream_worker — a fiber that pumps an SSE stream over std/http and

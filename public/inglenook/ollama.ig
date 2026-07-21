@@ -1,4 +1,4 @@
-// ollama.ig — a client for a LOCAL Ollama server, so the Claude desktop app can talk to models
+// ollama.ig — a client for a LOCAL Ollama server, so an Ingle app can talk to models
 // running on your own machine (no API key, no cloud). It mirrors anthropic.ig's shape but speaks
 // Ollama's OpenAI-COMPATIBLE surface: GET /api/tags to discover installed models, and a streaming
 // POST /v1/chat/completions whose Server-Sent Events carry `choices[0].delta.content` token by token.

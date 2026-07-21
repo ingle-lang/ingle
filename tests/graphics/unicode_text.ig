@@ -2,7 +2,7 @@
 // The font atlas is seeded with ASCII and grows lazily: the first time a string contains a code
 // point the face has but the atlas doesn't, gfx_size_ensure rasterises it and rebuilds the atlas.
 // This exercises that whole path — UTF-8 decode, membership, rebuild, draw, AND measure_text (which
-// bakes glyphs too) — with the exact non-ASCII glyphs the Claude-desktop app draws (✕ was dropped
+// bakes glyphs too) — with the exact non-ASCII glyphs the Inglenook app draws (✕ was dropped
 // because Inter lacks U+2715; × / ↑ / … / — / · / accents / curly quotes all render). The tape
 // records the draw_text ops with their UTF-8 strings + the measure-driven marker x, so a crash or a
 // corrupted decode in the grow path breaks the golden. (Pixel correctness — that the glyph actually

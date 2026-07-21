@@ -116,7 +116,7 @@ phase_ext_code() {
         Makefile
     )
     local f
-    for f in tests/*.sh tools/*.sh public/claude-desktop/*.sh \
+    for f in tests/*.sh tools/*.sh public/*/*.sh \
              editors/vscode/package.json editors/vscode/extension.js editors/zed/languages/*/config.toml; do
         [ "$f" = "tools/rebrand.sh" ] && continue     # never rewrite our own .em/.emb patterns
         [ -e "$f" ] && files+=("$f")

@@ -101,8 +101,8 @@ fn main() -> int {
 }
 ```
 
-A full app built on Flare — a switchable conversation list, a scrollable transcript, a composer, and a
-settings **modal** of **segmented** controls — is [`public/claude-desktop/flare_chat.ig`](https://github.com/ingle-lang/ingle/blob/main/public/claude-desktop/flare_chat.ig).
+A full app built on Flare — a dockable workspace with a code editor, a chat agent (scrollable
+transcript + composer), and a settings **modal** of **segmented** controls — is [`public/inglenook/ide.ig`](https://github.com/ingle-lang/ingle/blob/main/public/inglenook/ide.ig).
 
 ## A bigger example — a settings dialog
 
@@ -188,8 +188,8 @@ or a popover raised from inside a modal stacks correctly above its parent instea
 
 Menu bar: `menubar_begin()` / `menubar_end()` bracket a **full-width menu strip pinned to the top of the
 window** (File / Edit / View …). It **floats** at `(0, 0)` and takes no space in the flow, so paint the app
-body starting `menubar_height()` pixels down (a `strut(0, menubar_height())`, or — like the Claude-desktop
-app — offset the dock's `y`/`height`). Inside the bar, `menu(label) -> bool` draws one title and, **when that
+body starting `menubar_height()` pixels down (a `strut(0, menubar_height())`, or — like Inglenook
+— offset the dock's `y`/`height`). Inside the bar, `menu(label) -> bool` draws one title and, **when that
 menu is open**, drops its panel just below the title and returns `true`; declare the rows in the `if`-body and
 close with `menu_end()`. Clicking a title toggles it; once **any** menu is open, sliding onto another title
 switches to it (the familiar menu-bar hover-follow), and a press outside — or `Esc` — closes it. The rows:
@@ -415,7 +415,7 @@ width + a FLIP add/remove list). Goldens: `tests/graphics/flare_spring.ig`, `tes
 - Layout is a real flexbox now (`std/layout`): `row`/`column` with `justify`/`align`, `*_grow` to fill,
   `spacer`/`strut`, painted `panel_begin`, a scrollable `scroll_begin`/`scroll_end`, and a **floating
   node** (`open_float`, the basis for `modal_begin`/`modal_end`: declared anywhere, solved centred on the
-  window). The full Claude-desktop app (`public/claude-desktop/flare_chat.ig`) is built on it: fixed
+  window). Inglenook (`public/inglenook/ide.ig`) is built on it: a dockable
   sidebar | growing main | bottom-pinned composer, full-width cards, a wrapped + scrollable transcript,
   rich markdown, the live STREAMING API, and a **settings dialog** (a `modal` of `segmented` controls).
   Remaining: a max transcript column width.
@@ -553,8 +553,8 @@ resize feels direct rather than rubber-banding behind the cursor. The animation 
 each panel's id, so `f.forget(id)` disposes it along with the panel's state.
 
 See **`examples/graphics/19_dock.ig`** for a live interactive workspace (drag a title bar to re-dock or
-group as tabs, drag the dividers, click ✕, `R` resets), and **`public/claude-desktop/flare_chat.ig`** — the
-Claude app's whole body is a dock: Conversations | Chat | Inspector, with Chat pinned and the side panels
+group as tabs, drag the dividers, click ✕, `R` resets), and **`public/inglenook/ide.ig`** — the
+Inglenook app's whole body is a dock: Conversations | Chat | Editor | Inspector, with Chat pinned and the side panels
 closeable, re-dockable, **tabbable**, and freely **rearrangeable by dragging their title bars**.
 
 **Limits (current).** **Floating windows** (pop a panel out into its own free-floating, draggable window)

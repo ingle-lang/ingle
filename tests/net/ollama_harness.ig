@@ -1,12 +1,12 @@
-// ollama_harness.ig — regression for the local-Ollama client (public/claude-desktop/ollama.ig). Like
+// ollama_harness.ig — regression for the local-Ollama client (public/inglenook/ollama.ig). Like
 // anthropic_harness, it exercises the PURE surface with no live server: the OpenAI-compatible request
 // builder's shape (system message included only when non-empty, role mapping, empty turns dropped,
 // the stream flag), plus that http.get fails GRACEFULLY (a refused localhost connection comes back as
 // a `{"_curl_error":…}` string, never a crash). Offline and deterministic.
 //
 // Needs inglec-NET (the client imports std/http). Run via `make test-net` (tests/run-net.sh).
-import "../../public/claude-desktop/ollama" as oll
-import "../../public/claude-desktop/anthropic" as api
+import "../../public/inglenook/ollama" as oll
+import "../../public/inglenook/anthropic" as api
 import "std/http" as http
 import "std/json" as json
 

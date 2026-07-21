@@ -1,11 +1,11 @@
-// anthropic_harness.ig — regression for the reusable Anthropic client (public/claude-desktop/
+// anthropic_harness.ig — regression for the reusable Anthropic client (public/inglenook/
 // anthropic.ig). It exercises the PURE protocol surface with NO network: the Turn constructors, the
 // request builder's shape (system prompt + tools included only when supplied), the control-message
 // round-trip (pack_tool → is_tool_msg → strip_tool_mark), cap_text, and the model-id constants.
 //
 // It needs inglec-NET because the client imports std/http (whose extern "c" bindings only link in the
 // networking build); the test itself makes no request. Run via `make test-net` (tests/run-net.sh).
-import "../../public/claude-desktop/anthropic" as api
+import "../../public/inglenook/anthropic" as api
 import "std/json" as json
 
 

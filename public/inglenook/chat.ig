@@ -9,8 +9,8 @@
 import "std/flare" as flare
 import "std/json" as json
 import "std/string" as sstr
-import "../claude-desktop/anthropic" as api
-import "../claude-desktop/ollama" as oll
+import "anthropic" as api
+import "ollama" as oll
 import "verify" as verify
 
 
