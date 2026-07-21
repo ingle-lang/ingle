@@ -497,6 +497,12 @@ struct Flare {
     _toasts: [ToastItem]
     _tnext: int
     _action: string         // token of a toast action clicked THIS frame ("" = none); read via take_action()
+    // Web (WASM) click injection. On the desktop a click is a mouse hit-test against last frame's solved
+    // rect; the web client has no geometry (it never solve()s — it walks the intent tree to HTML), so a
+    // DOM click arrives as a widget id instead. The client sets this to the clicked widget's id (data-fl-id)
+    // for one frame via set_click(); _fired(id) reports it, so a button/nav whose id matches registers a
+    // click with no rect. Empty on the desktop, so it is inert there. See flare.html() / OFI-213.
+    _click_id: string
 
 
     // begin starts a frame: snapshot input, reset the layout tree, open the root column (it fills
@@ -2863,6 +2869,9 @@ struct Flare {
                 case Some(r) { clicked = self.ui.press(wid, r.x, r.y, r.w, r.h) }
                 case None {}
             }
+            if self._fired(id) {                     // web (WASM) client: a DOM click on this widget's id
+                clicked = true
+            }
         }
         // An atomic action widget sizes to its CONTENT by default (leaf_fixed), so a bare button in the
         // default stretch column no longer spans the whole window (OFI-115). `fill` opts back into the
@@ -4279,6 +4288,20 @@ struct Flare {
     }
 
 
+    // set_click injects a DOM click for the next frame: the web (WASM) client calls this with the clicked
+    // element's data-fl-id (or "" when nothing was clicked) right after begin(), before it builds the frame.
+    // The matching widget then reports a click with no geometry. Inert on the desktop, which never calls it.
+    fn set_click(mut self, id: string) {
+        self._click_id = id
+    }
+
+
+    // _fired is true when the web client injected a click for widget `id` this frame (see set_click).
+    fn _fired(self, id: string) -> bool {
+        return self._click_id != "" && self._click_id == id
+    }
+
+
     // html renders the frame just built — the layout-intent tree plus the paint queue — to a
     // self-contained HTML+CSS page. This is the SSR terminal walk (OFI-212 / W3): a SECOND walk of the
     // exact structures finish() paints, so a component's build code is byte-identical on both surfaces.
@@ -4373,6 +4396,9 @@ struct Flare {
         }
         let k = self.rkind[eof[i]]
         let t = html.escape(self.rtext[eof[i]])
+        // data-fl-id carries the widget's id onto its interactive element, so the web (WASM) client's
+        // delegated click listener can map a DOM click back to the widget and re-render (set_click).
+        let ida = " data-fl-id=\"" + html.escape(self.rid[eof[i]]) + "\""
         if k == _LABEL {
             return "<span>" + t + "</span>"
         } else if k == _MUTED {
@@ -4386,19 +4412,19 @@ struct Flare {
         } else if k == _H3 {
             return "<h3>" + t + "</h3>"
         } else if k == _BUTTON {
-            return "<button class=\"fl-btn\">" + t + "</button>"
+            return "<button class=\"fl-btn\"" + ida + ">" + t + "</button>"
         } else if k == _PRIMARY {
-            return "<button class=\"fl-btn fl-primary\">" + t + "</button>"
+            return "<button class=\"fl-btn fl-primary\"" + ida + ">" + t + "</button>"
         } else if k == _DANGER {
-            return "<button class=\"fl-btn fl-danger\">" + t + "</button>"
+            return "<button class=\"fl-btn fl-danger\"" + ida + ">" + t + "</button>"
         } else if k == _GHOST {
-            return "<button class=\"fl-btn fl-ghost\">" + t + "</button>"
+            return "<button class=\"fl-btn fl-ghost\"" + ida + ">" + t + "</button>"
         } else if k == _NAVITEM {
-            return "<a class=\"fl-nav\" href=\"#\">" + t + "</a>"
+            return "<a class=\"fl-nav\" href=\"#\"" + ida + ">" + t + "</a>"
         } else if k == _NAVITEM_ON {
-            return "<a class=\"fl-nav fl-nav-on\" href=\"#\">" + t + "</a>"
+            return "<a class=\"fl-nav fl-nav-on\" href=\"#\"" + ida + ">" + t + "</a>"
         } else if k == _LINK {
-            return "<a class=\"fl-link\" href=\"#\">" + t + "</a>"
+            return "<a class=\"fl-link\" href=\"#\"" + ida + ">" + t + "</a>"
         } else if k == _BOLD {
             return "<strong>" + t + "</strong>"
         } else if k == _EM {
@@ -4997,7 +5023,8 @@ fn new() -> Flare {
         _frame: 0,
         _toasts: [],
         _tnext: 0,
-        _action: ""
+        _action: "",
+        _click_id: ""
     }
 }
 

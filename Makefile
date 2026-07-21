@@ -175,7 +175,7 @@ DEPS    := $(OBJECTS:.o=.d)
 GEN_BIN := build/gen_editor_assets
 GRAMMAR := editors/vscode/syntaxes/ember.tmLanguage.json
 
-.PHONY: all test test-update test-lsp doctor help release asan asan-par asan-trace install install-vscode build-zed install-zed parallel mn tsan-mn asan-mn mn-stress mn-graphics mn-net-graphics graphics web net net-graphics db test-db test-quog test-quog-native quog install-quog test-graphics test-web test-net test-parallel kernel test-kernel selfhost crucible ceilings ledger opcheck verify docs string-diff bench parbench gen-editor-assets check-editor-sync clean
+.PHONY: all test test-update test-lsp doctor help release asan asan-par asan-trace install install-vscode build-zed install-zed parallel mn tsan-mn asan-mn mn-stress mn-graphics mn-net-graphics graphics web wasm net net-graphics db test-db test-quog test-quog-native quog install-quog test-graphics test-web test-net test-parallel kernel test-kernel selfhost crucible ceilings ledger opcheck verify docs string-diff bench parbench gen-editor-assets check-editor-sync clean
 
 all: $(BIN) $(RT_LIB) $(RT_LIB_PAR)
 
@@ -455,6 +455,22 @@ graphics: $(RT_LIB_NETGFX) | build
 web: $(RT_LIB_WEB) | build
 	$(CC) $(WEB_FLAGS) $(SOURCES) $(LDLIBS_MATH) -o $(WEB_BIN)
 	@$(call LINK_COMPAT,$(WEB_BIN))
+
+# Compile a Flare component to a WASM browser app (OFI-213 / W4): emit C via inglec-web, then emcc-link
+# the runtime + graphics_headless + the std/web DOM bridge with ASYNCIFY and the click-shell. Opt-in —
+# needs emscripten (brew install emscripten); the rest of the build never touches it. The same Flare
+# builder API that draws the desktop window runs client-side in the browser, re-rendering on each click.
+# Usage:  make wasm APP=examples/web/counter.ig   → build/wasm/<name>.{html,js,wasm} (serve + open).
+WASM_APP  ?= examples/web/counter.ig
+WASM_NAME := $(notdir $(basename $(WASM_APP)))
+WASM_EMFLAGS := -O2 -sASYNCIFY=1 -sEXPORTED_RUNTIME_METHODS=UTF8ToString,stringToNewUTF8 -sALLOW_MEMORY_GROWTH=1
+wasm: web | build
+	@command -v emcc >/dev/null 2>&1 || { echo "wasm: emcc not found — run 'brew install emscripten'"; exit 1; }
+	@mkdir -p build/wasm
+	$(WEB_BIN) --emit=c $(WASM_APP) > build/wasm/$(WASM_NAME).c
+	emcc $(WASM_EMFLAGS) -Iinclude build/wasm/$(WASM_NAME).c src/runtime.c src/cextern.c src/graphics_headless.c \
+	  -DEMBER_GRAPHICS=1 -DEMBER_GFX_HEADLESS=1 --shell-file tools/wasm-shell.html -o build/wasm/$(WASM_NAME).html
+	@echo "  built build/wasm/$(WASM_NAME).{html,js,wasm} — serve build/wasm and open $(WASM_NAME).html"
 
 # Networking compiler (see NET_FLAGS): links libcurl via curl-config, registers the http_post
 # FFI wrapper. Run an HTTPS program with: build/inglec-net --emit=run <file.ig>

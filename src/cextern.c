@@ -965,6 +965,56 @@ static int w_sqlite_last_insert_rowid(const Value *a, Value *o) {
 #endif  // EMBER_SQLITE
 
 
+// --- Web (WASM) DOM bridge (EMBER_GFX_HEADLESS) ------------------------------------------------------
+// The three primitives that let a Flare component run in the browser: push a freshly rendered frame's
+// HTML into the page, pull the next queued DOM click (as the clicked widget's data-fl-id), and yield to
+// the event loop. Under emscripten these are EM_JS thunks into the page; on any other target (the native
+// web binary, the interpreter) they are inert stubs — so the one web-flavored build runs everywhere and
+// only DOES something in a browser. See flare.set_click()/html() and OFI-213.
+#if EMBER_GFX_HEADLESS
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+EM_JS(void, ingle_dom_set_html, (const char *s), {
+    var el = document.getElementById('app');
+    if (el) { el.innerHTML = UTF8ToString(s); }
+});
+EM_JS(char *, ingle_dom_next_click, (void), {
+    if (!globalThis.__ingleClicks || globalThis.__ingleClicks.length === 0) { return stringToNewUTF8(""); }
+    return stringToNewUTF8(globalThis.__ingleClicks.shift());
+});
+#else
+static void  ingle_dom_set_html(const char *s) { (void)s; }
+static char *ingle_dom_next_click(void)        { return strdup(""); }
+#endif
+
+// web_set_html(html) -> 0. Replace the page's #app content with the freshly rendered frame.
+static int w_web_set_html(const Value *a, Value *o) {
+    ingle_dom_set_html((const char *)AS_CSTRING(a[0]));
+    o[0] = INT_VAL(0);
+    return 1;
+}
+
+// web_next_click() -> string. Pop the id (data-fl-id) of the next queued DOM click, or "" if none.
+// The returned char* is copied into an Ingle string and freed by the runtime (ret_is_string=1).
+static int w_web_next_click(const Value *a, Value *o) {
+    (void)a;
+    o[0] = PTR_VAL(ingle_dom_next_click());
+    return 1;
+}
+
+// web_sleep(ms) -> 0. Yield to the browser event loop for ~ms (ASYNCIFY unwinds/rewinds the stack).
+static int w_web_sleep(const Value *a, Value *o) {
+#ifdef __EMSCRIPTEN__
+    emscripten_sleep((unsigned)AS_INT(a[0]));
+#else
+    (void)a;
+#endif
+    o[0] = INT_VAL(0);
+    return 1;
+}
+#endif  // EMBER_GFX_HEADLESS
+
+
 static const CExternSig g_sigs[] = {
     { "sin",   1, { 'f' },                1, { 'f' }, 0, 0 },
     { "cos",   1, { 'f' },                1, { 'f' }, 0, 0 },
@@ -1014,6 +1064,14 @@ static const CExternSig g_sigs[] = {
     { "em_recv",       2, { 'i', 'b' }, 1, { 'i' }, 0, 0 },
     { "em_send",       2, { 'i', 'b' }, 1, { 'i' }, 0, 0 },
     { "em_close",      1, { 'i' },      1, { 'i' }, 0, 0 },
+#if EMBER_GFX_HEADLESS
+    // Web (WASM) DOM bridge (std/web) — HTML-out / click-in / yield. Present in every web-flavored build
+    // (inglec-web emit + the wasm/native web runtime both carry -DEMBER_GFX_HEADLESS), so the em_ffi
+    // indices baked into the emitted C match this table.
+    { "web_set_html",   1, { 'p' }, 1, { 'i' }, 0, 0 },
+    { "web_next_click", 0, { 0 },   1, { 'p' }, 0, 1 },
+    { "web_sleep",      1, { 'i' }, 1, { 'i' }, 0, 0 },
+#endif
 #if EMBER_NET
     // HTTPS POST (make net): url, headers ('\n'-separated lines), body → response string.
     { "http_post", 3, { 'p', 'p', 'p' }, 1, { 'p' }, 0, 1 },
@@ -1065,6 +1123,9 @@ static const CExternFn g_fns[] = {
     w_proc_run, w_proc_exit, w_proc_stdout, w_proc_stderr, w_proc_free,
     w_em_now_unix, w_em_mkdir, w_em_remove,
     w_em_tcp_listen, w_em_tcp_accept, w_em_tcp_connect, w_em_recv, w_em_send, w_em_close,
+#if EMBER_GFX_HEADLESS
+    w_web_set_html, w_web_next_click, w_web_sleep,
+#endif
 #if EMBER_NET
     w_http_post,
     w_http_get,

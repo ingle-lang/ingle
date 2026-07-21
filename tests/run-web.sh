@@ -79,5 +79,18 @@ if [ "$UPDATE" -eq 1 ]; then
     exit 0
 fi
 
+# Smoke: the WASM browser examples (examples/web/*.ig) are loop-forever apps, so they can't be run here,
+# but they MUST full-compile under inglec-web (--emit=c) — this catches an example drifting off the
+# std/web bridge or a Flare API change without needing emscripten. `make wasm` does the actual emcc link.
+for em in "$ROOT"/examples/web/*.ig; do
+    [ -e "$em" ] || continue
+    if "$BIN" --emit=c "$em" >/dev/null 2>&1; then
+        pass=$((pass + 1))
+    else
+        echo "FAIL $(basename "$em") — web example does not compile under inglec-web"
+        fail=$((fail + 1))
+    fi
+done
+
 echo "web: passed $pass, failed $fail"
 [ "$fail" -eq 0 ]
