@@ -4521,8 +4521,9 @@ struct Flare {
     }
 
 
-    // _html_page wraps the rendered body in a self-contained document: a dark Flare-styled theme inlined
-    // so the page has zero external dependencies (the artifact/CSP-friendly shape the web roadmap wants).
+    // _html_page wraps the rendered body in a self-contained document: the active Flare theme inlined as
+    // CSS (from ui.Style) so the page has zero external dependencies (the artifact/CSP-friendly shape the
+    // web roadmap wants).
     fn _html_page(self, title: string, body: string) -> string {
         return "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">" +
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" +
@@ -4531,37 +4532,69 @@ struct Flare {
     }
 
 
-    // _flare_css is the inlined Flare dark theme — one class per emitted kind. Literal braces are \{ \}
-    // (the string is interpolating). This is the web mirror of ui.Style; a later pass can derive it from
-    // the live theme instead of hard-coding it.
+    // _css_color renders a packed 0xRRGGBB theme color (ui.rgb) as a CSS rgb() value. Decimal channels
+    // are valid CSS, so no hex formatting is needed.
+    fn _css_color(self, c: int) -> string {
+        let r = (c / 65536) % 256
+        let g = (c / 256) % 256
+        let b = c % 256
+        return "rgb({r},{g},{b})"
+    }
+
+
+    // _flare_css is the web mirror of ui.Style — DERIVED from the live theme, not hard-coded. It emits a
+    // :root block of CSS custom properties straight from the active `ui.Style` palette (so a light theme
+    // yields a light page, a re-themed app re-themes its website), then a rule per emitted kind that reads
+    // those vars. Literal braces are \{ \} because the string interpolates. Follows theme_dark/theme_light.
     fn _flare_css(self) -> string {
-        return "*\{box-sizing:border-box\}" +
-            "body\{margin:0;min-height:100vh;background:#17181c;color:#e6e7ea;" +
-            "font:15px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif\}" +
+        let st = self.ui.style
+        let radius = st.radius
+        let ts = st.text_size
+        let root = ":root\{--bg:" + self._css_color(st.bg) +
+            ";--panel:" + self._css_color(st.panel) +
+            ";--hover:" + self._css_color(st.hover) +
+            ";--pressed:" + self._css_color(st.pressed) +
+            ";--ink:" + self._css_color(st.ink) +
+            ";--muted:" + self._css_color(st.muted_ink) +
+            ";--accent:" + self._css_color(st.accent) +
+            ";--accent-ink:" + self._css_color(st.accent_ink) +
+            ";--danger:" + self._css_color(st.danger) +
+            ";--danger-ink:" + self._css_color(st.danger_ink) +
+            ";--border:" + self._css_color(st.border) +
+            ";--track:" + self._css_color(st.track) +
+            ";--bar:" + self._css_color(st.bar) +
+            ";--radius:{radius}px\}"
+        let rules = "*\{box-sizing:border-box\}" +
+            "body\{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);" +
+            "font:{ts}px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif\}" +
             "h1,h2,h3\{margin:0;font-weight:700;line-height:1.2\}" +
             "h1\{font-size:1.7rem\}h2\{font-size:1.35rem\}h3\{font-size:1.1rem\}" +
-            ".fl-heading\{font-size:1.15rem;font-weight:700\}.fl-muted\{color:#9aa0a6\}" +
+            ".fl-heading\{font-size:1.15rem;font-weight:700\}.fl-muted\{color:var(--muted)\}" +
             ".fl-prose\{margin:0\}" +           // a reflowing paragraph: inline runs wrap to the container
-            ".fl-panel\{background:#212228;border:1px solid #33353b;border-radius:10px\}" +
-            ".fl-bubble\{background:#212228;border:1px solid #33353b;border-radius:14px\}" +
-            ".fl-btn\{align-self:flex-start;font:inherit;padding:.4em .9em;border:1px solid #33353b;" +
-            "border-radius:8px;background:#2a2c33;color:#e6e7ea;cursor:pointer\}.fl-btn:hover\{background:#33353b\}" +
-            ".fl-primary\{background:#d9743f;border-color:#d9743f;color:#fff\}.fl-primary:hover\{background:#e07f4b\}" +
-            ".fl-danger\{background:#d9534f;border-color:#d9534f;color:#fff\}.fl-danger:hover\{background:#e0605c\}" +
-            ".fl-ghost\{background:transparent;border-color:transparent\}.fl-ghost:hover\{background:#2a2c33\}" +
-            ".fl-nav\{display:block;width:100%;text-align:left;padding:.45em .7em;border-radius:8px;" +
-            "color:#c8cace;text-decoration:none\}.fl-nav:hover\{background:#2a2c33\}" +
-            ".fl-nav-on\{background:#d9743f;color:#fff\}" +
-            ".fl-link\{color:#5ab0ff;text-decoration:none\}.fl-link:hover\{text-decoration:underline\}" +
+            ".fl-panel\{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius)\}" +
+            ".fl-bubble\{background:var(--panel);border:1px solid var(--border);border-radius:calc(var(--radius) + 4px)\}" +
+            ".fl-btn\{align-self:flex-start;font:inherit;padding:.4em .9em;border:1px solid var(--border);" +
+            "border-radius:var(--radius);background:var(--panel);color:var(--ink);cursor:pointer\}" +
+            ".fl-btn:hover\{background:var(--hover)\}.fl-btn:active\{background:var(--pressed)\}" +
+            ".fl-primary\{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)\}" +
+            ".fl-primary:hover\{filter:brightness(1.08)\}.fl-primary:active\{filter:brightness(.94)\}" +
+            ".fl-danger\{background:var(--danger);border-color:var(--danger);color:var(--danger-ink)\}" +
+            ".fl-danger:hover\{filter:brightness(1.08)\}" +
+            ".fl-ghost\{background:transparent;border-color:transparent\}.fl-ghost:hover\{background:var(--hover)\}" +
+            ".fl-nav\{display:block;width:100%;text-align:left;padding:.45em .7em;border-radius:var(--radius);" +
+            "color:var(--ink);text-decoration:none\}.fl-nav:hover\{background:var(--hover)\}" +
+            ".fl-nav-on\{background:var(--accent);color:var(--accent-ink)\}" +
+            ".fl-link\{color:var(--accent);text-decoration:none\}.fl-link:hover\{text-decoration:underline\}" +
             "code,.fl-icode\{font:.9em ui-monospace,SFMono-Regular,Menlo,monospace;" +
-            "background:#2a2c33;padding:.12em .35em;border-radius:5px\}" +
-            ".fl-code\{background:#0f1013;border:1px solid #33353b;border-radius:10px;padding:1em;" +
-            "overflow-x:auto\}.fl-code code\{background:none;padding:0\}" +
-            ".fl-quote\{margin:0;padding:.3em 1em;border-left:3px solid #d9743f;color:#9aa0a6\}" +
+            "background:var(--track);padding:.12em .35em;border-radius:5px\}" +
+            ".fl-code\{background:var(--track);border:1px solid var(--border);border-radius:var(--radius);" +
+            "padding:1em;overflow-x:auto\}.fl-code code\{background:none;padding:0\}" +
+            ".fl-quote\{margin:0;padding:.3em 1em;border-left:3px solid var(--accent);color:var(--muted)\}" +
             ".fl-badge\{align-self:flex-start;font-size:.8em;padding:.15em .5em;border-radius:999px;" +
-            "background:#2a2c33;color:#c8cace\}" +
-            "hr\{width:100%;border:none;border-top:1px solid #33353b;margin:0\}" +
+            "background:var(--track);color:var(--muted)\}" +
+            "hr\{width:100%;border:none;border-top:1px solid var(--border);margin:0\}" +
             "strong\{font-weight:700\}em\{font-style:italic\}"
+        return root + rules
     }
 
 
