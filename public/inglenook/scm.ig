@@ -39,6 +39,13 @@ struct Attic {
 }
 
 
+// DiffLine is one line of a file's diff for the Diff panel: op is "keep" (context) / "add" / "remove".
+struct DiffLine {
+    op: string
+    text: string
+}
+
+
 // Scm is the Source tab's whole state. The state fields are refreshed from `quog --json` off-thread;
 // want_refresh / want_init are per-frame action flags cleared by begin_frame, set during build, and
 // read + acted on by ide.ig post-frame.
@@ -53,11 +60,16 @@ struct Scm {
     branches: [string]       // every branch name
     current: string          // the current branch (from branch list)
     attic: [Attic]           // recoverable discarded snapshots (invariant #6)
+    diff_path: string        // the file whose diff is shown in the Diff panel ("" = none selected)
+    diff_lines: [DiffLine]   // that file's diff, line by line
+    diff_added: int          // added-line count for the shown diff
+    diff_removed: int        // removed-line count for the shown diff
     err: string              // a diagnostic to surface when there's no repo
     msg_draft: string        // the commit-message input buffer (persists across frames)
     branch_draft: string     // the new-branch-name input buffer (persists across frames)
     action_msg: string       // the last mutation's result line, surfaced under the header
     action_ok: bool          // whether that last mutation succeeded
+    fs_changed: bool         // the last reply was a mutation that may have rewritten the working tree
     refreshing: bool         // a quog query is in flight
     want_refresh: bool       // action: re-query quog
     want_init: bool          // action: initialise a repo here, then query
@@ -68,10 +80,11 @@ struct Scm {
     want_branch: bool        // action: create a branch (name = branch_draft)
     want_switch_name: string // action: switch to this branch ("" = none this frame)
     want_merge_name: string  // action: merge this branch into the current one ("" = none this frame)
+    want_diff_path: string   // action: load this file's diff into the Diff panel ("" = none this frame)
 
 
     // begin_frame clears the per-frame action flags before the panel builds (msg_draft / branch_draft /
-    // action_msg persist — they are editing/result state, not one-shot intents).
+    // action_msg / diff state persist — they are editing/result state, not one-shot intents).
     fn begin_frame(mut self) {
         self.want_refresh = false
         self.want_init = false
@@ -82,6 +95,7 @@ struct Scm {
         self.want_branch = false
         self.want_switch_name = ""
         self.want_merge_name = ""
+        self.want_diff_path = ""
     }
 
 
@@ -182,11 +196,15 @@ struct Scm {
                     break
                 }
                 let c = self.changes[i]
+                f.key("chg:{c.path}")
                 f.row(flare.START, flare.CENTER)
                 f.badge(c.status, status_tone(c.status))
                 f.strut(6, 0)
-                f.label(c.path)
+                if f.nav_item(c.path, self.diff_path == c.path) {   // click → show this file's diff
+                    self.want_diff_path = c.path
+                }
                 f.end()
+                f.key_clear()
                 i = i + 1
             }
         }
@@ -280,21 +298,30 @@ struct Scm {
     }
 
 
-    // apply_result folds a worker reply (the packed JSON from run_scm) back into the panel state.
+    // apply_result folds a worker reply back into the panel state. A reply is either a DIFF reply (a
+    // "diff" member — a file's diff to show in the Diff panel, leaving the rest of the state untouched)
+    // or a full STATE reply (repo status/log/branch/attic, with an optional mutation result line).
     fn apply_result(mut self, s: string) {
         self.refreshing = false
-        self.loaded = true
-        self.changes = []
-        self.commits = []
-        self.branches = []
-        self.attic = []
+        self.fs_changed = false
         match json.parse(s) {
             case Ok(root) {
+                let dj = json.get(root, "diff")
+                if !json.is_null(dj) {
+                    self.apply_diff(json.as_str(dj))
+                    return
+                }
+                self.loaded = true
+                self.changes = []
+                self.commits = []
+                self.branches = []
+                self.attic = []
                 self.repo = json.as_bool(json.get(root, "repo"))
                 self.missing = json.as_bool(json.get(root, "missing"))
                 self.err = json.as_str(json.get(root, "err"))
                 self.action_ok = json.as_bool(json.get(root, "action_ok"))
                 self.action_msg = json.as_str(json.get(root, "action_msg"))
+                self.fs_changed = self.action_msg.len() > 0    // a mutation ran → the tree may have changed
                 if self.repo {
                     self.parse_status(json.as_str(json.get(root, "status")))
                     self.parse_log(json.as_str(json.get(root, "log")))
@@ -306,6 +333,70 @@ struct Scm {
                 self.repo = false
                 self.err = "could not parse quog output"
             }
+        }
+    }
+
+
+    // apply_diff parses a `quog diff <path> --json` reply (the {"files":[…]} shape) — its single file's
+    // entry — into the Diff-panel state.
+    fn apply_diff(mut self, s: string) {
+        self.diff_lines = []
+        self.diff_added = 0
+        self.diff_removed = 0
+        match json.parse(s) {
+            case Ok(root) {
+                let files = json.get(root, "files")
+                if json.length(files) > 0 {
+                    let f0 = json.at(files, 0)
+                    self.diff_path = json.as_str(json.get(f0, "path"))
+                    self.diff_added = json.as_int(json.get(f0, "added"))
+                    self.diff_removed = json.as_int(json.get(f0, "removed"))
+                    let lines = json.get(f0, "lines")
+                    var i = 0
+                    loop {
+                        if i == json.length(lines) {
+                            break
+                        }
+                        let ln = json.at(lines, i)
+                        self.diff_lines.append(DiffLine {
+                            op: json.as_str(json.get(ln, "op")),
+                            text: json.as_str(json.get(ln, "text"))
+                        })
+                        i = i + 1
+                    }
+                }
+            }
+            case Err(e) {}
+        }
+    }
+
+
+    // build_diff renders the Diff dock panel: the selected file's coloured diff (or a hint when none is
+    // selected). Each line uses the f.diff_line primitive (green add / red remove / muted context).
+    fn build_diff(mut self, mut f: flare.Flare, cw: int) {
+        if self.diff_path.len() == 0 {
+            f.text_muted("Select a changed file in the Source panel to see its diff.")
+            return
+        }
+        f.row(flare.START, flare.CENTER)
+        f.text_muted(self.diff_path)
+        f.spacer()
+        f.badge("+{self.diff_added}", 1)
+        f.strut(4, 0)
+        f.badge("-{self.diff_removed}", 2)
+        f.end()
+        f.divider()
+        if self.diff_lines.len() == 0 {
+            f.text_muted("no changes (saved since selected — Refresh the Source panel)")
+            return
+        }
+        var i = 0
+        loop {
+            if i == self.diff_lines.len() {
+                break
+            }
+            f.diff_line(self.diff_lines[i].op, self.diff_lines[i].text)
+            i = i + 1
         }
     }
 
@@ -449,6 +540,12 @@ fn _first_line(s: string) -> string {
 // "command not found" (exit 127) means quog itself is missing, told apart from a plain "no repo" error.
 fn run_scm(payload: string) -> string {
     let q = proc.shell_quote(quog_path())
+    // A diff request only fetches one file's diff (no state re-query) — a lighter, separate reply.
+    if sstr.starts_with(payload, "diff\t") {
+        let path = sstr.cp_slice(payload, 5, payload.char_count())
+        let d = proc.run(q + " diff " + proc.shell_quote(path) + " --json")
+        return json.stringify(json.obj([json.member("diff", json.str(d.out()))]))
+    }
     var action_ok = true
     var action_msg = ""
     if payload == "init" {
@@ -535,11 +632,16 @@ fn new_scm() -> Scm {
         branches: [],
         current: "",
         attic: [],
+        diff_path: "",
+        diff_lines: [],
+        diff_added: 0,
+        diff_removed: 0,
         err: "",
         msg_draft: "",
         branch_draft: "",
         action_msg: "",
         action_ok: true,
+        fs_changed: false,
         refreshing: false,
         want_refresh: false,
         want_init: false,
@@ -549,6 +651,7 @@ fn new_scm() -> Scm {
         want_undo: false,
         want_branch: false,
         want_switch_name: "",
-        want_merge_name: ""
+        want_merge_name: "",
+        want_diff_path: ""
     }
 }

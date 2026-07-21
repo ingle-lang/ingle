@@ -51,7 +51,8 @@ fn build_workspace() -> flare.DockTree {
     let e1 = d.split(chat_leaf, "Editor 1", true, 0.44)
     let _i = d.split(e1, "Inspector", true, 0.76)
     let e2 = d.split(e1, "Editor 2", false, 0.55)
-    d.add_tab(e2, "Tape")                        // the execution-tape window (default tab; Editor 2 behind it)
+    d.add_tab(e2, "Diff")                        // the source-diff window — the sibling of Tape in the "what happened" leaf
+    d.add_tab(e2, "Tape")                        // …added last so Tape stays the DEFAULT visible tab (Editor 2 / Diff behind)
     return d
 }
 
@@ -239,6 +240,23 @@ fn main() -> int {
             case Err(e) {}
         }
     }
+    // Migrate a pre-Diff saved workspace: ensure the Diff panel exists, tabbed beside Tape / Editor 2.
+    if dock.leaf_of("Diff") < 0 {
+        var host = dock.leaf_of("Tape")
+        if host < 0 {
+            host = dock.leaf_of("Editor 2")
+        }
+        if host < 0 {
+            host = dock.leaf_of("Editor 1")
+        }
+        if host < 0 {
+            host = dock.leaf_of("Chat")
+        }
+        if host >= 0 {
+            dock.add_tab(host, "Diff")
+            dock.activate_panel("Tape")   // add_tab focuses Diff; keep the prior default (Tape) in front
+        }
+    }
     if zoom < 60 || zoom > 220 {
         zoom = 80
     }
@@ -307,7 +325,7 @@ fn main() -> int {
                     linter.apply_result(p)
                 } else if k == tools.KIND_QUOG {
                     scmp.apply_result(p)
-                    if scmp.action_msg.len() > 0 {   // a mutation may have rewritten the working tree
+                    if scmp.fs_changed {             // a mutation rewrote the tree (NOT a read-only diff/refresh)
                         tree.refresh()
                         panes.reload_if_open(panes.active_path(0))
                         panes.reload_if_open(panes.active_path(1))
@@ -516,6 +534,14 @@ fn main() -> int {
         if f.dock_panel("Tape") {
             let cwr = panel_cw(f, "Tape", 200, 3000)
             runner.build(f, panes.active_path(0), tick, cwr)
+            f.dock_panel_end()
+        }
+        // --- Diff: the source-diff window — what changed (sibling of Tape: what the code did) ---
+        if f.dock_panel("Diff") {
+            let cwd = panel_cw(f, "Diff", 200, 3000)
+            f.scroll_begin("diffview")
+            scmp.build_diff(f, cwd)
+            f.scroll_end("diffview")
             f.dock_panel_end()
         }
 
@@ -758,7 +784,11 @@ fn main() -> int {
         if linter.pend_code.len() > 0 {        // the editor buffer settled → live-check it for squiggles
             send(tool_req_ch, tools.lint_req(linter.pend_code))
         }
-        if scmp.want_init {                    // the Source panel's Initialize button → quog init + query
+        if scmp.want_diff_path.len() > 0 {     // a changed file was clicked → load its diff + surface the Diff tab
+            scmp.refreshing = true
+            send(tool_req_ch, tools.quog_req("diff\t" + scmp.want_diff_path))
+            dock.activate_panel("Diff")
+        } else if scmp.want_init {             // the Source panel's Initialize button → quog init + query
             scmp.refreshing = true
             send(tool_req_ch, tools.quog_req("init"))
         } else if scmp.want_save {             // Save → commit the working tree with the typed message
