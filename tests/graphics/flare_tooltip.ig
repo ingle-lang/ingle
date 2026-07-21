@@ -3,6 +3,10 @@
 // so the test force-hovers the button each frame (f.ui.hot = f._last_wid) to run the dwell timer; by the taped
 // frame the timer has elapsed and the tip card (a raised popover-style card on layer 2000000) + its text show.
 //
+// The tooltip anchors at (ui.mx+14, ui.my+18); ui.begin() syncs mx/my from the REAL cursor, so we PIN them to
+// a fixed point each frame (after begin) — otherwise the tip card's coordinates tracked wherever the physical
+// mouse happened to be and the golden passed/failed by cursor position (OFI-216).
+//
 // NOTE (OFI-068): text x/width drift ±1px across freetype builds — re-bless per machine if needed; the tip
 // card and its text are the stable structure.
 import "std/draw" as draw
@@ -12,6 +16,8 @@ import "std/flare" as flare
 fn frame(mut f: flare.Flare) {
     draw.begin(f.bg())
     f.begin()
+    f.ui.mx = 40                    // pin the cursor so the tooltip anchors deterministically (OFI-216)
+    f.ui.my = 30
     f.row(flare.START, flare.CENTER)
     let _b = f.ghost_button("Copy")
     f.ui.hot = f._last_wid          // force-hover so the dwell timer advances without a real cursor
