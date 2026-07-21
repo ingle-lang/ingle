@@ -175,7 +175,7 @@ DEPS    := $(OBJECTS:.o=.d)
 GEN_BIN := build/gen_editor_assets
 GRAMMAR := editors/vscode/syntaxes/ember.tmLanguage.json
 
-.PHONY: all test test-update test-lsp doctor help release asan asan-par asan-trace install install-vscode build-zed install-zed parallel mn tsan-mn asan-mn mn-stress mn-graphics mn-net-graphics graphics web wasm net net-graphics db test-db test-quog test-quog-native quog install-quog test-graphics test-web test-net test-parallel kernel test-kernel selfhost crucible ceilings ledger opcheck verify docs string-diff bench parbench gen-editor-assets check-editor-sync clean
+.PHONY: all test test-update test-lsp doctor help release asan asan-par asan-trace install install-vscode build-zed install-zed parallel mn tsan-mn asan-mn mn-stress mn-graphics mn-net-graphics graphics web wasm wasm-hydrate net net-graphics db test-db test-quog test-quog-native quog install-quog test-graphics test-web test-net test-parallel kernel test-kernel selfhost crucible ceilings ledger opcheck verify docs string-diff bench parbench gen-editor-assets check-editor-sync clean
 
 all: $(BIN) $(RT_LIB) $(RT_LIB_PAR)
 
@@ -471,6 +471,16 @@ wasm: web | build
 	emcc $(WASM_EMFLAGS) -Iinclude build/wasm/$(WASM_NAME).c src/runtime.c src/cextern.c src/graphics_headless.c \
 	  -DEMBER_GRAPHICS=1 -DEMBER_GFX_HEADLESS=1 --shell-file tools/wasm-shell.html -o build/wasm/$(WASM_NAME).html
 	@echo "  built build/wasm/$(WASM_NAME).{html,js,wasm} — serve build/wasm and open $(WASM_NAME).html"
+
+# The W4 endgame: SSR + hydration for the counter demo (OFI-213). `make wasm` builds the client, then
+# inglec-web renders the initial frame SERVER-SIDE (examples/web/counter_ssr.ig) and it is baked into the
+# page's #app — so build/wasm/index.html shows the counter with ZERO JavaScript (curl it), and the wasm
+# client hydrates onto that exact DOM (tools/wasm-shell.html's ingleMorph keeps the server-rendered nodes
+# in place, no flash). One Flare component, server-rendered and client-hydrated. Opt-in (needs emscripten).
+wasm-hydrate: wasm
+	$(WEB_BIN) --emit=run examples/web/counter_ssr.ig 2>/dev/null | grep -vE '^=> ' > build/wasm/ssr.html
+	python3 -c "sh=open('build/wasm/counter.html').read(); ssr=open('build/wasm/ssr.html').read().strip(); open('build/wasm/index.html','w').write(sh.replace('loading Ingle → WASM…', ssr))"
+	@echo "  built build/wasm/index.html — SSR + hydration; serve build/wasm and open index.html"
 
 # Networking compiler (see NET_FLAGS): links libcurl via curl-config, registers the http_post
 # FFI wrapper. Run an HTTPS program with: build/inglec-net --emit=run <file.ig>
