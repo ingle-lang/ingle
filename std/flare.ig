@@ -179,6 +179,63 @@ struct DropHit {
 }
 
 
+let CODE_BARW = 10        // code-editor scrollbar thickness (px)
+
+
+// CodeScroll is the derived scroll geometry of a code editor / viewer: whether each bar is shown, the
+// text viewport it leaves, and the max scroll offset on each axis. Computed identically by the input
+// (widget) and paint sides from the same inputs, so the draggable thumb and the drawn thumb agree.
+struct CodeScroll {
+    vbar: bool            // a vertical scrollbar is needed (content taller than the viewport)
+    hbar: bool            // a horizontal scrollbar is needed (a line wider than the viewport)
+    boxh: int             // text viewport height (rect minus padding and the horizontal bar)
+    boxw: int             // text viewport width (rect minus padding, the gutter and the vertical bar)
+    maxv: int             // max vertical offset (content_h - boxh, >= 0)
+    maxh: int             // max horizontal offset (content_w - boxw, >= 0)
+    vbw: int              // width reserved for the vertical bar (0 when absent)
+    hbh: int              // height reserved for the horizontal bar (0 when absent)
+}
+
+
+// _code_scroll_geom derives a code view's scroll geometry from its rect, gutter, and content extent.
+// Reserving one bar can push the other axis over its threshold, so the bars are resolved in two passes.
+fn _code_scroll_geom(w: int, h: int, gutw: int, content_h: int, content_w: int, pad: int) -> CodeScroll {
+    var boxh = h - pad * 2
+    var boxw = w - pad * 2 - gutw
+    var vbar = content_h > boxh
+    var hbar = content_w > boxw
+    var vbw = 0
+    if vbar {
+        vbw = CODE_BARW
+    }
+    var hbh = 0
+    if hbar {
+        hbh = CODE_BARW
+    }
+    boxh = h - pad * 2 - hbh
+    boxw = w - pad * 2 - gutw - vbw
+    vbar = content_h > boxh
+    hbar = content_w > boxw
+    vbw = 0
+    if vbar {
+        vbw = CODE_BARW
+    }
+    hbh = 0
+    if hbar {
+        hbh = CODE_BARW
+    }
+    var maxv = content_h - boxh
+    if maxv < 0 {
+        maxv = 0
+    }
+    var maxh = content_w - boxw
+    if maxh < 0 {
+        maxh = 0
+    }
+    return CodeScroll { vbar: vbar, hbar: hbar, boxh: boxh, boxw: boxw, maxv: maxv, maxh: maxh, vbw: vbw, hbh: hbh }
+}
+
+
 // theme_light is the warm "parchment + clay" Claude look — the house default.
 fn theme_light() -> ui.Style {
     return ui.Style {
@@ -3344,6 +3401,26 @@ struct Flare {
     }
 
 
+    // _code_content_w returns the pixel width of the widest line in `value` (for the horizontal
+    // scrollbar), caching it in encapsulated state keyed by the buffer's byte length — so scrolling an
+    // unchanged buffer costs one int read, not a measure of every line. Requires the mono face active.
+    fn _code_content_w(mut self, key: string, value: string, cs: int) -> int {
+        if self.state_int(key + "/cwlen", 0 - 1) == value.len() {
+            return self.state_int(key + "/cw", 0)
+        }
+        var maxw = 0
+        for ln in value.split("\n") {
+            let lw = measure_text(ln, cs)
+            if lw > maxw {
+                maxw = lw
+            }
+        }
+        self.set_int(key + "/cw", maxw)
+        self.set_int(key + "/cwlen", value.len())
+        return maxw
+    }
+
+
     // code_editor_marked is code_editor with two extra affordances the IDE needs: `marks` is a list of
     // 1-based line numbers to flag with a red squiggle + gutter dot (compiler diagnostics), and `hot` is
     // a 1-based line to spotlight with a full-width highlight band (the execution tape's current line as
@@ -3372,43 +3449,114 @@ struct Flare {
                     }
                     set_font(mslot)                     // mono active: the (mx,my)->caret hit-test + measures
                     let gutw = _gutter_w(nlines, cs, pad)
+                    let content_h = nlines * lh
+                    let content_w = self._code_content_w(key, value, cs)
+                    let g = _code_scroll_geom(r.w, r.h, gutw, content_h, content_w, pad)
+
+                    // Mouse wheel over the editor scrolls the viewport (Shift = horizontal). This does NOT
+                    // move the caret — so caret-follow (below) runs only on a caret MOVE, or the wheel
+                    // would be yanked straight back to the caret.
+                    let over_ed = self.ui.mx >= r.x && self.ui.mx < r.x + r.w && self.ui.my >= r.y && self.ui.my < r.y + r.h
+                    if over_ed && self.ui.open_popup < 0 {   // no menu/popup open (NONE = -1; ids are >= 0)
+                        let wheel = mouse_wheel()
+                        if wheel != 0 {
+                            if key_down(KEY_LSHIFT) || key_down(KEY_RSHIFT) {
+                                hoff = hoff - wheel * lh * 3
+                            } else {
+                                voff = voff - wheel * lh * 3
+                            }
+                        }
+                    }
+
+                    // Draggable scrollbar thumbs (per-editor latch: 0 none · 1 vertical · 2 horizontal).
+                    var sbdrag = self.state_int(key + "/sbdrag", 0)
+                    if g.vbar {
+                        let trk_h = r.h - pad * 2 - g.hbh
+                        var th = trk_h * g.boxh / content_h
+                        if th < 24 {
+                            th = 24
+                        }
+                        let bx = r.x + r.w - CODE_BARW
+                        var ty = r.y + pad
+                        if g.maxv > 0 {
+                            ty = r.y + pad + voff * (trk_h - th) / g.maxv
+                        }
+                        let over_v = self.ui.mx >= bx && self.ui.mx < bx + CODE_BARW && self.ui.my >= ty && self.ui.my < ty + th
+                        if sbdrag == 1 {
+                            if !self.ui.down {
+                                sbdrag = 0
+                            } else if g.maxv > 0 && trk_h > th {
+                                voff = (self.ui.my - self.state_int(key + "/sbgrab", 0) - (r.y + pad)) * g.maxv / (trk_h - th)
+                            }
+                        } else if over_v && self.ui.down && !self.ui.was {
+                            sbdrag = 1
+                            self.set_int(key + "/sbgrab", self.ui.my - ty)
+                        }
+                    }
+                    if g.hbar {
+                        let trk_w = r.w - pad * 2 - gutw - g.vbw
+                        var thw = trk_w * g.boxw / content_w
+                        if thw < 24 {
+                            thw = 24
+                        }
+                        let by = r.y + r.h - CODE_BARW
+                        var tx = r.x + pad + gutw
+                        if g.maxh > 0 {
+                            tx = r.x + pad + gutw + hoff * (trk_w - thw) / g.maxh
+                        }
+                        let over_h = self.ui.my >= by && self.ui.my < by + CODE_BARW && self.ui.mx >= tx && self.ui.mx < tx + thw
+                        if sbdrag == 2 {
+                            if !self.ui.down {
+                                sbdrag = 0
+                            } else if g.maxh > 0 && trk_w > thw {
+                                hoff = (self.ui.mx - self.state_int(key + "/sbgrab", 0) - (r.x + pad + gutw)) * g.maxh / (trk_w - thw)
+                            }
+                        } else if over_h && self.ui.down && !self.ui.was {
+                            sbdrag = 2
+                            self.set_int(key + "/sbgrab", self.ui.mx - tx)
+                        }
+                    }
+                    self.set_int(key + "/sbdrag", sbdrag)
+
+                    if voff > g.maxv { voff = g.maxv }
+                    if voff < 0 { voff = 0 }
+                    if hoff > g.maxh { hoff = g.maxh }
+                    if hoff < 0 { hoff = 0 }
+
                     let gx0  = r.x + pad + gutw          // text origin (past the gutter), unshifted
                     let ty0  = r.y + pad
-                    shown = self.ui._code_edit(wid, r.x, r.y, r.w, r.h, gx0 - hoff, ty0 - voff, cs, lh, value)
-                    if self.ui.focus == wid {           // caret-follow scroll (in px), clamped to content
-                        let boxh = r.h - pad * 2
-                        let boxw = r.w - pad * 2 - gutw
+                    // Hit-test the text over the viewport MINUS the bar edges, so a press on a bar is
+                    // handled above (scroll) and never starts a text selection in _code_edit.
+                    shown = self.ui._code_edit(wid, r.x, r.y, r.w - g.vbw, r.h - g.hbh, gx0 - hoff, ty0 - voff, cs, lh, value)
+
+                    // Caret-follow scroll, ONLY when the caret actually moved (typing / arrows) — so a
+                    // wheel or scrollbar drag that scrolled away from the caret is not immediately undone.
+                    if self.ui.focus == wid && self.ui.caret != self.state_int(key + "/pcar", 0 - 1) {
                         let crow = ui.code_row_of(shown, self.ui.caret)
                         let cpx  = self.ui._code_caret_x(shown, cs)
                         let cy   = crow * lh
                         if cy - voff < 0 {
                             voff = cy
                         }
-                        if cy + lh - voff > boxh {
-                            voff = cy + lh - boxh
-                        }
-                        var maxv = (nlines * lh) - boxh
-                        if maxv < 0 {
-                            maxv = 0
-                        }
-                        if voff > maxv {
-                            voff = maxv
-                        }
-                        if voff < 0 {
-                            voff = 0
+                        if cy + lh - voff > g.boxh {
+                            voff = cy + lh - g.boxh
                         }
                         if cpx - hoff < 0 {
                             hoff = cpx
                         }
-                        if cpx - hoff > boxw {
-                            hoff = cpx - boxw
+                        if cpx - hoff > g.boxw {
+                            hoff = cpx - g.boxw
                         }
-                        if hoff < 0 {
-                            hoff = 0
-                        }
-                        self.set_int(key + "/voff", voff)
-                        self.set_int(key + "/hoff", hoff)
+                        if voff > g.maxv { voff = g.maxv }
+                        if voff < 0 { voff = 0 }
+                        if hoff > g.maxh { hoff = g.maxh }
+                        if hoff < 0 { hoff = 0 }
                     }
+                    if self.ui.focus == wid {
+                        self.set_int(key + "/pcar", self.ui.caret)
+                    }
+                    self.set_int(key + "/voff", voff)
+                    self.set_int(key + "/hoff", hoff)
                     set_font(0)
                 }
                 case None {}
@@ -3701,6 +3849,50 @@ struct Flare {
             draw_rect(tx0 + cxp, ty0 + crow * lh, 2, lh, st.accent)
         }
         clip_pop()
+
+        // Scrollbars — drawn OUTSIDE the text clip, at the right / bottom edges. Geometry matches the
+        // widget's hit-test (same _code_scroll_geom + thumb math), so the drawn thumb is what you grab.
+        let content_h = lines.len() * lh
+        let content_w = self.state_int(wkey + "/cw", 0)
+        let g = _code_scroll_geom(w, h, gutw, content_h, content_w, pad)
+        let sbdrag = self.state_int(wkey + "/sbdrag", 0)
+        let inset = CODE_BARW - 4
+        if g.vbar {
+            let trk_h = h - pad * 2 - g.hbh
+            let bx = x + w - CODE_BARW
+            fill_round(bx + 2, y + pad, inset, trk_h, inset / 2, st.track, 180)
+            var th = trk_h * g.boxh / content_h
+            if th < 24 {
+                th = 24
+            }
+            var ty = y + pad
+            if g.maxv > 0 {
+                ty = y + pad + voff * (trk_h - th) / g.maxv
+            }
+            var thumbc = st.muted_ink
+            if sbdrag == 1 {
+                thumbc = st.accent
+            }
+            fill_round(bx + 2, ty, inset, th, inset / 2, thumbc, 210)
+        }
+        if g.hbar {
+            let trk_w = w - pad * 2 - gutw - g.vbw
+            let by = y + h - CODE_BARW
+            fill_round(x + pad + gutw, by + 2, trk_w, inset, inset / 2, st.track, 180)
+            var thw = trk_w * g.boxw / content_w
+            if thw < 24 {
+                thw = 24
+            }
+            var tx = x + pad + gutw
+            if g.maxh > 0 {
+                tx = x + pad + gutw + hoff * (trk_w - thw) / g.maxh
+            }
+            var thumbc = st.muted_ink
+            if sbdrag == 2 {
+                thumbc = st.accent
+            }
+            fill_round(tx, by + 2, thw, inset, inset / 2, thumbc, 210)
+        }
         set_font(0)
     }
 
