@@ -979,9 +979,11 @@ struct Ui {
                 self.sel_anchor = cc
             }
         }
-        // Drag-select: while the button is held over the focused field, extend the selection to the
-        // cursor — the anchor stays where the press dropped it.
-        if self.focus == id && self.down && self.was {
+        // Drag-select: extend the selection to the cursor while the button is held — but ONLY if the
+        // drag STARTED on this field (self.active == id), not merely if the field is focused. Gating on
+        // focus let a press on ANOTHER widget (e.g. the chat's scroll-fab) stray-extend this selection
+        // to wherever the cursor happened to be — a click far away selected a little text here.
+        if self.active == id && self.down && self.was {
             self.caret = cp_caret_from_x(self.buf, self.mx - tx + self.text_off, self.style.text_size)
         }
         var shown = value
@@ -1229,7 +1231,7 @@ struct Ui {
                 self.sel_anchor = cc
             }
         }
-        if self.focus == id && self.down && self.was {
+        if self.active == id && self.down && self.was {
             self.caret = self._ta_caret_at(self.buf, inner, tx, ty0, self.mx, self.my)
         }
         var shown = value
@@ -1478,7 +1480,7 @@ struct Ui {
                 self.sel_anchor = cc
             }
         }
-        if self.focus == id && self.down && self.was {   // drag: extend the selection to the cursor
+        if self.active == id && self.down && self.was {   // drag: extend the selection to the cursor
             self.caret = code_caret_at(self.buf, tx, ty0, cs, lh, self.mx, self.my)
         }
         if self.focus == id {
@@ -1529,7 +1531,7 @@ struct Ui {
                 self.sel_anchor = cc
             }
         }
-        if self.focus == id && self.down && self.was {   // drag: extend the selection to the cursor
+        if self.active == id && self.down && self.was {   // drag: extend the selection to the cursor
             self.caret = code_caret_at(self.buf, tsx, tsy, cs, lh, self.mx, self.my)
         }
         var shown = value
