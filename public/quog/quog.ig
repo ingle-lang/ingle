@@ -523,9 +523,9 @@ fn _lines(content: string) -> [string] {
 }
 
 
-// _diff_file prints a labelled unified diff of one file between its saved content (`old_id`, "" = a new
-// file) and its working content (`work_path`, "" = a deleted file).
-fn _diff_file(db: sql.Db, path: string, old_id: string, work_path: string) -> Result<int, string> {
+// _file_edits computes the line edit-script for one file between its saved content (`old_id`, "" = a
+// new file) and its working content (`work_path`, "" = a deleted file).
+fn _file_edits(db: sql.Db, old_id: string, work_path: string) -> Result<[diff.Edit], string> {
     var old_content = ""
     if old_id != "" {
         old_content = from_bytes(get_object(db, old_id)?)
@@ -534,33 +534,99 @@ fn _diff_file(db: sql.Db, path: string, old_id: string, work_path: string) -> Re
     if work_path != "" {
         new_content = read_file(work_path)
     }
-    let edits = diff.diff_lines(_lines(old_content), _lines(new_content))
+    return Ok(diff.diff_lines(_lines(old_content), _lines(new_content)))
+}
+
+
+// _diff_file prints a labelled unified diff of one file (the human `quog diff` output).
+fn _diff_file(db: sql.Db, path: string, old_id: string, work_path: string) -> Result<int, string> {
+    let edits = _file_edits(db, old_id, work_path)?
     println("=== {path}  (+{diff.added_count(edits)} -{diff.removed_count(edits)}) ===")
     print(diff.unified(edits))
     return Ok(0)
 }
 
 
-// cmd_diff shows the line changes since the last save — every added / modified / deleted file.
-fn cmd_diff() -> Result<int, string> {
+// _line_json renders one diff line as {op, text} ("keep" context / "add" / "remove").
+fn _line_json(op: string, text: string) -> json.Json {
+    return json.obj([
+        json.member("op", json.str(op)),
+        json.member("text", json.str(text))
+    ])
+}
+
+
+// _edits_json renders one file's edit-script as {path, added, removed, lines:[{op,text}]} — the
+// structured diff the Inglenook Diff panel colours.
+fn _edits_json(path: string, edits: [diff.Edit]) -> json.Json {
+    var lines: [json.Json] = []
+    for e in edits {
+        match e {
+            case Keep(t) {
+                lines.append(_line_json("keep", t))
+            }
+            case Add(t) {
+                lines.append(_line_json("add", t))
+            }
+            case Remove(t) {
+                lines.append(_line_json("remove", t))
+            }
+        }
+    }
+    return json.obj([
+        json.member("path", json.str(path)),
+        json.member("added", json.num(diff.added_count(edits))),
+        json.member("removed", json.num(diff.removed_count(edits))),
+        json.member("lines", json.arr(lines))
+    ])
+}
+
+
+// cmd_diff shows the line changes since the last save — every added / modified / deleted file. An
+// optional path argument (the first non-flag arg) limits it to one file; `--json` emits the structured
+// per-file diff Inglenook's Diff panel renders instead of the human unified text.
+fn cmd_diff(argv: [string], json_out: bool) -> Result<int, string> {
     let db = sql.open(DB_PATH)?
+    var only = ""
+    var ai = 1
+    loop {
+        if ai == argv.len() {
+            break
+        }
+        if !str.starts_with(argv[ai], "--") {
+            only = argv[ai]
+            break
+        }
+        ai = ai + 1
+    }
     let old_tree = tree_map(tip_tree_text(db)?)
     let new_tree = tree_map(scan(".", ""))
+    var files: [json.Json] = []
     var any = 0
     for path in new_tree.keys() {
-        let was = map_get(old_tree, path)
-        if was != map_get(new_tree, path) {
-            let _ = _diff_file(db, path, was, "./" + path)?
+        if (only == "" || path == only) && map_get(old_tree, path) != map_get(new_tree, path) {
+            let was = map_get(old_tree, path)
+            if json_out {
+                files.append(_edits_json(path, _file_edits(db, was, "./" + path)?))
+            } else {
+                let _ = _diff_file(db, path, was, "./" + path)?
+            }
             any = any + 1
         }
     }
     for path in old_tree.keys() {
-        if !new_tree.has(path) {
-            let _ = _diff_file(db, path, map_get(old_tree, path), "")?
+        if (only == "" || path == only) && !new_tree.has(path) {
+            if json_out {
+                files.append(_edits_json(path, _file_edits(db, map_get(old_tree, path), "")?))
+            } else {
+                let _ = _diff_file(db, path, map_get(old_tree, path), "")?
+            }
             any = any + 1
         }
     }
-    if any == 0 {
+    if json_out {
+        println(json.stringify(json.obj([json.member("files", json.arr(files))])))
+    } else if any == 0 {
         println("clean — nothing changed since the last save")
     }
     return Ok(0)
@@ -1935,7 +2001,7 @@ fn dispatch(argv: [string]) -> Result<int, string> {
         return cmd_status(jsonf)
     }
     if verb == "diff" {
-        return cmd_diff()
+        return cmd_diff(argv, jsonf)
     }
     if verb == "branch" {
         return cmd_branch(argv, jsonf)

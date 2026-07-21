@@ -16,6 +16,8 @@ $ quog diff
 +delta
 === TODO.md  (+1 -0) ===
 +notes
+$ quog diff --json
+{"files":[{"path":"README.md","added":2,"removed":1,"lines":[{"op":"keep","text":"alpha"},{"op":"remove","text":"beta"},{"op":"add","text":"BETA"},{"op":"keep","text":"gamma"},{"op":"add","text":"delta"}]},{"path":"TODO.md","added":1,"removed":0,"lines":[{"op":"add","text":"notes"}]}]}
 $ quog save "edit readme, add todo"
 saved bc003bd838 (3 files) — edit readme, add todo
 $ quog log

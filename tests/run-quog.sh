@@ -50,6 +50,7 @@ fi
 
     echo '$ quog status';                q status
     echo '$ quog diff';                  q diff
+    echo '$ quog diff --json';           q diff --json
     echo '$ quog save "edit readme, add todo"'; q save "edit readme, add todo"
     echo '$ quog log';                   q log
     echo '$ quog undo';                  q undo
