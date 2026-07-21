@@ -12,11 +12,51 @@
 <body style="margin:0">
 <div id="app" style="padding:1rem;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">loading Ingle → WASM…</div>
 <script>
+  // Delegated click bridge: queue each clicked widget's data-fl-id for the Ingle loop (web_next_click).
   globalThis.__ingleClicks = [];
   document.addEventListener('click', function (e) {
     var el = e.target && e.target.closest ? e.target.closest('[data-fl-id]') : null;
     if (el) { e.preventDefault(); globalThis.__ingleClicks.push(el.getAttribute('data-fl-id')); }
   });
+
+  // ingleMorph patches the live DOM toward `html` IN PLACE instead of replacing innerHTML — so an
+  // unchanged node keeps its identity (no flicker, and focus / selection / scroll survive a re-render).
+  // web_set_html calls this each frame; it is also what makes SSR hydration seamless (the client's first
+  // frame morphs onto the server-rendered #app, a no-op when their states match). Index-based reconcile —
+  // enough for Flare's stable frame structure, where a re-render changes text/attrs, not shape.
+  function morphNode(oldN, newN) {
+    if (oldN.nodeType === 3 && newN.nodeType === 3) {          // both text
+      if (oldN.nodeValue !== newN.nodeValue) { oldN.nodeValue = newN.nodeValue; }
+      return;
+    }
+    if (oldN.nodeType !== newN.nodeType || oldN.nodeName !== newN.nodeName) {
+      oldN.replaceWith(newN.cloneNode(true));
+      return;
+    }
+    if (oldN.nodeType === 1) {                                 // element: sync attrs, then children
+      for (var k = oldN.attributes.length - 1; k >= 0; k--) {
+        var an = oldN.attributes[k].name;
+        if (!newN.hasAttribute(an)) { oldN.removeAttribute(an); }
+      }
+      for (var m = 0; m < newN.attributes.length; m++) {
+        var a = newN.attributes[m];
+        if (oldN.getAttribute(a.name) !== a.value) { oldN.setAttribute(a.name, a.value); }
+      }
+      morphChildren(oldN, [].slice.call(newN.childNodes));
+    }
+  }
+  function morphChildren(parent, newKids) {
+    for (var j = 0; j < newKids.length; j++) {
+      if (parent.childNodes[j]) { morphNode(parent.childNodes[j], newKids[j]); }
+      else { parent.appendChild(newKids[j].cloneNode(true)); }
+    }
+    while (parent.childNodes.length > newKids.length) { parent.removeChild(parent.lastChild); }
+  }
+  globalThis.ingleMorph = function (root, html) {
+    var tpl = document.createElement('template');
+    tpl.innerHTML = html;
+    morphChildren(root, [].slice.call(tpl.content.childNodes));
+  };
 </script>
 {{{ SCRIPT }}}
 </body>

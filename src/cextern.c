@@ -976,7 +976,10 @@ static int w_sqlite_last_insert_rowid(const Value *a, Value *o) {
 #include <emscripten.h>
 EM_JS(void, ingle_dom_set_html, (const char *s), {
     var el = document.getElementById('app');
-    if (el) { el.innerHTML = UTF8ToString(s); }
+    if (!el) { return; }
+    var html = UTF8ToString(s);
+    if (globalThis.ingleMorph) { globalThis.ingleMorph(el, html); }   // in-place patch (no flicker; keeps focus)
+    else { el.innerHTML = html; }                                     // fallback if the shell has no morph
 });
 EM_JS(char *, ingle_dom_next_click, (void), {
     if (!globalThis.__ingleClicks || globalThis.__ingleClicks.length === 0) { return stringToNewUTF8(""); }
