@@ -98,6 +98,10 @@ for dir in "$ROOT"/tests/*/; do
     # dependency-free suite those imports don't resolve. Driven separately by tests/run-db.sh
     # (`make test-db`), whose header documents db as kept OUT of this suite.
     [ "$stage" = "db" ] && continue
+    # The web stage needs the -DEMBER_GFX_HEADLESS web build (Flare's gfx builtins + std/web's DOM
+    # bridge); under this plain compiler Flare won't resolve. It's driven separately by
+    # tests/run-web.sh (`make test-web`).
+    [ "$stage" = "web" ] && continue
     # The native stage is a DIFFERENTIAL suite (VM vs compiled binary), not a golden
     # comparison — handled in its own block below.
     [ "$stage" = "native" ] && continue
