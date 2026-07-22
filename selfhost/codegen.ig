@@ -286,6 +286,26 @@ fn split_targs(s: string) -> [string] {
 }
 
 
+// parse_leading_int reads the leading decimal digits of `s` as an int ("1w" -> 1, "10e" -> 10), or 0.
+fn parse_leading_int(s: string) -> int {
+    let bs = s.bytes()
+    var v = 0
+    var i = 0
+    loop {
+        if i >= bs.len() {
+            break
+        }
+        let c = int(bs[i])
+        if c < 48 || c > 57 {
+            break
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
+
+
 // head_name returns a type-arg token's head NAME — the bytes before its first "<" (`"Box<int>"` -> "Box",
 // `"int"` -> "int", `"[int]"` -> "[int]"). Used to look up a nested-generic token's base struct id.
 fn head_name(tok: string) -> string {
@@ -2108,6 +2128,9 @@ struct WitInfo {
     mrp_tpidx: [int]        // ...parallel: the struct-generics INDEX of an Option/Result payload type-param, else -1
     mre_tpidx: [int]        // ...parallel: the struct-generics INDEX of an ARRAY-return element type-param (`keys()->[K]`), else -1
     mrb_tpidx: [int]        // ...parallel: struct-generics INDEX of a BARE type-param return (`get()->T`), else -1 (OFI-218 P4)
+    hof_name: [string]      // HOF lambda-typing table: a fn with a fn-typed param (OFI-218 P3)
+    hof_fpi: [int]          // ...its fn-typed param index
+    hof_srcs: [string]      // ...the "{argidx}{w|e}"-per-lambda-param source key (reduce -> "1w_0e")
 }
 
 
@@ -2116,6 +2139,106 @@ struct WitInfo {
 struct MaskPlan {
     masked: [bool]
     keep: int
+}
+
+
+// hof_param_source finds which VALUE param of a HOF binds a fn-typed param's inner type-param `innerty`,
+// returning "{i}w" if value param i is typed exactly that type-param (whole) or "{i}e" if typed `[that]`
+// (element), else "-". So reduce's `f: fn(U,T)->U` maps U -> the init param ("1w") and T -> xs's element
+// ("0e"), letting a lambda `|acc, w|` be typed from the reduce call's args (OFI-218 P3 / OFI-206).
+fn hof_param_source(innerty: ps.Ty, params: [ps.Param], skip: int) -> string {
+    match innerty {
+        case TyName(q, tpname) {
+            if q == "" {
+                var i = 0
+                loop {
+                    if i >= params.len() {
+                        break
+                    }
+                    if i != skip && params[i].is_self == false && params[i].ty.len() > 0 {
+                        match params[i].ty[0] {
+                            case TyName(q2, n2) {
+                                if q2 == "" && n2 == tpname {
+                                    return "{i}w"
+                                }
+                            }
+                            case TyArray(elem) {
+                                match elem.value {
+                                    case TyName(q3, n3) {
+                                        if q3 == "" && n3 == tpname {
+                                            return "{i}e"
+                                        }
+                                    }
+                                    case _ {
+                                    }
+                                }
+                            }
+                            case _ {
+                            }
+                        }
+                    }
+                    i = i + 1
+                }
+            }
+        }
+        case _ {
+        }
+    }
+    return "-"
+}
+
+
+// hof_fn_param_index returns the index of a fn's fn-typed param (the lambda arg position), or -1 (OFI-218 P3).
+fn hof_fn_param_index(f: ps.FnDecl) -> int {
+    var pj = 0
+    loop {
+        if pj >= f.params.len() {
+            break
+        }
+        if f.params[pj].ty.len() > 0 {
+            match f.params[pj].ty[0] {
+                case TyFn(fparams, fret) {
+                    return pj
+                }
+                case _ {
+                }
+            }
+        }
+        pj = pj + 1
+    }
+    return 0 - 1
+}
+
+
+// hof_fn_srcs returns the "{argidx}{w|e}"-per-lambda-param source key for a fn with a fn-typed param
+// (reduce -> "1w_0e"), or "" if none — the lambda-param-typing map (OFI-218 P3 / OFI-206).
+fn hof_fn_srcs(f: ps.FnDecl) -> string {
+    let fp = hof_fn_param_index(f)
+    if fp < 0 {
+        return ""
+    }
+    match f.params[fp].ty[0] {
+        case TyFn(fparams, fret) {
+            var s = ""
+            var k = 0
+            loop {
+                if k >= fparams.len() {
+                    break
+                }
+                let src = hof_param_source(fparams[k], f.params, fp)
+                if k == 0 {
+                    s = src
+                } else {
+                    s = "{s}_{src}"
+                }
+                k = k + 1
+            }
+            return s
+        }
+        case _ {
+        }
+    }
+    return ""
 }
 
 
@@ -2402,6 +2525,9 @@ fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
     var sg_struct: [string] = []
     var sg_tparam: [string] = []
     var sg_bound: [string] = []
+    var hof_name: [string] = []
+    var hof_fpi: [int] = []
+    var hof_srcs: [string] = []
     var gret_fn: [string] = []
     var gret_arr: [bool] = []
     var gret_argidx: [int] = []
@@ -2550,6 +2676,15 @@ fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
                             }
                         }
                     }
+                    // HOF lambda-typing (OFI-218 P3): a fn with a fn-typed param (map/filter/reduce/sort)
+                    // records how each lambda param maps to a sibling arg (whole/element), so `reduce(words,
+                    // "", |acc, w| …)` types acc from init and w from words's element.
+                    let hs = hof_fn_srcs(f)
+                    if hs != "" {
+                        hof_name.append(f.name)
+                        hof_fpi.append(hof_fn_param_index(f))
+                        hof_srcs.append(hs)
+                    }
                 }
             }
             case _ {
@@ -2584,7 +2719,7 @@ fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
         ifm_ret_kind.append(0)
         if_names.append("Ord")
     }
-    return WitInfo { if_names: if_names, ifm_iface: ifm_iface, ifm_name: ifm_name, ifm_owning: ifm_owning, ifm_ret_str: ifm_ret_str, ifm_ret_kind: ifm_ret_kind, gb_fn: gb_fn, gb_tpname: gb_tpname, gb_bound: gb_bound, gb_argidx: gb_argidx, impl_struct: impl_struct, impl_iface: impl_iface, sg_struct: sg_struct, sg_tparam: sg_tparam, sg_bound: sg_bound, gret_fn: gret_fn, gret_arr: gret_arr, gret_argidx: gret_argidx, gret_bare: gret_bare, mpe_key: mpe_key, mpe_flags: mpe_flags, mrp_key: mrp_key, mrp_tpidx: mrp_tpidx, mre_tpidx: mre_tpidx, mrb_tpidx: mrb_tpidx }
+    return WitInfo { if_names: if_names, ifm_iface: ifm_iface, ifm_name: ifm_name, ifm_owning: ifm_owning, ifm_ret_str: ifm_ret_str, ifm_ret_kind: ifm_ret_kind, gb_fn: gb_fn, gb_tpname: gb_tpname, gb_bound: gb_bound, gb_argidx: gb_argidx, impl_struct: impl_struct, impl_iface: impl_iface, sg_struct: sg_struct, sg_tparam: sg_tparam, sg_bound: sg_bound, gret_fn: gret_fn, gret_arr: gret_arr, gret_argidx: gret_argidx, gret_bare: gret_bare, mpe_key: mpe_key, mpe_flags: mpe_flags, mrp_key: mrp_key, mrp_tpidx: mrp_tpidx, mre_tpidx: mre_tpidx, mrb_tpidx: mrb_tpidx, hof_name: hof_name, hof_fpi: hof_fpi, hof_srcs: hof_srcs }
 }
 
 
@@ -3885,6 +4020,9 @@ struct Chunk {
     mrp_tpidx: [int]            // ...parallel: struct-generics index of an Option/Result payload type-param, else -1
     mre_tpidx: [int]            // ...parallel: struct-generics index of an ARRAY-return element type-param, else -1
     mrb_tpidx: [int]            // ...parallel: struct-generics index of a BARE type-param return, else -1
+    hof_name: [string]          // HOF lambda-typing table (GLOBAL): a fn with a fn-typed param (OFI-218 P3)
+    hof_fpi: [int]
+    hof_srcs: [string]
     wit_tpname: [string]        // THIS fn's witness slots, in order: slot k's type-param name (k = 0..n_wit-1)
     wit_bound: [string]         // ...and slot k's bound interface name (the leading hidden params)
     wit_slot: [int]             // ...and the actual local slot each witness occupies (leading, before value params)
@@ -3905,6 +4043,7 @@ struct Chunk {
                                 //   the pre-pass selems; a param is absent -> keeps "k0" (OFI-218 P1)
     aei_name: [string]          // an array binding of INTERFACE elements (`shapes: [Shape]`) -> its element
     aei_iface: [string]         // ...interface name, so `for s in shapes` types the loop var s as that interface
+    pending_lambda_str: [string]  // HOF-context string params to attach to the NEXT lifted lambda (OFI-218 P3)
     cur_tp_names: [string]      // THIS fn's own type-param names (`K` for new_bag<K>) — for baking witnesses in
     cur_tp_types: [string]      // ...parallel: the concrete type each binds to in this compilation (`int`)
     cur_self_args: string       // when compiling a bounded-struct METHOD INSTANCE (`Map.get<string_int>`), the
@@ -5821,6 +5960,61 @@ struct Chunk {
     }
 
 
+    // compute_hof_lambda_str returns the lambda-param NAMES that are STRINGS for a HOF call `name(args…)`
+    // whose fn-typed arg is a lambda — resolved via the hof_srcs map (`reduce`'s "1w_0e": param 0 from
+    // arg 1 whole, param 1 from arg 0's element). Empty when not a HOF / the fn arg is not a lambda
+    // (a named-fn reducer). The lambda-param-typing that makes a string-accumulator reduce compile as
+    // string CONCAT, not int ADD (OFI-218 P3 / OFI-206).
+    fn compute_hof_lambda_str(self, name: string, args: [ps.Expr]) -> [string] {
+        var out: [string] = []
+        let hi = cg_index_of(self.hof_name, name)
+        if hi < 0 {
+            return out
+        }
+        let fpi = self.hof_fpi[hi]
+        if fpi < 0 || fpi >= args.len() {
+            return out
+        }
+        match args[fpi] {
+            case ELambda(lparams, body) {
+                let sk = self.hof_srcs[hi]        // bind before .split — the OFI-173 safe pattern (indexed-element method)
+                let srcs = sk.split("_")
+                var j = 0
+                loop {
+                    if j >= lparams.len() {
+                        break
+                    }
+                    if j < srcs.len() && self.hof_src_is_string(srcs[j], args) {
+                        out.append(lparams[j].name)
+                    }
+                    j = j + 1
+                }
+            }
+            case _ {
+            }
+        }
+        return out
+    }
+
+
+    // hof_src_is_string reports whether the arg named by a source key ("{argidx}w" = whole / "{argidx}e" =
+    // element) is a string — so the mapped lambda param types as a string (OFI-218 P3).
+    fn hof_src_is_string(self, src: string, args: [ps.Expr]) -> bool {
+        if src == "-" || src == "" {
+            return false
+        }
+        let bs = src.bytes()
+        let ai = parse_leading_int(src)
+        if ai < 0 || ai >= args.len() {
+            return false
+        }
+        if int(bs[bs.len() - 1]) == 101 {                 // 'e' — the arg's ELEMENT
+            return self.arg_mono_key(args[ai]) == "[string]"
+        }
+        return self.expr_is_string(args[ai])              // 'w' — the arg WHOLE
+    }
+
+
     fn arg_type_name(self, e: ps.Expr) -> string {
         match e {
             case EStructLit(ty, fields) {
@@ -6466,7 +6660,9 @@ struct Chunk {
                         }
                         self.expected_key = ""
                         if fig >= 0 {
+                            self.pending_lambda_str = self.compute_hof_lambda_str(mname, args)   // OFI-218 P3
                             self.gen_user_call(fig, args, line, true, pq)
+                            self.pending_lambda_str = []
                         } else {
                             cg_internal_error("unresolved generic module-qualified call `{mname}` (OFI-218 P1)")
                         }
@@ -9421,7 +9617,12 @@ struct Chunk {
                 self.emit(OP_MAKE_CLOSURE)
                 self.emit_idx(lidx)
                 self.emit_idx(cflags.len())
-                let synth = ps.FnDecl { name: "<lambda>", generics: [], params: params, ret: [], has_body: true, body: body, reqs: [], req_lines: [], enss: [], ens_lines: [] }
+                // Annotate the lambda's params known to be STRINGS from the HOF call context (`reduce(words,
+                // "", |acc, w| …)` -> acc, w are strings), so declare_param types them + infer_str_params
+                // skips them — the lambda body `acc + w` compiles as string CONCAT, not int ADD (OFI-218 P3).
+                let aparams = annotate_str_params(params, self.pending_lambda_str)
+                self.pending_lambda_str = []
+                let synth = ps.FnDecl { name: "<lambda>", generics: [], params: aparams, ret: [], has_body: true, body: body, reqs: [], req_lines: [], enss: [], ens_lines: [] }
                 self.lifted.append(LambdaSpec { decl: synth, caps: cflags })
             }
             case _ {
@@ -11254,6 +11455,35 @@ struct LambdaSpec {
 }
 
 
+// annotate_str_params returns `params` with each param named in `strs` given a `string` type annotation
+// (an untyped param only), so it types as a string local and infer_str_params skips it (OFI-218 P3).
+fn annotate_str_params(params: [ps.Param], strs: [string]) -> [ps.Param] {
+    var out: [ps.Param] = []
+    var i = 0
+    loop {
+        if i >= params.len() {
+            break
+        }
+        var nty: [ps.Ty] = []
+        if params[i].ty.len() == 0 && strs.len() > 0 && cg_index_of(strs, params[i].name) >= 0 {
+            nty.append(ps.string_ty())                   // annotate an untyped string param (via a parser-side ctor)
+        } else {
+            var k = 0
+            loop {
+                if k >= params[i].ty.len() {              // preserve any existing annotation (Ty is an enum -> array-read OK)
+                    break
+                }
+                nty.append(params[i].ty[k])
+                k = k + 1
+            }
+        }
+        out.append(ps.Param { qual: params[i].qual, is_self: params[i].is_self, name: params[i].name, ty: nty })
+        i = i + 1
+    }
+    return out
+}
+
+
 // lambda_captures returns the free-variable NAMES of a lambda, in traversal order (capture candidates).
 fn lambda_captures(params: [ps.Param], body: [ps.Stmt]) -> [string] {
     var seed: [string] = []
@@ -11741,7 +11971,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_module: [int], cur_module: in
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_module: clone_ints(fn_module), cur_module: cur_module, fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), fn_ret_ok: clone_ints(fn_rets.ok), fn_ret_err: clone_ints(fn_rets.err), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_elem_targs: [], slot_kind: skind, slot_iface: [], st_mod: clone_ints(fn_rets.st_mod), et_mod: clone_ints(fn_rets.et_mod), imp_from: clone_ints(fn_rets.imp_from), imp_alias: clone_strs(fn_rets.imp_alias), imp_to: clone_ints(fn_rets.imp_to), cur_ret_elem: 0 - 99, cur_return_span: 0, ret_box_struct: false, self_is_generic: false, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_felem2: clone_ints(structs.f_elem2), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), st_ftpidx: clone_ints(structs.f_tpidx), st_felem_payload: clone_ints(structs.f_elem_payload), st_felem_payload_tp: clone_strs(structs.f_elem_payload_tp), st_felem_tpidx: clone_ints(structs.f_elem_tpidx), st_ftargs: clone_strs(structs.f_targs), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), ev_ftpidx: clone_ints(enums.vf_tpidx), erecv_name: [], erecv_targs: [], gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), gc_line: clone_ints(globals.line), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), ifm_ret_str: clone_bools(wit.ifm_ret_str), ifm_ret_kind: clone_ints(wit.ifm_ret_kind), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), gret_bare: clone_bools(wit.gret_bare), mpe_key: clone_strs(wit.mpe_key), mpe_flags: clone_strs(wit.mpe_flags), mrp_key: clone_strs(wit.mrp_key), mrp_tpidx: clone_ints(wit.mrp_tpidx), mre_tpidx: clone_ints(wit.mre_tpidx), mrb_tpidx: clone_ints(wit.mrb_tpidx), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], gopt_params: [], cur_tp_names: [], cur_tp_types: [], cur_self_args: "", copy_tparams: [], at_base_generic: false, mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [], prcv_name: [], prcv_args: [], amelem_name: [], amelem_key: [], aei_name: [], aei_iface: [] }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_module: clone_ints(fn_module), cur_module: cur_module, fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), fn_ret_ok: clone_ints(fn_rets.ok), fn_ret_err: clone_ints(fn_rets.err), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_elem_targs: [], slot_kind: skind, slot_iface: [], st_mod: clone_ints(fn_rets.st_mod), et_mod: clone_ints(fn_rets.et_mod), imp_from: clone_ints(fn_rets.imp_from), imp_alias: clone_strs(fn_rets.imp_alias), imp_to: clone_ints(fn_rets.imp_to), cur_ret_elem: 0 - 99, cur_return_span: 0, ret_box_struct: false, self_is_generic: false, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_felem2: clone_ints(structs.f_elem2), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), st_ftpidx: clone_ints(structs.f_tpidx), st_felem_payload: clone_ints(structs.f_elem_payload), st_felem_payload_tp: clone_strs(structs.f_elem_payload_tp), st_felem_tpidx: clone_ints(structs.f_elem_tpidx), st_ftargs: clone_strs(structs.f_targs), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), ev_ftpidx: clone_ints(enums.vf_tpidx), erecv_name: [], erecv_targs: [], gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), gc_line: clone_ints(globals.line), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), ifm_ret_str: clone_bools(wit.ifm_ret_str), ifm_ret_kind: clone_ints(wit.ifm_ret_kind), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), gret_bare: clone_bools(wit.gret_bare), mpe_key: clone_strs(wit.mpe_key), mpe_flags: clone_strs(wit.mpe_flags), mrp_key: clone_strs(wit.mrp_key), mrp_tpidx: clone_ints(wit.mrp_tpidx), mre_tpidx: clone_ints(wit.mre_tpidx), mrb_tpidx: clone_ints(wit.mrb_tpidx), hof_name: clone_strs(wit.hof_name), hof_fpi: clone_ints(wit.hof_fpi), hof_srcs: clone_strs(wit.hof_srcs), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], gopt_params: [], cur_tp_names: [], cur_tp_types: [], cur_self_args: "", copy_tparams: [], at_base_generic: false, mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [], prcv_name: [], prcv_args: [], amelem_name: [], amelem_key: [], aei_name: [], aei_iface: [], pending_lambda_str: [] }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     ch.cur_ret_elem = ch.ret_elem_code(f.ret)
     // A method of a GENERIC struct (Box<T>, SlotMap<V>) uses the erased BOXED-struct convention: an all-scalar
