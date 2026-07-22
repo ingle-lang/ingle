@@ -1719,6 +1719,16 @@ fn build_struct_instances(decls: [ps.Decl], snames: [string]) -> [string] {
 // the bare type-param T to. The string need not equal stage-0's SemType int, only induce the SAME partition
 // (the key is never printed). Tier-1: LITERAL args (int/sized/float/bool/string); a non-literal falls to a
 // shared "k0" (variables/exprs — the Tier-1 corpus has none; general inference is Tier-2).
+// cg_internal_error mirrors stage-0's internal_error (exit 70): a codegen coverage hole must FAIL
+// LOUDLY, never silently emit nothing — the emit-nothing fallbacks produced silent wrong answers
+// (generic_nested `<obj>`) and stack-shape corruption crashes (OFI-218 Phase 1, the VM-backend
+// twin of Phase 0's cgen_c tripwires).
+fn cg_internal_error(what: string) {
+    println("inglec (selfhost codegen): internal error: {what}")
+    exit(70)
+}
+
+
 fn mono_arg_key(e: ps.Expr) -> string {
     match e {
         case EInt(v, kind) {
@@ -5423,6 +5433,8 @@ struct Chunk {
                         self.expected_key = ""
                         if fig >= 0 {
                             self.gen_user_call(fig, args, line, true, pq)
+                        } else {
+                            cg_internal_error("unresolved generic module-qualified call `{mname}` (OFI-218 P1)")
                         }
                         return
                     }
@@ -5434,6 +5446,8 @@ struct Chunk {
                     let fi = self.resolve_module_qualified(object, mname)
                     if fi >= 0 {
                         self.gen_user_call(fi, args, line, false, "")
+                    } else {
+                        cg_internal_error("unresolved module-qualified call `.{mname}` (OFI-218 P1)")
                     }
                     return
                 }
@@ -5459,6 +5473,8 @@ struct Chunk {
                         self.emit_idx(slot)
                         self.emit(OP_STR_PARSE_INT)
                         self.emit_recv_option_operands()
+                    } else {
+                        cg_internal_error("unknown string method `.{mname}` (OFI-218 P1)")
                     }
                     return
                 }
@@ -5477,15 +5493,19 @@ struct Chunk {
                     } else if mname == "remove_at" {
                         self.gen_expr(args[0], line)
                         self.emit(OP_ARRAY_REMOVE_AT)
+                    } else {
+                        cg_internal_error("unknown array method `.{mname}` (OFI-218 P1)")
                     }
                     return
                 }
                 let sid = self.slot_struct[slot]
                 if sid < 0 {
                     // A NON-STRUCT value receiver (an enum like Option, …). If `mname` is a free
-                    // function, this is a UFCS call `mname(object, args)` (Phase 3); else nothing.
+                    // function, this is a UFCS call `mname(object, args)` (Phase 3); else LOUD (OFI-218 P1).
                     if self.resolve_free_fn(mname) >= 0 || cg_index_of(self.gb_fn, mname) >= 0 {
                         self.gen_ufcs(object, mname, args, line)
+                    } else {
+                        cg_internal_error("method `.{mname}` on an untypeable receiver (OFI-218 P1)")
                     }
                     return
                 }
@@ -5554,6 +5574,8 @@ struct Chunk {
                         self.gen_expr(object, line)
                         self.emit(OP_STR_PARSE_INT)
                         self.emit_recv_option_operands()
+                    } else {
+                        cg_internal_error("unknown string method `.{mname}` on an expression receiver (OFI-218 P1)")
                     }
                 } else if tk == -2 {
                     self.cur_line = line
@@ -5583,6 +5605,8 @@ struct Chunk {
                     } else if mname == "remove_at" {
                         self.gen_expr(args[0], line)         // `.remove_at(i)` -> remove + return element i
                         self.emit(OP_ARRAY_REMOVE_AT)
+                    } else {
+                        cg_internal_error("unknown array method `.{mname}` on an expression receiver (OFI-218 P1)")
                     }
                 } else if tk >= 0 {
                     // A boxed-struct receiver. An OWNING TEMP (a call result, or an all-scalar struct field that
@@ -5628,6 +5652,8 @@ struct Chunk {
                     // or a chain `a.map(f).unwrap_or(0)`). UFCS if `mname` is a free function (Phase 3).
                     if self.resolve_free_fn(mname) >= 0 || cg_index_of(self.gb_fn, mname) >= 0 {
                         self.gen_ufcs(object, mname, args, line)
+                    } else {
+                        cg_internal_error("method `.{mname}` on an untypeable expression receiver (OFI-218 P1)")
                     }
                 }
             }
@@ -8209,10 +8235,14 @@ struct Chunk {
                         self.emit_idx(self.lit_struct_id(ty.value))
                         self.emit_idx(self.struct_field_count(sid))
                     }
+                } else {
+                    cg_internal_error("struct literal with an unresolved struct id (OFI-218 P1)")
                 }
             }
             case EGet(object, name) {
-                self.gen_field_access(object.value, name)
+                if self.gen_field_access(object.value, name) == false {
+                    cg_internal_error("field access `.{name}` on an untypeable object (OFI-218 P1)")
+                }
             }
             case EArray(elems, lines) {
                 var ai = 0
