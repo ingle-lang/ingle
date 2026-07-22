@@ -17,16 +17,19 @@
   // the input bridge below instead, and are left alone so focus and caret placement work normally.
   globalThis.__ingleClicks = [];
   globalThis.__ingleInputs = [];
-  function isField(el) { return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'); }
+  function isTextField(el) { return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'); }
+  function isControl(el) { return isTextField(el) || (el && el.tagName === 'SELECT'); }
   document.addEventListener('click', function (e) {
     var el = e.target && e.target.closest ? e.target.closest('[data-fl-id]') : null;
-    if (el && !isField(el)) { e.preventDefault(); globalThis.__ingleClicks.push(el.getAttribute('data-fl-id')); }
+    // A control (field / range / select) drives itself and reports via the input bridge — don't also fire
+    // a widget click for it. Everything else (buttons, nav, checkbox, tabs) is a click.
+    if (el && !isControl(el)) { e.preventDefault(); globalThis.__ingleClicks.push(el.getAttribute('data-fl-id')); }
   });
-  // Delegated input bridge: on every keystroke queue "id\tvalue" so the Ingle loop (web_next_input) can
-  // mirror the field's current text into Flare's state. The browser's <input> owns the caret/IME.
+  // Delegated input bridge: a field's keystroke, a range's drag, or a select's change queues "id\tvalue"
+  // so the Ingle loop (web_next_input) mirrors the control's value into Flare's state.
   document.addEventListener('input', function (e) {
     var el = e.target;
-    if (isField(el) && el.hasAttribute('data-fl-id')) {
+    if (isControl(el) && el.hasAttribute('data-fl-id')) {
       globalThis.__ingleInputs.push(el.getAttribute('data-fl-id') + '\t' + el.value);
     }
   });
@@ -57,14 +60,23 @@
       // Form fields: the browser owns .value while the user types. Only push a value the app CHANGED
       // (differs from the live field) — a no-op during typing (Flare already mirrored it), so the caret is
       // never disturbed; a real change (e.g. clearing after submit) applies and the caret is kept if focused.
-      if (isField(oldN)) {
-        var nv = newN.tagName === 'TEXTAREA' ? newN.textContent : (newN.getAttribute('value') || '');
+      if (isTextField(oldN)) {
+        var nv = oldN.tagName === 'TEXTAREA' ? newN.textContent : (newN.getAttribute('value') || '');
         if (oldN.value !== nv) {
           var focused = document.activeElement === oldN, at = focused ? oldN.selectionStart : 0;
           oldN.value = nv;
           if (focused) { try { oldN.setSelectionRange(at, at); } catch (e) {} }
         }
         return;   // do not morph a field's children (a textarea's text is its .value, handled above)
+      }
+      // <select>: reconcile the <option>s, then set the value from the newly-selected option (unless the
+      // user has it open/focused) so a programmatic change applies without fighting an active selection.
+      if (oldN.tagName === 'SELECT') {
+        morphChildren(oldN, [].slice.call(newN.childNodes));
+        var selOpt = newN.querySelector('option[selected]');
+        var sv = selOpt ? (selOpt.getAttribute('value') || '') : '';
+        if (document.activeElement !== oldN && oldN.value !== sv) { oldN.value = sv; }
+        return;
       }
       morphChildren(oldN, [].slice.call(newN.childNodes));
     }

@@ -10,6 +10,7 @@ fn main() -> int {
     var tab = 0
     var name = ""
     var vol = 50
+    var size = 1
     var notify = false
     loop {
         f.begin()
@@ -39,6 +40,10 @@ fn main() -> int {
             f.divider()
             f.label("Volume: {vol}")
             vol = f.slider("vol", vol, 0, 100)
+            f.divider()
+            f.label("Size:")
+            size = f.dropdown("size", ["Small", "Medium", "Large"], size)
+            f.label("Chosen size index: {size}")
         } else {
             f.label("A toggle:")
             notify = f.checkbox("notify", "Enable notifications", notify)

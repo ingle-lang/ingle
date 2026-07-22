@@ -439,6 +439,9 @@ struct Flare {
     rkind: [int]                    // ... widget kind ...
     rtext: [string]                 // ... text ...
     rid: [string]                   // ... id string ("" if non-interactive)
+    rextra: [string]                // ... extra data a widget needs to RENDER but not paint (e.g. a
+                                    // dropdown's options list, '\n'-joined) — set via _queue_x, "" otherwise.
+                                    // The desktop paint ignores it; the web html() walk reads it.
     // Last frame's solved rect for each interactive widget, keyed by id. Rebuilt every frame in
     // finish() and read in _btn() to hit-test this frame's clicks. A struct-valued Map is safe now
     // that unique-owner aggregates deep-clone through erased generics (OFI-062/063 closed 2026-06-18).
@@ -538,6 +541,7 @@ struct Flare {
         self.rkind = []
         self.rtext = []
         self.rid = []
+        self.rextra = []
         self._web_inputs = map.Map<string, string>{ buckets: [], count: 0 }   // web: injected after begin()
     }
 
@@ -1780,12 +1784,26 @@ struct Flare {
                 case None {}
             }
         }
+        match self._web_inputs.get(id) {         // web (WASM): the <select>'s chosen option index
+            case Some(s) { result = to_int(parse_float(s)) }
+            case None {}
+        }
         var lbl = ""
-        if selected >= 0 && selected < options.len() {
-            lbl = options[selected]
+        if result >= 0 && result < options.len() {
+            lbl = options[result]
+        }
+        // Encode the option list for the web <select> (desktop ignores rextra): "selected\nopt0\nopt1…".
+        var ext = "{result}"
+        var oi = 0
+        loop {
+            if oi == options.len() {
+                break
+            }
+            ext = ext + "\n" + options[oi]
+            oi = oi + 1
         }
         let node = self.lo.leaf_fixed(w, h, 0)
-        self._queue(node, _DROPDOWN, lbl, id)
+        self._queue_x(node, _DROPDOWN, lbl, id, ext)
         if open && have {                                            // OPEN → a popover list under the box
             let was_in_modal = self._in_modal                        // may already be inside a modal (settings)
             self._modal_was = true
@@ -4308,10 +4326,18 @@ struct Flare {
 
     // _queue records a widget to paint after the solve.
     fn _queue(mut self, node: int, kind: int, text: string, id: string) {
+        self._queue_x(node, kind, text, id, "")
+    }
+
+
+    // _queue_x is _queue with EXTRA render data (rextra) a widget needs on the web but not for the desktop
+    // paint — e.g. a dropdown's options. Keep all five arrays index-aligned.
+    fn _queue_x(mut self, node: int, kind: int, text: string, id: string, extra: string) {
         self.rnode.append(node)
         self.rkind.append(kind)
         self.rtext.append(text)
         self.rid.append(id)
+        self.rextra.append(extra)
     }
 
 
@@ -4488,6 +4514,26 @@ struct Flare {
             return "<button class=\"fl-tab\"" + ida + ">" + t + "</button>"
         } else if k == _TAB_ON {
             return "<button class=\"fl-tab fl-tab-on\"" + ida + ">" + t + "</button>"
+        } else if k == _DROPDOWN {
+            let parts = self.rextra[eof[i]].split("\n")   // "selected\nopt0\nopt1…"
+            var sel = 0
+            if parts.len() > 0 {
+                sel = to_int(parse_float(parts[0]))
+            }
+            var out = "<select class=\"fl-field fl-select\"" + ida + ">"
+            var oi = 1
+            loop {
+                if oi == parts.len() {
+                    break
+                }
+                var sa = ""
+                if oi - 1 == sel {
+                    sa = " selected"
+                }
+                out = out + "<option value=\"{oi - 1}\"" + sa + ">" + html.escape(parts[oi]) + "</option>"
+                oi = oi + 1
+            }
+            return out + "</select>"
         }
         return "<span data-fl-kind=\"{k}\">" + t + "</span>"
     }
@@ -4678,6 +4724,7 @@ struct Flare {
             ".fl-field\{font:inherit;padding:.4em .6em;border:1px solid var(--border);border-radius:var(--radius);" +
             "background:var(--panel);color:var(--ink);width:100%\}" +
             ".fl-field:focus\{outline:2px solid var(--accent);outline-offset:-1px\}" +
+            ".fl-select\{cursor:pointer\}" +
             ".fl-area\{min-height:4em;resize:vertical;font:inherit\}" +
             ".fl-slider\{width:100%;align-self:stretch;accent-color:var(--accent);cursor:pointer\}" +
             ".fl-tab\{font:inherit;padding:.35em .8em;border:1px solid transparent;border-radius:var(--radius);" +
@@ -5090,7 +5137,8 @@ fn new() -> Flare {
         _tnext: 0,
         _action: "",
         _click_id: "",
-        _web_inputs: map.Map<string, string>{ buckets: [], count: 0 }
+        _web_inputs: map.Map<string, string>{ buckets: [], count: 0 },
+        rextra: []
     }
 }
 
