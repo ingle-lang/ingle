@@ -358,6 +358,58 @@ bare-metal codegen rides — strengthening selfhost strengthens the endgame.
     (the `generic_hof_strings`/`stdlib_list*` missing-instance deltas). The key-format migration
     must change the PRE-PASS (`FnInstColl`) and gen-pass coherently — instance-key strings are
     internal, but both passes must produce identical keys and stage-0's instance SET and ORDER.
+- **2026-07-22 — P1b·4 VERIFIED CLASSIFICATION (ground truth from `cgdiff -v` + instance counts,
+  not agent claims).** The 9 remaining divergent files split into four independent sub-problems:
+  - **Cat A — missing instances (the `mono_arg_key` variable→`k0` collapse):** `generic_hof_strings`
+    (stage-0 emits **3** `map` bodies, self-hosted **2**), `generic_method`, `stdlib_list`,
+    `stdlib_list_sort`. CALL indices shift because the instance SET is smaller. Fix = key a variable
+    arg by its slot type (`[int]`/`[string]` via `ty_key_name`, both `_`-free so **flat-grammar and
+    `parse_inst_types`-safe at depth 1** — no parser change for the common case). **HIGH renumber
+    risk** (splitting an instance renumbers every downstream slot) → full-corpus cgdiff before commit.
+  - **Cat B-nested — extra INCREF from flattened receiver targs:** `generic_nested`,
+    `generic_nested_struct`, `generic_nested_enum`. `field_is_refcounted` (codegen.ig:3768) returns
+    TRUE for a bare `T` field (non-scalar/array/struct → conservatively refcounted); the depth-2
+    `.value` can't prove `T=int` because `ty_args_key(Box<Box<int>>)` flattened to `"Box"`. Fix =
+    a **nesting-preserving RECEIVER-targs grammar** — and crucially this is **DECOUPLED from
+    `parse_inst_types`** (receiver targs are split by our own `.split("_")` in `tparam_field_code`/
+    `enum_subject_tp_code`, never by the mono-instance parser), so it can use a richer nesting-aware
+    format freely. **Zero renumber risk** (INCREF is a runtime no-op).
+  - **Cat B-param — same INCREF, param receiver:** `generic_literal_vs_lt` `fn pick` (`b: Box<int>`;
+    `return b.value`). Params don't record type-args (only struct-literal locals do, via `mrecv`).
+    Fix = record param targs, resolve via the existing `tparam_field_code`. No renumber. **NOTE:**
+    this file ALSO has a second, unrelated divergence in `main` — an owning-temp struct argument
+    (`pick(a<b, Box<int>{…})`) staged in a different order: that is the **OFI-176 arg-masking family,
+    Phase 4** — so `generic_literal_vs_lt` will NOT reach byte-identity in Phase 1; its Cat-B part
+    closes here, the Cat-Phase-4 tail is deferred.
+  - **Cat C — render kind:** `generic_struct_pack` alone (`TO_STRING 0` vs `4`/`3`) — a generic
+    field's interpolation-hole width isn't carried onto the binding's `slot_kind`. Isolated, small.
+  - **Sequencing:** B-nested + B-param + C first (no renumber, cgdiff-isolable), then Cat A last
+    (the renumber-risk change) behind a full-corpus sweep. `map_array_value` (already byte-identical)
+    is the regression anchor.
+- **2026-07-22 — P1b·4a (B-param) + 4c (C) DONE; B-nested + A gated on the grammar-coupling analysis.**
+  - **P1b·4a (`3bbdd46`)** — a type-param field of a CONCRETE-scalar receiver skips the conservative
+    INCREF. Generic-struct params record their targs (`prcv_name`/`prcv_args`, read only by
+    `field_receiver_targs`, never method-retargeting); `is_str_local_read` consults `tparam_field_code`
+    and skips the INCREF only for a concrete scalar. **Soundness subtlety the gate caught:** an erased
+    type-param name (`T` in a still-generic `unwrap<T>`) is NOT scalar — it stays conservatively
+    refcounted (over-retain safe, under-retain = UAF); `is_scalar_typename` distinguishes a concrete
+    scalar keyword from a type-param name. First cut regressed `generic_fn_infer`; fixed. `pick`
+    byte-identical (the file's remaining `main` divergence is the OFI-176 arg-masking family, Phase 4).
+  - **P1b·4c (`3acd564`)** — a type-param field interpolation hole `{a.value}` (a: `Box<u8>`) renders
+    at the RESOLVED concrete width (u8=4) not the default 0. `resolved_tparam_field_name` factored as
+    the ONE shared receiver-resolution (so `tparam_field_code`/`tparam_field_kind` can't drift);
+    `scalar_kind_of_typename` is the string twin of `ty_scalar_kind`. `generic_struct_pack`
+    byte-identical + run-correct.
+  - **THE COUPLING CONSTRAINT (why B-nested + A wait for the synthesis map):** `ty_args_key` is FLAT
+    (`ty_key_name` collapses a nested generic to its head), and `mrecv_args` (its output) is used for
+    BOTH field resolution AND method retargeting — the latter builds `"{Struct}.{m}<{mrecv_args}>"`
+    keys looked up in `fn_inst_keys`, which `parse_inst_types` splits on plain `_`. So a
+    nesting-preserving grammar for B-nested cannot simply change `ty_args_key`/`mrecv_args` — it must
+    SEPARATE the receiver-field-resolution key (nesting-aware, depth-aware split) from the
+    mono-instance key (flat, `parse_inst_types`-compatible), or method retargeting breaks corpus-wide.
+    A mapping workflow (4 read-only strands + synthesis: grammar producers, pre-pass `FnInstColl`,
+    gen-pass lookups, stage-0 `build_mono_instances` ordering) is resolving the exact separation +
+    the Cat-A renumber-ordering guarantee before those edits land.
 
 - **2026-07-22 — campaign opened (OFI-218).** Phase 0 landed: the four `cgen_c.ig` silent stubs
   are hard `cgc_internal_error` exits (70); doc written; measurement below.
