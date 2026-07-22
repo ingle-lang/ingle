@@ -119,6 +119,24 @@ fn is_scalar_typename(name: string) -> bool {
 }
 
 
+// scalar_kind_of_typename maps a concrete scalar type NAME to its render/width kind — the string twin of
+// ty_scalar_kind's TyName body (i8=1 … u8=4 … f64=9 bool=10, int/i64=0). A non-scalar / type-param name
+// -> 0. Used to render a type-param field hole (`{a.value}`, a: Box<u8>) at the resolved concrete width.
+fn scalar_kind_of_typename(name: string) -> int {
+    if name == "i8" { return 1 }
+    if name == "i16" { return 2 }
+    if name == "i32" { return 3 }
+    if name == "u8" { return 4 }
+    if name == "u16" { return 5 }
+    if name == "u32" { return 6 }
+    if name == "u64" { return 7 }
+    if name == "f32" { return 8 }
+    if name == "float" || name == "f64" { return 9 }
+    if name == "bool" { return 10 }
+    return 0
+}
+
+
 // ty_is_array reports whether a type annotation is an array `[T]` (a move type, owned-droppable).
 fn ty_is_array(ty: ps.Ty) -> bool {
     match ty {
@@ -4610,7 +4628,12 @@ struct Chunk {
     // `.value` -> Pair's sid; a string arg -> -3; an array arg -> -2. Returns -99 when the field is
     // not a type-param field or the receiver's targs are unknown — the caller keeps its own verdict.
     // The nested-chain enabler for `b.value.value` (OFI-218 P1).
-    fn tparam_field_code(self, object: ps.Expr, osid: int, fname: string) -> int {
+    // resolved_tparam_field_name returns the CONCRETE type-name a type-param field of struct `osid` resolves
+    // to, via the receiver's recorded instance type-args (`b: Box<int>`, `.value` -> "int"; `Map<…,[int]>.v`
+    // -> "[int]"). "" when `fname` is not a type-param field or the receiver's targs are unavailable. The one
+    // resolution shared by tparam_field_code (refcounted-ness) and tparam_field_kind (render width) so they
+    // can never drift — OFI-218 P1.
+    fn resolved_tparam_field_name(self, object: ps.Expr, osid: int, fname: string) -> string {
         var i = 0
         loop {
             if i >= self.st_fowner.len() {
@@ -4618,33 +4641,54 @@ struct Chunk {
             }
             if self.st_fowner[i] == osid && self.st_fname[i] == fname {
                 if self.st_ftpname[i] == "" || self.st_ftpidx[i] < 0 {
-                    return 0 - 99
+                    return ""
                 }
                 let targs = self.field_receiver_targs(object)
                 if targs == "" {
-                    return 0 - 99
+                    return ""
                 }
                 let parts = targs.split("_")
                 let ti = self.st_ftpidx[i]
                 if ti >= parts.len() {
-                    return 0 - 99
+                    return ""
                 }
-                if parts[ti] == "string" {
-                    return 0 - 3
-                }
-                if self.key_array_elem_code(parts[ti]) != 0 - 99 {
-                    return 0 - 2
-                }
-                let sid = cg_index_of(self.st_names, parts[ti])
-                if sid >= 0 {
-                    return sid
-                }
-                if is_scalar_typename(parts[ti]) {
-                    return 0 - 1                    // a CONCRETE scalar (int/bool/…): field is not refcounted
-                }
-                return 0 - 99                      // an erased type-param name (`T`): keep the conservative verdict
+                return parts[ti]
             }
             i = i + 1
+        }
+        return ""
+    }
+
+
+    fn tparam_field_code(self, object: ps.Expr, osid: int, fname: string) -> int {
+        let name = self.resolved_tparam_field_name(object, osid, fname)
+        if name == "" {
+            return 0 - 99
+        }
+        if name == "string" {
+            return 0 - 3
+        }
+        if self.key_array_elem_code(name) != 0 - 99 {
+            return 0 - 2
+        }
+        let sid = cg_index_of(self.st_names, name)
+        if sid >= 0 {
+            return sid
+        }
+        if is_scalar_typename(name) {
+            return 0 - 1                    // a CONCRETE scalar (int/bool/…): field is not refcounted
+        }
+        return 0 - 99                      // an erased type-param name (`T`): keep the conservative verdict
+    }
+
+
+    // tparam_field_kind returns the render/width KIND of a type-param field whose receiver resolves it to a
+    // concrete scalar (`{a.value}`, a: Box<u8> -> 4), or -99 when it is not a type-param field, is
+    // unresolvable, or resolves to a non-scalar / erased type-param. The kind twin of tparam_field_code.
+    fn tparam_field_kind(self, object: ps.Expr, osid: int, fname: string) -> int {
+        let name = self.resolved_tparam_field_name(object, osid, fname)
+        if name != "" && is_scalar_typename(name) {
+            return scalar_kind_of_typename(name)
         }
         return 0 - 99
     }
@@ -7646,6 +7690,12 @@ struct Chunk {
                 // a scalar field hole `{p.x}` renders at the field's width (a float field -> f64=9).
                 let osid = self.expr_type_kind(object.value)
                 if osid >= 0 {
+                    // a type-param field (`{a.value}`, a: Box<u8>) renders at the RESOLVED concrete width (u8=4),
+                    // not the field's default 0 — resolve through the receiver's targs (OFI-218 P1).
+                    let tpk = self.tparam_field_kind(object.value, osid, name)
+                    if tpk != 0 - 99 {
+                        return tpk
+                    }
                     return self.field_kind(osid, name)
                 }
                 return 0
