@@ -47,6 +47,17 @@ fn build_fn_names(decls: [ps.Decl]) -> [string] {
 }
 
 
+// cgc_internal_error mirrors stage-0's internal_error (exit 70): an emitter coverage hole must FAIL
+// LOUDLY, never lower to a silent `INT_VAL(0)` placeholder that miscompiles (the OFI-173/202/206
+// silent-stub class, closed as OFI-218 Phase 0). The unreachable trailing return satisfies the
+// checker — Ingle has no diverging primitive yet (the OFI-187 `panic` gap, OFI-218 Phase 5).
+fn cgc_internal_error(what: string) -> string {
+    println("inglec (selfhost cgen_c): internal error: {what}")
+    exit(70)
+    return "INT_VAL(0)"
+}
+
+
 // ty_scalar_kind maps a numeric type annotation to its C width-kind (0 i64 … 9 f64), or -1 for any
 // non-scalar (string/struct/array/etc). M5a handles the i64 (`int`/`i64`) subset; sized/float follow.
 fn ty_scalar_kind(t: ps.Ty) -> int {
@@ -2287,10 +2298,10 @@ struct CgcGen {
                         return "em_enum_field(&g_em, {self.emit_expr(object.value)}, {fidx})"
                     }
                 }
-                return "INT_VAL(0)"
+                return cgc_internal_error("unsupported field access `.{name}` — boxed-generic element or qualified variant (OFI-173/OFI-202)")
             }
             case _ {
-                return "INT_VAL(0)"
+                return cgc_internal_error("unhandled expression kind (OFI-173; a lambda argument needs lambda lifting, OFI-206)")
             }
         }
     }
@@ -2408,7 +2419,7 @@ struct CgcGen {
     fn emit_struct_lit(mut self, ty: ps.Ty, fields: [ps.SLitField]) -> string {
         let sid = self.st.sid_of_ty(ty)
         if sid < 0 {
-            return "INT_VAL(0)"
+            return cgc_internal_error("struct literal with an unresolved struct id (OFI-173)")
         }
         let fc = self.st.field_count(sid)
         if self.st.is_value(sid) {
@@ -3161,7 +3172,7 @@ struct CgcGen {
             case _ {
             }
         }
-        return "INT_VAL(0)"
+        return cgc_internal_error("unsupported call form — unresolved callee (OFI-173)")
     }
 
 
