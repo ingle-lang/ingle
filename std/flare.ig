@@ -1709,6 +1709,10 @@ struct Flare {
                 case None {}
             }
         }
+        match self._web_inputs.get(id) {         // web (WASM): the range <input> reports its permille (0..1000)
+            case Some(p) { v = lo + to_int(parse_float(p)) * (hi - lo) / 1000 }
+            case None {}
+        }
         if v < lo {
             v = lo
         }
@@ -1886,6 +1890,9 @@ struct Flare {
                     }
                     case None {}
                 }
+            }
+            if self._fired(id) {                                       // web (WASM): click a chip → switch to it
+                res_active = i
             }
             self.animate_layout(scope0 + key + "/flip/" + labels[i])   // FLIP: slide to the new slot on any change
             var dx = 0
@@ -4475,6 +4482,12 @@ struct Flare {
             return "<input class=\"fl-field\"" + ida + " value=\"" + t + "\">"
         } else if k == _TAREA {
             return "<textarea class=\"fl-field fl-area\"" + ida + ">" + t + "</textarea>"
+        } else if k == _SLIDER {
+            return "<input type=\"range\" class=\"fl-slider\" min=\"0\" max=\"1000\" value=\"" + t + "\"" + ida + ">"
+        } else if k == _TAB {
+            return "<button class=\"fl-tab\"" + ida + ">" + t + "</button>"
+        } else if k == _TAB_ON {
+            return "<button class=\"fl-tab fl-tab-on\"" + ida + ">" + t + "</button>"
         }
         return "<span data-fl-kind=\"{k}\">" + t + "</span>"
     }
@@ -4666,6 +4679,10 @@ struct Flare {
             "background:var(--panel);color:var(--ink);width:100%\}" +
             ".fl-field:focus\{outline:2px solid var(--accent);outline-offset:-1px\}" +
             ".fl-area\{min-height:4em;resize:vertical;font:inherit\}" +
+            ".fl-slider\{width:100%;align-self:stretch;accent-color:var(--accent);cursor:pointer\}" +
+            ".fl-tab\{font:inherit;padding:.35em .8em;border:1px solid transparent;border-radius:var(--radius);" +
+            "background:transparent;color:var(--muted);cursor:pointer\}.fl-tab:hover\{background:var(--hover)\}" +
+            ".fl-tab-on\{background:var(--panel);color:var(--ink);border-color:var(--border)\}" +
             "hr\{width:100%;border:none;border-top:1px solid var(--border);margin:0\}" +
             "strong\{font-weight:700\}em\{font-style:italic\}"
         return root + rules
