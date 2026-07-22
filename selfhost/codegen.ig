@@ -2107,6 +2107,7 @@ struct WitInfo {
     mrp_key: [string]       // generic-struct method RETURN-payload table: "Struct.method" (one row per method)
     mrp_tpidx: [int]        // ...parallel: the struct-generics INDEX of an Option/Result payload type-param, else -1
     mre_tpidx: [int]        // ...parallel: the struct-generics INDEX of an ARRAY-return element type-param (`keys()->[K]`), else -1
+    mrb_tpidx: [int]        // ...parallel: struct-generics INDEX of a BARE type-param return (`get()->T`), else -1 (OFI-218 P4)
 }
 
 
@@ -2158,6 +2159,35 @@ fn return_payload_tpidx(f: ps.FnDecl, generics: [ps.GenericParam]) -> int {
 // return_elem_tpidx returns the struct-generics INDEX of a generic-struct method's ARRAY-return element
 // type-param (`fn keys() -> [K]` on `Map<K,V>` -> 0), so `var ks = self.si.keys()` types ks's element by the
 // field's concrete type-arg (string) rather than the erased K. -1 when the return is not `[TypeParam]`.
+// return_bare_tpidx returns the struct-generics INDEX of a method whose return is a BARE type-param
+// (`get(self) -> T` in Box<T> -> 0), or -1 — so `s.get()` on `s: Box<string>` resolves to string and a
+// string owning-temp result is masked when passed to a native call (OFI-218 P4 / OFI-176).
+fn return_bare_tpidx(f: ps.FnDecl, generics: [ps.GenericParam]) -> int {
+    if f.ret.len() == 0 {
+        return 0 - 1
+    }
+    match f.ret[0] {
+        case TyName(qual, tpname) {
+            if qual == "" {
+                var gi = 0
+                loop {
+                    if gi >= generics.len() {
+                        break
+                    }
+                    if generics[gi].name == tpname {
+                        return gi
+                    }
+                    gi = gi + 1
+                }
+            }
+        }
+        case _ {
+        }
+    }
+    return 0 - 1
+}
+
+
 fn return_elem_tpidx(f: ps.FnDecl, generics: [ps.GenericParam]) -> int {
     if f.ret.len() == 0 {
         return 0 - 1
@@ -2381,6 +2411,7 @@ fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
     var mrp_key: [string] = []
     var mrp_tpidx: [int] = []
     var mre_tpidx: [int] = []
+    var mrb_tpidx: [int] = []
     var i = 0
     loop {
         if i >= decls.len() {
@@ -2466,6 +2497,7 @@ fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
                         mrp_key.append("{name}.{methods[mmi].name}")
                         mrp_tpidx.append(return_payload_tpidx(methods[mmi], generics))
                         mre_tpidx.append(return_elem_tpidx(methods[mmi], generics))
+                        mrb_tpidx.append(return_bare_tpidx(methods[mmi], generics))
                         mmi = mmi + 1
                     }
                 }
@@ -2552,7 +2584,7 @@ fn build_wit_info(decls: [ps.Decl]) -> WitInfo {
         ifm_ret_kind.append(0)
         if_names.append("Ord")
     }
-    return WitInfo { if_names: if_names, ifm_iface: ifm_iface, ifm_name: ifm_name, ifm_owning: ifm_owning, ifm_ret_str: ifm_ret_str, ifm_ret_kind: ifm_ret_kind, gb_fn: gb_fn, gb_tpname: gb_tpname, gb_bound: gb_bound, gb_argidx: gb_argidx, impl_struct: impl_struct, impl_iface: impl_iface, sg_struct: sg_struct, sg_tparam: sg_tparam, sg_bound: sg_bound, gret_fn: gret_fn, gret_arr: gret_arr, gret_argidx: gret_argidx, gret_bare: gret_bare, mpe_key: mpe_key, mpe_flags: mpe_flags, mrp_key: mrp_key, mrp_tpidx: mrp_tpidx, mre_tpidx: mre_tpidx }
+    return WitInfo { if_names: if_names, ifm_iface: ifm_iface, ifm_name: ifm_name, ifm_owning: ifm_owning, ifm_ret_str: ifm_ret_str, ifm_ret_kind: ifm_ret_kind, gb_fn: gb_fn, gb_tpname: gb_tpname, gb_bound: gb_bound, gb_argidx: gb_argidx, impl_struct: impl_struct, impl_iface: impl_iface, sg_struct: sg_struct, sg_tparam: sg_tparam, sg_bound: sg_bound, gret_fn: gret_fn, gret_arr: gret_arr, gret_argidx: gret_argidx, gret_bare: gret_bare, mpe_key: mpe_key, mpe_flags: mpe_flags, mrp_key: mrp_key, mrp_tpidx: mrp_tpidx, mre_tpidx: mre_tpidx, mrb_tpidx: mrb_tpidx }
 }
 
 
@@ -3852,6 +3884,7 @@ struct Chunk {
     mrp_key: [string]           // generic-struct method return-payload table (GLOBAL): "Struct.method"
     mrp_tpidx: [int]            // ...parallel: struct-generics index of an Option/Result payload type-param, else -1
     mre_tpidx: [int]            // ...parallel: struct-generics index of an ARRAY-return element type-param, else -1
+    mrb_tpidx: [int]            // ...parallel: struct-generics index of a BARE type-param return, else -1
     wit_tpname: [string]        // THIS fn's witness slots, in order: slot k's type-param name (k = 0..n_wit-1)
     wit_bound: [string]         // ...and slot k's bound interface name (the leading hidden params)
     wit_slot: [int]             // ...and the actual local slot each witness occupies (leading, before value params)
@@ -4599,6 +4632,45 @@ struct Chunk {
     // Encoded as a single int (NOT a value-struct return — that mis-compiles on the native backend from a
     // method, OFI-162): -1 = none/scalar, -2 = array, -3 = string, >= 0 = a struct id.
     // Cross-module / method-call returns aren't resolved here (idx == -1 -> -1/scalar, the safe default).
+    // method_bare_ret_kind resolves a `recv.method()` call whose method returns a BARE type-param through
+    // the receiver's concrete targs (`s.get()` on s: Box<string> -> string, -3), so a refcounted result is
+    // masked when passed to a native call. -99 when not a bare-T method return (OFI-218 P4 / OFI-176).
+    fn method_bare_ret_kind(self, callee: ps.Expr) -> int {
+        match callee {
+            case EGet(recv, mname) {
+                let rsid = self.expr_type_kind(recv.value)
+                if rsid >= 0 {
+                    let mk = cg_index_of(self.mrp_key, "{self.st_names[rsid]}.{mname}")
+                    if mk >= 0 && self.mrb_tpidx[mk] >= 0 {
+                        let targs = self.field_receiver_targs(recv.value)
+                        if targs != "" {
+                            let parts = split_targs(targs)
+                            let ti = self.mrb_tpidx[mk]
+                            if ti < parts.len() {
+                                let name = parts[ti]
+                                if name == "string" {
+                                    return 0 - 3
+                                }
+                                if self.key_array_elem_code(name) != 0 - 99 {
+                                    return 0 - 2
+                                }
+                                let sid = cg_index_of(self.st_names, head_name(name))
+                                if sid >= 0 {
+                                    return sid
+                                }
+                                return 0 - 1
+                            }
+                        }
+                    }
+                }
+            }
+            case _ {
+            }
+        }
+        return 0 - 99
+    }
+
+
     fn expr_ret_kind(self, e: ps.Expr) -> int {
         match e {
             case ECall(callee, args) {
@@ -4622,6 +4694,10 @@ struct Chunk {
                     }
                     case _ {
                     }
+                }
+                let bk = self.method_bare_ret_kind(callee.value)   // `s.get()` -> T resolved via receiver (OFI-218 P4)
+                if bk != 0 - 99 {
+                    return bk
                 }
                 let idx = self.resolve_call_fn_index(callee.value)
                 if idx >= 0 {
@@ -7252,16 +7328,29 @@ struct Chunk {
     // or a call returning an array) passed to a BORROW param — the caller retains the temp and must drop it
     // after the call. Strings/enums go to OWNED params (adopted, no drop); structs aren't masked here (the
     // corpus has no struct-temp user-call arg — they'd extend this when one appears).
+    // user_arg_masked reports whether an owning-temp arg to a normal (non-generic) call must be kept +
+    // PICK'd + DROP_UNDER'd — the drop_mask discipline (stage-0 check.c:3185-3199): an owning temp of a
+    // NON-refcounted move-type (array OR BOXED struct) passed to a borrow param, since the callee borrows
+    // it and the caller drops it after. A refcounted arg (string/enum) is INCREF'd, not masked; an
+    // all-scalar (multi-slot) struct is passed as field slots, not masked (OFI-218 P4 / OFI-176).
     fn user_arg_masked(self, e: ps.Expr) -> bool {
         match e {
             case EArray(elems, lines) {
                 return true
             }
+            case EStructLit(ty, fields) {
+                let sid = self.type_struct_id(ty.value)
+                return sid >= 0 && self.struct_all_scalar(sid) == false   // a BOXED struct-literal owning temp
+            }
             case ECall(callee, args) {
                 if self.is_enum_ctor(e) {
                     return false
                 }
-                return self.expr_ret_kind(e) == 0 - 2   // a call returning an array
+                let rk = self.expr_ret_kind(e)
+                if rk == 0 - 2 {
+                    return true                       // a call returning an array
+                }
+                return rk >= 0 && self.struct_all_scalar(rk) == false   // a call returning a BOXED struct
             }
             case _ {
                 return false
@@ -11652,7 +11741,7 @@ fn compile_fn(f: ps.FnDecl, fn_names: [string], fn_module: [int], cur_module: in
         el.append(f.ens_lines[ek])
         ek = ek + 1
     }
-    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_module: clone_ints(fn_module), cur_module: cur_module, fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), fn_ret_ok: clone_ints(fn_rets.ok), fn_ret_err: clone_ints(fn_rets.err), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_elem_targs: [], slot_kind: skind, slot_iface: [], st_mod: clone_ints(fn_rets.st_mod), et_mod: clone_ints(fn_rets.et_mod), imp_from: clone_ints(fn_rets.imp_from), imp_alias: clone_strs(fn_rets.imp_alias), imp_to: clone_ints(fn_rets.imp_to), cur_ret_elem: 0 - 99, cur_return_span: 0, ret_box_struct: false, self_is_generic: false, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_felem2: clone_ints(structs.f_elem2), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), st_ftpidx: clone_ints(structs.f_tpidx), st_felem_payload: clone_ints(structs.f_elem_payload), st_felem_payload_tp: clone_strs(structs.f_elem_payload_tp), st_felem_tpidx: clone_ints(structs.f_elem_tpidx), st_ftargs: clone_strs(structs.f_targs), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), ev_ftpidx: clone_ints(enums.vf_tpidx), erecv_name: [], erecv_targs: [], gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), gc_line: clone_ints(globals.line), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), ifm_ret_str: clone_bools(wit.ifm_ret_str), ifm_ret_kind: clone_ints(wit.ifm_ret_kind), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), gret_bare: clone_bools(wit.gret_bare), mpe_key: clone_strs(wit.mpe_key), mpe_flags: clone_strs(wit.mpe_flags), mrp_key: clone_strs(wit.mrp_key), mrp_tpidx: clone_ints(wit.mrp_tpidx), mre_tpidx: clone_ints(wit.mre_tpidx), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], gopt_params: [], cur_tp_names: [], cur_tp_types: [], cur_self_args: "", copy_tparams: [], at_base_generic: false, mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [], prcv_name: [], prcv_args: [], amelem_name: [], amelem_key: [], aei_name: [], aei_iface: [] }
+    var ch = Chunk { code: code, lines: lines, const_is_float: cif, const_int: ci, const_float: cf, strings: strs, locals: locals, local_str: lstr, local_drop: ldr, cur_line: 0, fn_names: clone_strs(fn_names), fn_module: clone_ints(fn_module), cur_module: cur_module, fn_ret_str: clone_bools(fn_rets.str), fn_ret_arr: clone_bools(fn_rets.arr), fn_ret_elem: clone_ints(fn_rets.elem), fn_ret_sid: clone_ints(fn_rets.sid), fn_ret_enum: clone_bools(fn_rets.enm), fn_ret_kind: clone_ints(fn_rets.kind), fn_ret_ok: clone_ints(fn_rets.ok), fn_ret_err: clone_ints(fn_rets.err), ext_names: clone_strs(fn_rets.ext_names), ext_kinds: clone_ints(fn_rets.ext_kinds), ext_pquals: clone_strs(fn_rets.ext_pquals), lambda_base: lambda_base, lifted: [], generic_fns: clone_strs(generic_fns), generic_pquals: clone_strs(generic_pquals), fn_inst_keys: clone_strs(fn_inst_keys), inst_base: inst_base, cont_targets: conts, loop_bases: loopb, break_jumps: brkj, break_bases: brkb, slot_struct: sslot, slot_boxed: sbox, slot_array: sarr, slot_elem: selem, slot_elem_targs: [], slot_kind: skind, slot_iface: [], st_mod: clone_ints(fn_rets.st_mod), et_mod: clone_ints(fn_rets.et_mod), imp_from: clone_ints(fn_rets.imp_from), imp_alias: clone_strs(fn_rets.imp_alias), imp_to: clone_ints(fn_rets.imp_to), cur_ret_elem: 0 - 99, cur_return_span: 0, ret_box_struct: false, self_is_generic: false, cur_fn_name: f.name, fn_ens_e: ee, fn_ens_l: el, ret_kind: ret_k, st_names: clone_strs(structs.names), st_fowner: clone_ints(structs.f_owner), st_fname: clone_strs(structs.f_name), st_fscalar: clone_bools(structs.f_scalar), st_fstring: clone_bools(structs.f_string), st_farray: clone_bools(structs.f_array), st_fstruct: clone_ints(structs.f_struct), st_felem: clone_ints(structs.f_elem), st_felem2: clone_ints(structs.f_elem2), st_farrkind: clone_ints(structs.f_arrkind), st_fenum: clone_bools(structs.f_enum), st_fkind: clone_ints(structs.f_kind), st_ftpname: clone_strs(structs.f_tpname), st_ftpidx: clone_ints(structs.f_tpidx), st_felem_payload: clone_ints(structs.f_elem_payload), st_felem_payload_tp: clone_strs(structs.f_elem_payload_tp), st_felem_tpidx: clone_ints(structs.f_elem_tpidx), st_ftargs: clone_strs(structs.f_targs), inst_keys: clone_strs(instances), et_names: clone_strs(enums.e_names), ev_owner: clone_ints(enums.v_owner), ev_name: clone_strs(enums.v_name), ev_tag: clone_ints(enums.v_tag), ev_arity: clone_ints(enums.v_arity), ev_fvar: clone_ints(enums.vf_var), ev_fstring: clone_bools(enums.vf_string), ev_fstruct: clone_ints(enums.vf_struct), ev_farray: clone_bools(enums.vf_array), ev_felem: clone_ints(enums.vf_elem), ev_fenum: clone_bools(enums.vf_enum), ev_fkind: clone_ints(enums.vf_kind), ev_ftpidx: clone_ints(enums.vf_tpidx), erecv_name: [], erecv_targs: [], gc_names: clone_strs(globals.names), gc_kind: clone_ints(globals.kind), gc_ival: clone_ints(globals.ival), gc_sval: clone_strs(globals.sval), gc_bval: clone_bools(globals.bval), gc_fval: clone_floats(globals.fval), gc_line: clone_ints(globals.line), expected_key: "", if_names: clone_strs(wit.if_names), ifm_iface: clone_ints(wit.ifm_iface), ifm_name: clone_strs(wit.ifm_name), ifm_owning: clone_bools(wit.ifm_owning), ifm_ret_str: clone_bools(wit.ifm_ret_str), ifm_ret_kind: clone_ints(wit.ifm_ret_kind), gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), impl_struct: clone_strs(wit.impl_struct), impl_iface: clone_strs(wit.impl_iface), sg_struct: clone_strs(wit.sg_struct), sg_tparam: clone_strs(wit.sg_tparam), sg_bound: clone_strs(wit.sg_bound), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), gret_bare: clone_bools(wit.gret_bare), mpe_key: clone_strs(wit.mpe_key), mpe_flags: clone_strs(wit.mpe_flags), mrp_key: clone_strs(wit.mrp_key), mrp_tpidx: clone_ints(wit.mrp_tpidx), mre_tpidx: clone_ints(wit.mre_tpidx), mrb_tpidx: clone_ints(wit.mrb_tpidx), wit_tpname: [], wit_bound: [], wit_slot: [], tp_pslot: [], tp_pname: [], gopt_params: [], cur_tp_names: [], cur_tp_types: [], cur_self_args: "", copy_tparams: [], at_base_generic: false, mwit_tpname: [], mwit_bound: [], mwit_field: [], mrecv_name: [], mrecv_args: [], prcv_name: [], prcv_args: [], amelem_name: [], amelem_key: [], aei_name: [], aei_iface: [] }
     ch.cur_return_span = ch.return_struct_span(f.ret)
     ch.cur_ret_elem = ch.ret_elem_code(f.ret)
     // A method of a GENERIC struct (Box<T>, SlotMap<V>) uses the erased BOXED-struct convention: an all-scalar
