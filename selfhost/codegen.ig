@@ -2698,6 +2698,9 @@ struct FnInstColl {
     gb_tpname: [string]
     gb_bound: [string]
     gb_argidx: [int]
+    gret_fn: [string]           // generic-return tables (from WitInfo): a fn returning bare `T`/`[T]`, so a
+    gret_arr: [bool]            // ...`let left = _sort_range(xs)` propagates xs's element to left ([int]) — OFI-218 P1
+    gret_argidx: [int]
     snames: [string]            // let-binding scope: name -> concrete type (for keying identifier args)
     stypes: [string]
     styargs: [string]           // ...parallel: the binding's type-ARGUMENTS key (`b: Bag<int>` -> "int"), for
@@ -2716,6 +2719,45 @@ struct FnInstColl {
             self.keys.append(k)
             self.bases.append(name)
         }
+    }
+
+
+    // call_ret_elem returns the ELEMENT key a `let x = f(args)` binding takes when `f` is a generic fn
+    // returning `[T]` whose T is bound by a determining ARRAY arg (`let left = _sort_range(xs)` -> xs's
+    // element "int"), so a further `_merge(left, …)` re-keys distinctly per instance. "" otherwise. The
+    // pre-pass mirror of the gen-pass gret slot-element propagation (OFI-218 P1).
+    fn call_ret_elem(self, value: ps.Expr) -> string {
+        match value {
+            case ECall(callee, args) {
+                var fname = ""
+                match callee.value {
+                    case EIdent(n) {
+                        fname = n
+                    }
+                    case EGet(mod, mname) {
+                        fname = mname                      // a module-qualified `list.sort(..)` (alias inert)
+                    }
+                    case _ {
+                    }
+                }
+                let gi = cg_index_of(self.gret_fn, fname)
+                if gi >= 0 && self.gret_arr[gi] {
+                    let ai = self.gret_argidx[gi]
+                    if ai >= 0 && ai < args.len() {
+                        match args[ai] {
+                            case EIdent(nm) {
+                                return scope_type(self.snames, self.selems, nm)
+                            }
+                            case _ {
+                            }
+                        }
+                    }
+                }
+            }
+            case _ {
+            }
+        }
+        return ""
     }
 
 
@@ -3032,6 +3074,9 @@ struct FnInstColl {
                 } else {
                     bse = array_elem_mono_key_lit(value.value)
                 }
+                if bse == "" {
+                    bse = self.call_ret_elem(value.value)   // `let left = _sort_range(xs)` -> xs's element (OFI-218 P1)
+                }
                 self.snames.append(n)
                 self.stypes.append(bt)
                 self.styargs.append(bta)
@@ -3177,7 +3222,7 @@ struct FnInstColl {
 // is byte-identical to its base, so the instance KEY only labels the numbering slot — the crux is producing
 // stage-0's ordered instance SET. Instance i is numbered fn_names.len() + total_lambdas + i.
 fn build_fn_instances(decls: [ps.Decl], generic_fns: [string], wit: WitInfo) -> FnInsts {
-    var c = FnInstColl { keys: [], bases: [], generic_fns: generic_fns, gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), snames: [], stypes: [], styargs: [], selems: [], cur_self_struct: "", cur_self_args: "", decls: decls }
+    var c = FnInstColl { keys: [], bases: [], generic_fns: generic_fns, gb_fn: clone_strs(wit.gb_fn), gb_tpname: clone_strs(wit.gb_tpname), gb_bound: clone_strs(wit.gb_bound), gb_argidx: clone_ints(wit.gb_argidx), gret_fn: clone_strs(wit.gret_fn), gret_arr: clone_bools(wit.gret_arr), gret_argidx: clone_ints(wit.gret_argidx), snames: [], stypes: [], styargs: [], selems: [], cur_self_struct: "", cur_self_args: "", decls: decls }
     // SEED: the roots are the NON-generic fns/methods — the only bodies always emitted, so the only ones stage-0
     // walks unsubstituted. A generic BASE body is walked only when reached AS an instance (in the closure).
     var i = 0
@@ -5522,6 +5567,48 @@ struct Chunk {
     // by element ("[int]") via the amelem table (populated at its SLet with the SAME inference the pre-pass
     // selems uses); a param / erased-element array is absent -> "k0". Literals keep the mono_arg_key scheme.
     // MUST agree byte-for-byte with the pre-pass twin (OFI-218 P1).
+    // call_ret_amelem is the gen-pass twin of the pre-pass call_ret_elem: the ELEMENT a `let x = f(args)`
+    // binding takes when `f` returns `[T]` bound by a determining ARRAY arg — read from that arg's amelem
+    // entry (the seeded concrete element), NOT slot_elem (which holds the erased-param code). Both passes
+    // read their arg's element from the parallel amelem/selems maps, so they agree (OFI-218 P1).
+    fn call_ret_amelem(self, value: ps.Expr) -> string {
+        match value {
+            case ECall(callee, args) {
+                var fname = ""
+                match callee.value {
+                    case EIdent(n) {
+                        fname = n
+                    }
+                    case EGet(mod, mname) {
+                        fname = mname
+                    }
+                    case _ {
+                    }
+                }
+                let gi = cg_index_of(self.gret_fn, fname)
+                if gi >= 0 && self.gret_arr[gi] {
+                    let ai = self.gret_argidx[gi]
+                    if ai >= 0 && ai < args.len() {
+                        match args[ai] {
+                            case EIdent(nm) {
+                                let x = cg_index_of(self.amelem_name, nm)
+                                if x >= 0 {
+                                    return self.amelem_key[x]
+                                }
+                            }
+                            case _ {
+                            }
+                        }
+                    }
+                }
+            }
+            case _ {
+            }
+        }
+        return ""
+    }
+
+
     fn arg_mono_key(self, e: ps.Expr) -> string {
         match e {
             case EIdent(name) {
@@ -9289,6 +9376,9 @@ struct Chunk {
                     ame = array_elem_mono_key_ty(ty[0])
                 } else {
                     ame = array_elem_mono_key_lit(value.value)
+                }
+                if ame == "" {
+                    ame = self.call_ret_amelem(value.value)   // `let left = _sort_range(xs)` -> xs's element (OFI-218 P1)
                 }
                 if ame != "" {
                     self.amelem_name.append(name)
