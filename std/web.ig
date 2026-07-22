@@ -22,7 +22,16 @@ extern "c" {
     fn web_set_html(html: string) -> i64
     fn web_next_click() -> string
     fn web_next_input() -> string
+    fn web_fetch(url: string) -> string
     fn web_sleep(ms: i64) -> i64
+}
+
+
+// fetch does a blocking HTTP GET in the browser and returns the response body, or a small
+// {"_fetch_error":"…"} JSON on failure. It blocks the loop for the round-trip (emscripten ASYNCIFY), so
+// call it ON DEMAND — a button click — not every frame. Parse the result with std/json.
+fn fetch(url: string) -> string {
+    return web_fetch(url)
 }
 
 

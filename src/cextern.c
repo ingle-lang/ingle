@@ -989,10 +989,21 @@ EM_JS(char *, ingle_dom_next_input, (void), {
     if (!globalThis.__ingleInputs || globalThis.__ingleInputs.length === 0) { return stringToNewUTF8(""); }
     return stringToNewUTF8(globalThis.__ingleInputs.shift());   // "id\tvalue" of the next DOM input event
 });
+// EM_ASYNC_JS suspends the wasm (via ASYNCIFY) while the browser awaits the fetch, then resumes with the
+// body — so from Ingle's side web_fetch(url) is an ordinary blocking call that returns the response text.
+EM_ASYNC_JS(char *, ingle_fetch, (const char *url), {
+    try {
+        const res = await fetch(UTF8ToString(url), { headers: { 'Accept': 'application/json' } });
+        return stringToNewUTF8(await res.text());
+    } catch (e) {
+        return stringToNewUTF8('{"_fetch_error":"' + ((e && e.message) ? e.message : 'fetch failed') + '"}');
+    }
+});
 #else
 static void  ingle_dom_set_html(const char *s) { (void)s; }
 static char *ingle_dom_next_click(void)        { return strdup(""); }
 static char *ingle_dom_next_input(void)        { return strdup(""); }
+static char *ingle_fetch(const char *url)      { (void)url; return strdup("{\"_fetch_error\":\"no network off-browser\"}"); }
 #endif
 
 // web_set_html(html) -> 0. Replace the page's #app content with the freshly rendered frame.
@@ -1015,6 +1026,14 @@ static int w_web_next_click(const Value *a, Value *o) {
 static int w_web_next_input(const Value *a, Value *o) {
     (void)a;
     o[0] = PTR_VAL(ingle_dom_next_input());
+    return 1;
+}
+
+// web_fetch(url) -> string. Await an HTTP GET in the browser and return the response body (or a small
+// {"_fetch_error":"…"} JSON on failure). Blocks the Ingle loop for the round-trip via ASYNCIFY — so call
+// it on demand (e.g. a button click), not every frame.
+static int w_web_fetch(const Value *a, Value *o) {
+    o[0] = PTR_VAL(ingle_fetch((const char *)AS_CSTRING(a[0])));
     return 1;
 }
 
@@ -1087,6 +1106,7 @@ static const CExternSig g_sigs[] = {
     { "web_set_html",   1, { 'p' }, 1, { 'i' }, 0, 0 },
     { "web_next_click", 0, { 0 },   1, { 'p' }, 0, 1 },
     { "web_next_input", 0, { 0 },   1, { 'p' }, 0, 1 },
+    { "web_fetch",      1, { 'p' }, 1, { 'p' }, 0, 1 },
     { "web_sleep",      1, { 'i' }, 1, { 'i' }, 0, 0 },
 #endif
 #if EMBER_NET
@@ -1141,7 +1161,7 @@ static const CExternFn g_fns[] = {
     w_em_now_unix, w_em_mkdir, w_em_remove,
     w_em_tcp_listen, w_em_tcp_accept, w_em_tcp_connect, w_em_recv, w_em_send, w_em_close,
 #if EMBER_GFX_HEADLESS
-    w_web_set_html, w_web_next_click, w_web_next_input, w_web_sleep,
+    w_web_set_html, w_web_next_click, w_web_next_input, w_web_fetch, w_web_sleep,
 #endif
 #if EMBER_NET
     w_http_post,
