@@ -1136,6 +1136,9 @@ struct Flare {
                 case None {}
             }
         }
+        if self._fired(key + ".scrim") {         // web (WASM): a click on the scrim (outside the panel) dismisses
+            stay = false
+        }
         let pad = self.ui.style.pad
         let node = self.lo.open_float(COL, START, STRETCH, pad, pad, w, h)
         self._queue(node, _MODAL_BEGIN, "", key)
@@ -4427,15 +4430,23 @@ struct Flare {
         style = style + ";justify-content:" + self._css_justify(n.justify)
         style = style + ";align-items:" + self._css_align(n.align)
         var cls = ""                            // a container may carry a painted surface on its own node
+        var idattr = ""
+        var modal = false
+        var scrimid = ""
         if eof[i] >= 0 {
             let k = self.rkind[eof[i]]
             if k == _PANEL {
                 cls = " class=\"fl-panel\""
             } else if k == _BUBBLE {
                 cls = " class=\"fl-bubble\""
+            } else if k == _MODAL_BEGIN {
+                cls = " class=\"fl-panel fl-modal\""     // the dialog surface, centred in a scrim below
+                idattr = " data-fl-id=\"" + html.escape(self.rid[eof[i]]) + "\""   // a panel click is inert (not the scrim)
+                modal = true
+                scrimid = html.escape(self.rid[eof[i]]) + ".scrim"
             }
         }
-        var out = "<div" + cls + " style=\"" + style + "\">"
+        var out = "<div" + cls + idattr + " style=\"" + style + "\">"
         var c = n.first_child
         loop {
             if c < 0 {
@@ -4444,7 +4455,13 @@ struct Flare {
             out = out + self._html_node(c, eof)
             c = self.lo.nodes[c].next_sibling
         }
-        return out + "</div>"
+        out = out + "</div>"
+        if modal {                              // a modal floats above everything in a dismiss-on-scrim overlay
+            return "<div class=\"fl-scrim\" data-fl-id=\"" + scrimid + "\">" + out + "</div>"
+        } else if n.float {                     // other floats (popover / toast): a plain fixed overlay
+            return "<div class=\"fl-overlay\">" + out + "</div>"
+        }
+        return out
     }
 
 
@@ -4730,6 +4747,11 @@ struct Flare {
             ".fl-tab\{font:inherit;padding:.35em .8em;border:1px solid transparent;border-radius:var(--radius);" +
             "background:transparent;color:var(--muted);cursor:pointer\}.fl-tab:hover\{background:var(--hover)\}" +
             ".fl-tab-on\{background:var(--panel);color:var(--ink);border-color:var(--border)\}" +
+            ".fl-scrim\{position:fixed;inset:0;z-index:100;display:flex;align-items:center;" +
+            "justify-content:center;background:rgba(0,0,0,.45)\}" +
+            ".fl-modal\{min-width:min(28rem,90vw);max-width:90vw;max-height:85vh;overflow:auto;" +
+            "box-shadow:0 12px 40px rgba(0,0,0,.35)\}" +
+            ".fl-overlay\{position:fixed;top:1rem;left:50%;transform:translateX(-50%);z-index:90\}" +
             "hr\{width:100%;border:none;border-top:1px solid var(--border);margin:0\}" +
             "strong\{font-weight:700\}em\{font-style:italic\}"
         return root + rules

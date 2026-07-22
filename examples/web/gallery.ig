@@ -12,6 +12,7 @@ fn main() -> int {
     var vol = 50
     var size = 1
     var notify = false
+    var show_modal = false
     loop {
         f.begin()
         web.pump(f)
@@ -45,15 +46,34 @@ fn main() -> int {
             size = f.dropdown("size", ["Small", "Medium", "Large"], size)
             f.label("Chosen size index: {size}")
         } else {
-            f.label("A toggle:")
+            f.label("A toggle and a modal dialog:")
             notify = f.checkbox("notify", "Enable notifications", notify)
             if notify {
                 f.label("Notifications are ON.")
             } else {
                 f.label("Notifications are off.")
             }
+            f.divider()
+            if f.primary("Open dialog") {
+                show_modal = true
+            }
         }
         f.end()
+
+        if show_modal {
+            let stay = f.modal_begin("dlg", 380, 0)
+            f.heading("A modal dialog")
+            f.markdown("This floats above a **scrim**, centred on the page. Click *Close*, or click the dimmed background, to dismiss it.", 340)
+            f.row(0, 2)                          // END-justified: push the button right
+            if f.primary("Close") {
+                show_modal = false
+            }
+            f.end()
+            f.modal_end()
+            if !stay {                           // clicked the scrim
+                show_modal = false
+            }
+        }
 
         web.set_html(f.html())
         web.yield_ms(30)
