@@ -250,30 +250,142 @@ fn inst_key_args_raw(key: string, fnname: string) -> string {
 }
 
 
-fn parse_inst_types(key: string, fnname: string) -> [string] {
+// split_targs splits a type-args key on its TOP-LEVEL "_" separators only — a "_" inside a nested
+// generic's `<…>` or an array's `[…]` (never actually emitted, since ty_key_full joins nested args with
+// ",", but tracked for correctness) does NOT split. So "Box<int>_string" -> ["Box<int>", "string"] and
+// "int_[int]" -> ["int", "[int]"]. The depth-aware successor to the flat `.split("_")` (OFI-218 P1).
+fn split_targs(s: string) -> [string] {
     var out: [string] = []
-    let pre = fnname.len() + 1                      // skip "fnname<"
-    if key.len() <= pre + 1 {
+    if s == "" {
         return out
     }
-    let inner = byte_slice(key, pre, key.len() - 1)  // strip trailing ">"
-    let bs = inner.bytes()
+    let bs = s.bytes()
     var cur = ""
+    var depth = 0
     var i = 0
     loop {
         if i >= bs.len() {
             break
         }
-        if int(bs[i]) == 95 {                        // '_'
+        let c = int(bs[i])
+        if c == 60 || c == 91 {                      // '<' or '['
+            depth = depth + 1
+        } else if c == 62 || c == 93 {               // '>' or ']'
+            depth = depth - 1
+        }
+        if c == 95 && depth == 0 {                   // a TOP-LEVEL '_'
             out.append(cur)
             cur = ""
         } else {
-            cur = cur + byte_slice(inner, i, i + 1)
+            cur = cur + byte_slice(s, i, i + 1)
         }
         i = i + 1
     }
     out.append(cur)
     return out
+}
+
+
+// head_name returns a type-arg token's head NAME — the bytes before its first "<" (`"Box<int>"` -> "Box",
+// `"int"` -> "int", `"[int]"` -> "[int]"). Used to look up a nested-generic token's base struct id.
+fn head_name(tok: string) -> string {
+    let bs = tok.bytes()
+    var i = 0
+    loop {
+        if i >= bs.len() {
+            break
+        }
+        if int(bs[i]) == 60 {                        // '<'
+            return byte_slice(tok, 0, i)
+        }
+        i = i + 1
+    }
+    return tok
+}
+
+
+// inner_args returns a type-arg token's INNER argument string — the "," -joined contents between its
+// outermost "<" and matching ">" (`"Box<int>"` -> "int", `"Map<string,int>"` -> "string,int"), or "" for
+// a non-generic token. The "," -joined nested form; convert to a "_" -joined top-level key with commas_to_us
+// where a downstream split_targs is applied (OFI-218 P1).
+fn inner_args(tok: string) -> string {
+    let bs = tok.bytes()
+    var start = 0 - 1
+    var i = 0
+    loop {
+        if i >= bs.len() {
+            break
+        }
+        if int(bs[i]) == 60 {                        // first '<'
+            start = i + 1
+            break
+        }
+        i = i + 1
+    }
+    if start < 0 {
+        return ""
+    }
+    // find the MATCHING '>' (the last one at depth 0 from start)
+    var depth = 0
+    var j = start
+    var end = bs.len() - 1
+    loop {
+        if j >= bs.len() {
+            break
+        }
+        let c = int(bs[j])
+        if c == 60 {
+            depth = depth + 1
+        } else if c == 62 {
+            if depth == 0 {
+                end = j
+                break
+            }
+            depth = depth - 1
+        }
+        j = j + 1
+    }
+    return byte_slice(tok, start, end)
+}
+
+
+// commas_to_us rewrites a nested-arg token's top-level "," separators to "_" so split_targs (which splits
+// on top-level "_") can walk one nesting level down (`"string,int"` -> "string_int", `"Box<int>,string"`
+// -> "Box<int>_string"). Depth-aware: a "," inside a deeper `<…>`/`[…]` is untouched.
+fn commas_to_us(s: string) -> string {
+    let bs = s.bytes()
+    var out = ""
+    var depth = 0
+    var i = 0
+    loop {
+        if i >= bs.len() {
+            break
+        }
+        let c = int(bs[i])
+        if c == 60 || c == 91 {
+            depth = depth + 1
+        } else if c == 62 || c == 93 {
+            depth = depth - 1
+        }
+        if c == 44 && depth == 0 {                   // a TOP-LEVEL ','
+            out = out + "_"
+        } else {
+            out = out + byte_slice(s, i, i + 1)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
+fn parse_inst_types(key: string, fnname: string) -> [string] {
+    let pre = fnname.len() + 1                      // skip "fnname<"
+    if key.len() <= pre + 1 {
+        var empty: [string] = []
+        return empty
+    }
+    let inner = byte_slice(key, pre, key.len() - 1)  // strip trailing ">"
+    return split_targs(inner)                        // depth-aware top-level split (OFI-218 P1)
 }
 
 
@@ -1819,7 +1931,7 @@ fn mono_ty_key(t: ps.Ty) -> string {
     match t {
         case TyGeneric(qual, name, args) {
             if args.len() > 0 {
-                return ty_key_name(args[0])
+                return ty_key_full(args[0])   // nesting-preserving (Option<Box<int>> -> "Box<int>") (OFI-218 P1)
             }
             return name
         }
@@ -1852,6 +1964,46 @@ fn ty_key_name(t: ps.Ty) -> string {
 }
 
 
+// ty_key_full renders a type-arg token PRESERVING nesting: a generic renders `Name<a,b>` (nested args
+// ","-joined so no "_" appears inside a token), an array `[elem]`, a bare name as itself. The type-ARG
+// renderer twin of ty_key_name (which stays the bare HEAD-NAME extractor for method base names). So
+// `Box<Box<int>>` -> "Box<Box<int>>" (vs ty_key_name's "Box") — the nesting a depth-2 field read needs
+// to resolve its innermost concrete type (OFI-218 P1).
+fn ty_key_full(t: ps.Ty) -> string {
+    match t {
+        case TyName(qual, name) {
+            return name
+        }
+        case TyArray(elem) {
+            return "[{ty_key_full(elem.value)}]"
+        }
+        case TyGeneric(qual, name, args) {
+            if args.len() == 0 {
+                return name
+            }
+            var inner = ""
+            var i = 0
+            loop {
+                if i >= args.len() {
+                    break
+                }
+                let k = ty_key_full(args[i])
+                if i == 0 {
+                    inner = k
+                } else {
+                    inner = "{inner},{k}"
+                }
+                i = i + 1
+            }
+            return "{name}<{inner}>"
+        }
+        case _ {
+            return "k0"
+        }
+    }
+}
+
+
 // ty_args_key renders a generic type's type-ARGUMENTS as a "_"-joined key (Bag<int> -> "int", Map<string,
 // [int]> -> "string_[int]"), or "" for a non-generic type. Keys a generic-struct METHOD instance by its
 // receiver's concrete type arguments (Bag.add on a Bag<int> -> "Bag.add<int>").
@@ -1864,7 +2016,7 @@ fn ty_args_key(ty: ps.Ty) -> string {
                 if i >= args.len() {
                     break
                 }
-                let k = ty_key_name(args[i])
+                let k = ty_key_full(args[i])   // nesting-preserving per-arg render (OFI-218 P1)
                 if i == 0 {
                     parts = k
                 } else {
@@ -4264,13 +4416,13 @@ struct Chunk {
                             if mk >= 0 && self.mre_tpidx[mk] >= 0 {
                                 let targs = self.field_receiver_targs(object.value)
                                 if targs != "" {
-                                    let parts = targs.split("_")
+                                    let parts = split_targs(targs)
                                     let ti = self.mre_tpidx[mk]
                                     if ti < parts.len() {
                                         if parts[ti] == "string" {
                                             return 0 - 3
                                         }
-                                        let sid = cg_index_of(self.st_names, parts[ti])
+                                        let sid = cg_index_of(self.st_names, head_name(parts[ti]))
                                         if sid >= 0 {
                                             return sid
                                         }
@@ -4315,7 +4467,7 @@ struct Chunk {
                                 if mk >= 0 && self.mrp_tpidx[mk] >= 0 {
                                     let targs = self.field_receiver_targs(recv.value)
                                     if targs != "" {
-                                        let parts = targs.split("_")
+                                        let parts = split_targs(targs)
                                         let ti = self.mrp_tpidx[mk]
                                         if ti < parts.len() {
                                             // a STRING value type (`Map<string,string>.get` -> Option<string>) types
@@ -4324,7 +4476,7 @@ struct Chunk {
                                             if parts[ti] == "string" {
                                                 return 0 - 3
                                             }
-                                            let sid = cg_index_of(self.st_names, parts[ti])
+                                            let sid = cg_index_of(self.st_names, head_name(parts[ti]))
                                             if sid >= 0 {
                                                 return sid
                                             }
@@ -4373,7 +4525,7 @@ struct Chunk {
                                 if mk >= 0 && self.mrp_tpidx[mk] >= 0 {
                                     let targs = self.field_receiver_targs(recv.value)
                                     if targs != "" {
-                                        let parts = targs.split("_")
+                                        let parts = split_targs(targs)
                                         let ti = self.mrp_tpidx[mk]
                                         if ti < parts.len() {
                                             let ec = self.key_array_elem_code(parts[ti])
@@ -4414,7 +4566,7 @@ struct Chunk {
                 let ei = cg_index_of(self.erecv_name, nm)
                 if ei >= 0 {
                     let ts = self.erecv_targs[ei]      // bind before .split — the OFI-173 safe pattern
-                    let parts = ts.split("_")
+                    let parts = split_targs(ts)
                     if ti < parts.len() {
                         if parts[ti] == "string" {
                             return 0 - 3
@@ -4422,7 +4574,7 @@ struct Chunk {
                         if self.key_array_elem_code(parts[ti]) != 0 - 99 {
                             return 0 - 2
                         }
-                        let sid = cg_index_of(self.st_names, parts[ti])
+                        let sid = cg_index_of(self.st_names, head_name(parts[ti]))
                         if sid >= 0 {
                             return sid
                         }
@@ -4434,6 +4586,35 @@ struct Chunk {
             }
         }
         return 0 - 99
+    }
+
+
+    // enum_subject_tp_targs returns the substituted STRUCT payload's own type-args (`case Some(b)` over
+    // `Option<Box<int>>` -> b: Box<int>, targs "int"), so the binding records them and `b.value` resolves
+    // through the instantiation. "" when the payload is not a resolvable generic struct (OFI-218 P1).
+    fn enum_subject_tp_targs(self, subject: ps.Expr, fidx: int) -> string {
+        if fidx < 0 || fidx >= self.ev_ftpidx.len() {
+            return ""
+        }
+        let ti = self.ev_ftpidx[fidx]
+        if ti < 0 {
+            return ""
+        }
+        match subject {
+            case EIdent(nm) {
+                let ei = cg_index_of(self.erecv_name, nm)
+                if ei >= 0 {
+                    let ts = self.erecv_targs[ei]
+                    let parts = split_targs(ts)
+                    if ti < parts.len() {
+                        return commas_to_us(inner_args(parts[ti]))
+                    }
+                }
+            }
+            case _ {
+            }
+        }
+        return ""
     }
 
 
@@ -4452,7 +4633,7 @@ struct Chunk {
                 let ei = cg_index_of(self.erecv_name, nm)
                 if ei >= 0 {
                     let ts = self.erecv_targs[ei]      // bind before .split — the OFI-173 safe pattern
-                    let parts = ts.split("_")
+                    let parts = split_targs(ts)
                     if ti < parts.len() {
                         let ec = self.key_array_elem_code(parts[ti])
                         if ec != 0 - 99 {
@@ -4647,7 +4828,7 @@ struct Chunk {
                 if targs == "" {
                     return ""
                 }
-                let parts = targs.split("_")
+                let parts = split_targs(targs)
                 let ti = self.st_ftpidx[i]
                 if ti >= parts.len() {
                     return ""
@@ -4671,7 +4852,7 @@ struct Chunk {
         if self.key_array_elem_code(name) != 0 - 99 {
             return 0 - 2
         }
-        let sid = cg_index_of(self.st_names, name)
+        let sid = cg_index_of(self.st_names, head_name(name))   // "Box<int>" -> base "Box" sid (OFI-218 P1)
         if sid >= 0 {
             return sid
         }
@@ -5444,12 +5625,107 @@ struct Chunk {
     // field_receiver_targs returns the type-args key a method RECEIVER that is a PLACE carries: a generic-struct
     // FIELD (`self.wins.keys()`, wins: Map<int,int> -> "int_int") or an ARRAY ELEMENT (`scopes[i].get()`,
     // scopes: [Map<string,int>] -> "string_int"), or "".
+    // field_tparam_idx returns the struct-generics INDEX of field `fname` of struct `osid` when it is a
+    // bare type-param field (`value: T` in Box<T> -> 0), else -1 (OFI-218 P1).
+    fn field_tparam_idx(self, osid: int, fname: string) -> int {
+        var i = 0
+        loop {
+            if i >= self.st_fowner.len() {
+                break
+            }
+            if self.st_fowner[i] == osid && self.st_fname[i] == fname {
+                if self.st_ftpname[i] != "" {
+                    return self.st_ftpidx[i]
+                }
+                return 0 - 1
+            }
+            i = i + 1
+        }
+        return 0 - 1
+    }
+
+
+    // struct_tparam_index returns the position of type-param `name` in struct `osid`'s generic list
+    // (Outer<T> -> T is 0; Pair<A,B> -> B is 1), or -1 — via the sg_struct/sg_tparam rows (OFI-218 P1).
+    fn struct_tparam_index(self, osid: int, name: string) -> int {
+        if osid < 0 || osid >= self.st_names.len() {
+            return 0 - 1
+        }
+        let sname = self.st_names[osid]
+        var idx = 0
+        var j = 0
+        loop {
+            if j >= self.sg_struct.len() {
+                break
+            }
+            if self.sg_struct[j] == sname {
+                if self.sg_tparam[j] == name {
+                    return idx
+                }
+                idx = idx + 1
+            }
+            j = j + 1
+        }
+        return 0 - 1
+    }
+
+
+    // subst_field_targs substitutes struct `osid`'s type-params in a field's DECLARED targs key with the
+    // receiver's concrete targs — Outer<int>'s field `i: Inner<T>` (declared "T") -> "int" — so a nested
+    // generic-struct field read (`o.i.v`) resolves through the instantiation (OFI-218 P1).
+    fn subst_field_targs(self, osid: int, declared: string, recv_targs: string) -> string {
+        let dparts = split_targs(declared)
+        let rparts = split_targs(recv_targs)
+        var out = ""
+        var i = 0
+        loop {
+            if i >= dparts.len() {
+                break
+            }
+            var tok = dparts[i]
+            let k = self.struct_tparam_index(osid, tok)   // is this token a type-param of the struct?
+            if k >= 0 && k < rparts.len() {
+                tok = rparts[k]                            // substitute the receiver's concrete arg
+            }
+            if i == 0 {
+                out = tok
+            } else {
+                out = "{out}_{tok}"
+            }
+            i = i + 1
+        }
+        return out
+    }
+
+
     fn field_receiver_targs(self, e: ps.Expr) -> string {
         match e {
             case EGet(inner, fname) {
                 let osid = self.expr_type_kind(inner.value)
                 if osid >= 0 {
-                    return self.field_targs(osid, fname)
+                    // A TYPE-PARAM field (`value: T` in Box<T>) carries no static targs — SUBSTITUTE the
+                    // inner receiver's concrete arg into it: `b: Box<Box<int>>`, `b.value` -> the args of
+                    // "Box<int>" = "int" (so a further `.value` resolves int). The depth-2 enabler (OFI-218 P1).
+                    let tpi = self.field_tparam_idx(osid, fname)
+                    if tpi >= 0 {
+                        let itargs = self.field_receiver_targs(inner.value)
+                        if itargs == "" {
+                            return ""
+                        }
+                        let parts = split_targs(itargs)
+                        if tpi < parts.len() {
+                            return commas_to_us(inner_args(parts[tpi]))   // args of the substituted field type
+                        }
+                        return ""
+                    }
+                    // A GENERIC-STRUCT field (`i: Inner<T>`): substitute the struct's type-params in its
+                    // declared targs with the receiver's concrete targs (Inner<T> under Outer<int> -> "int").
+                    let declared = self.field_targs(osid, fname)
+                    if declared == "" {
+                        return ""
+                    }
+                    let itargs = self.field_receiver_targs(inner.value)
+                    return self.subst_field_targs(osid, declared, itargs)
                 }
             }
             case EIdent(nm) {
@@ -9549,6 +9825,11 @@ struct Chunk {
                                     self.slot_elem[self.slot_elem.len() - 1] = self.enum_subject_tp_elem(value.value, fidx)
                                 } else if estp >= 0 {
                                     self.declare_binding(cases[ci].pattern.bindings[b], 1, estp, false, false, true, false)
+                                    let btargs = self.enum_subject_tp_targs(value.value, fidx)   // so `b.value` resolves (OFI-218 P1)
+                                    if btargs != "" {
+                                        self.mrecv_name.append(cases[ci].pattern.bindings[b])
+                                        self.mrecv_args.append(btargs)
+                                    }
                                 } else {
                                     self.declare_binding(cases[ci].pattern.bindings[b], 1, -1, false, false, false, false)
                                 }
