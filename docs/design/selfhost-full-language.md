@@ -400,7 +400,38 @@ bare-metal codegen rides — strengthening selfhost strengthens the endgame.
     the ONE shared receiver-resolution (so `tparam_field_code`/`tparam_field_kind` can't drift);
     `scalar_kind_of_typename` is the string twin of `ty_scalar_kind`. `generic_struct_pack`
     byte-identical + run-correct.
-  - **THE COUPLING CONSTRAINT (why B-nested + A wait for the synthesis map):** `ty_args_key` is FLAT
+- **2026-07-22 — PHASE 1 COMPLETE. The erased-generic memory model + instance keying is done.**
+  Breadth 300→**310/552** byte-identical (`cgdiff -c`: PASS 310, DIFF 242, SKIP 107 of 659);
+  `make selfhost` 1477/0 throughout; reproduction fixed point holds at every landing. The Tier-2
+  run-correctness class was closed earlier (P1b·1–3); this stretch made the byte-identity land too.
+  Of the 10-file target cluster (9 diverging + `map_array_value`), **7 are now byte-identical**:
+  `generic_nested`, `generic_nested_struct`, `generic_nested_enum` (Stage A nested type-args),
+  `generic_hof_strings`, `stdlib_list_sort` (Stage B variable-arg keying + transitive propagation),
+  `generic_struct_pack` (P1b·4c render-kind), `map_array_value` (P1b·1).
+  - **Stage A (`90d8f35`)** — `ty_key_full` nesting-preserving renderer (routed only through the
+    type-arg-render role; `ty_key_name` untouched), depth-aware `split_targs`/`head_name`/`inner_args`,
+    and the `field_receiver_targs` SUBSTITUTION (bare-`T` field + generic-struct field via
+    `struct_tparam_index`/`subst_field_targs`, + `enum_subject_tp_targs` for enum payloads).
+  - **Stage B (`7f962a4` + `a4717c1`)** — variable array args key by element (`map<[int]>` vs
+    `map<[string]>`) via dual `arg_mono_key`/`arg_mono_key_scope` over parallel `amelem`/`selems`
+    (populated by identical inference, so the passes agree); transitive param seeding
+    (`seed_det_param` + `compile_fn`) so `sort<[int]>`'s `_sort_range(xs)` re-keys; and 2-level
+    return-type propagation (`call_ret_elem`/`call_ret_amelem` via the `gret` tables) so
+    `let left = _sort_range(xs)` → `_merge(left)` re-keys per instance.
+  - **Method-return propagation (`99b0383`)** — `let b2 = b.replaced(8)` (Box.replaced→Box<T>)
+    propagates the receiver's targs so `b2.get()` retargets to `Box.get<int>`.
+  - **The 3 residual files run correct; their divergences are OTHER subsystems the later phases own:**
+    - `generic_method` — instance keying now correct; residual = an owning-temp masking delta on
+      `println(b2.get())` = the **OFI-176 arg-staging family → Phase 4**.
+    - `generic_literal_vs_lt` — `pick` byte-identical (P1b·4a); residual = the `pick(a<b, Box{…})`
+      owning-temp struct-arg masking = **OFI-176 → Phase 4**.
+    - `stdlib_list` — instance SET now matches stage-0 exactly (27=27, run-correct `=> 76`); residual
+      = a string-accumulator reduce lambda typed as int = the **lambda-instance-typing / OFI-206
+      family → Phase 3**.
+  These are not new work — they are the exact open OFIs (176, 206) that Phases 3–4 of this campaign
+  close. Phase 1's own scope (the erased memory model) is finished.
+
+  - **THE COUPLING CONSTRAINT (why B-nested + A waited for the synthesis map):** `ty_args_key` is FLAT
     (`ty_key_name` collapses a nested generic to its head), and `mrecv_args` (its output) is used for
     BOTH field resolution AND method retargeting — the latter builds `"{Struct}.{m}<{mrecv_args}>"`
     keys looked up in `fn_inst_keys`, which `parse_inst_types` splits on plain `_`. So a
