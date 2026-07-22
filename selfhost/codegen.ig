@@ -2761,6 +2761,77 @@ struct FnInstColl {
     }
 
 
+    // method_returns_own_struct reports whether struct `sname`'s method `mname` returns `sname<…>` (the
+    // receiver's own generic-struct type, e.g. Box.replaced -> Box<T>), so `let b2 = b.replaced(8)`
+    // propagates b's type-args to b2 and `b2.get()` retargets to Box.get<int> (OFI-218 P1).
+    fn method_returns_own_struct(self, sname: string, mname: string) -> bool {
+        var i = 0
+        loop {
+            if i >= self.decls.len() {
+                break
+            }
+            match self.decls[i] {
+                case DStruct(name, generics, impls, fields, methods, kind) {
+                    if name == sname {
+                        var mi = 0
+                        loop {
+                            if mi >= methods.len() {
+                                break
+                            }
+                            if methods[mi].name == mname && methods[mi].ret.len() > 0 {
+                                match methods[mi].ret[0] {
+                                    case TyGeneric(qual, rn, rargs) {
+                                        if rn == sname {
+                                            return true
+                                        }
+                                    }
+                                    case _ {
+                                    }
+                                }
+                            }
+                            mi = mi + 1
+                        }
+                    }
+                }
+                case _ {
+                }
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+
+    // self_ret_method_recv returns the RECEIVER identifier of a `recv.method(args)` value whose method
+    // returns recv's own generic struct (Box.replaced -> Box<T>), so the binding inherits recv's struct +
+    // type-args. "" otherwise (OFI-218 P1).
+    fn self_ret_method_recv(self, value: ps.Expr) -> string {
+        match value {
+            case ECall(callee, args) {
+                match callee.value {
+                    case EGet(recv, mname) {
+                        match recv.value {
+                            case EIdent(rname) {
+                                let rstruct = scope_type(self.snames, self.stypes, rname)
+                                if rstruct != "" && self.method_returns_own_struct(rstruct, mname) {
+                                    return rname
+                                }
+                            }
+                            case _ {
+                            }
+                        }
+                    }
+                    case _ {
+                    }
+                }
+            }
+            case _ {
+            }
+        }
+        return ""
+    }
+
+
     // struct_named reports whether `name` is a declared STRUCT — so a `recv.method()` on a value of that type
     // is a generic-struct method (not a UFCS free-function call). A generic ENUM instance (`Option<int>`) has
     // the same tracked rty/rargs shape as a struct instance but is NOT a struct, so it takes the UFCS path.
@@ -3063,6 +3134,15 @@ struct FnInstColl {
                             bta = ty_args_key(sty.value)
                         }
                         case _ {
+                        }
+                    }
+                    if bta == "" {
+                        // `let b2 = b.replaced(8)` — replaced returns Box<T>: b2 inherits b's struct + targs, so
+                        // `b2.get()` registers Box.get<int> (generic-method return propagation, OFI-218 P1).
+                        let rn = self.self_ret_method_recv(value.value)
+                        if rn != "" {
+                            bt = scope_type(self.snames, self.stypes, rn)
+                            bta = scope_type(self.snames, self.styargs, rn)
                         }
                     }
                 }
@@ -5571,6 +5651,39 @@ struct Chunk {
     // binding takes when `f` returns `[T]` bound by a determining ARRAY arg — read from that arg's amelem
     // entry (the seeded concrete element), NOT slot_elem (which holds the erased-param code). Both passes
     // read their arg's element from the parallel amelem/selems maps, so they agree (OFI-218 P1).
+    // self_ret_method_recv is the gen-pass twin of the pre-pass helper: the RECEIVER of a `recv.method(args)`
+    // value whose method returns recv's own struct type (fn_ret_sid matches recv's slot_struct — Box.replaced
+    // -> Box), so `let b2 = b.replaced(8)` inherits b's mrecv targs and `b2.get()` retargets (OFI-218 P1).
+    fn self_ret_method_recv(self, value: ps.Expr) -> string {
+        match value {
+            case ECall(callee, args) {
+                match callee.value {
+                    case EGet(recv, mname) {
+                        match recv.value {
+                            case EIdent(rname) {
+                                let rslot = self.resolve_slot(rname)
+                                if rslot >= 0 && self.slot_struct[rslot] >= 0 {
+                                    let fi = self.resolve_call_fn_index(callee.value)
+                                    if fi >= 0 && fi < self.fn_ret_sid.len() && self.fn_ret_sid[fi] == self.slot_struct[rslot] {
+                                        return rname
+                                    }
+                                }
+                            }
+                            case _ {
+                            }
+                        }
+                    }
+                    case _ {
+                    }
+                }
+            }
+            case _ {
+            }
+        }
+        return ""
+    }
+
+
     fn call_ret_amelem(self, value: ps.Expr) -> string {
         match value {
             case ECall(callee, args) {
@@ -9383,6 +9496,16 @@ struct Chunk {
                 if ame != "" {
                     self.amelem_name.append(name)
                     self.amelem_key.append(ame)
+                }
+                // `let b2 = b.replaced(8)` (replaced -> Box<T>): b2 inherits b's mrecv targs so `b2.get()`
+                // retargets to Box.get<int> (generic-method return propagation, OFI-218 P1).
+                let srn = self.self_ret_method_recv(value.value)
+                if srn != "" {
+                    let mi = cg_index_of(self.mrecv_name, srn)
+                    if mi >= 0 {
+                        self.mrecv_name.append(name)
+                        self.mrecv_args.append(self.mrecv_args[mi])
+                    }
                 }
                 // A RETURN-type-inferred BOUNDED generic call (`var b: Bag<int> = new_bag()`) binds its type
                 // param from the annotation; thread it in as expected_key so gen_bounded_call builds the right
