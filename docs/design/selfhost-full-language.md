@@ -430,6 +430,25 @@ bare-metal codegen rides — strengthening selfhost strengthens the endgame.
       family → Phase 3**.
   These are not new work — they are the exact open OFIs (176, 206) that Phases 3–4 of this campaign
   close. Phase 1's own scope (the erased memory model) is finished.
+- **2026-07-22 — the ENTIRE 10-file Tier-2 cluster is byte-identical. The 3 residuals closed head-on
+  (Karl's directive: no workarounds).** Corpus breadth **310→316/552** (`cgdiff -c`: PASS 316, DIFF
+  236, SKIP 107); `make selfhost` 1477/0; reproduction fixed point holds.
+  - **OFI-176 owning-temp arg-masking (`b096190`)** — fixed to match stage-0's `drop_mask` discipline
+    (check.c:3185-3199) exactly, verified against `is_refcounted`/`is_owning_temp`. `user_arg_masked`
+    now masks a boxed struct-literal / boxed-struct-returning-call owning temp (not just arrays),
+    skipping all-scalar multi-slot structs. And a native call with a refcounted owning temp from a
+    bare-`T` method return (`println(s.get())`, s: Box<string>) is masked — via a new
+    `return_bare_tpidx`/`mrb_tpidx` table + `method_bare_ret_kind` resolving `T` through the receiver.
+    Closes `generic_literal_vs_lt` + `generic_method` (both were leaking the temp).
+  - **OFI-206 HOF lambda-param inference (`85192f0`)** — the real unification stage-0's checker does,
+    ported: a HOF table (`hof_name`/`hof_fpi`/`hof_srcs`) built from decls maps each lambda param to a
+    sibling arg (reduce's `f:fn(U,T)->U` → "1w_0e"); at the call the string params are resolved and the
+    lambda's params annotated (via a parser-side `ps.string_ty()` ctor), so a string-accumulator reduce
+    lambda compiles as string CONCAT not int ADD. Closes `stdlib_list`.
+  - **Two Phase-0 tripwire catches in my own new code** (loud, not silently-wrong): a qualified
+    `ps.TyName(...)` variant construction the backend can't emit → a parser-side ctor; and a
+    `hof_srcs[hi].split("_")` indexed-element method call (OFI-173 C-emit gap) → bind-to-local. The
+    tripwire discipline paid for itself again.
 
   - **THE COUPLING CONSTRAINT (why B-nested + A waited for the synthesis map):** `ty_args_key` is FLAT
     (`ty_key_name` collapses a nested generic to its head), and `mrecv_args` (its output) is used for
