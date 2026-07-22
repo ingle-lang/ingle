@@ -776,6 +776,22 @@ fn index_of_str(xs: [string], s: string) -> int {
 }
 
 
+// clone_strs copies a string array (cgen_c.ig-local; codegen.ig has its own) — the CgcFv capture walker
+// saves/restores the bound set across scopes (OFI-206).
+fn clone_strs(xs: [string]) -> [string] {
+    var out: [string] = []
+    var i = 0
+    loop {
+        if i >= xs.len() {
+            break
+        }
+        out.append(xs[i])
+        i = i + 1
+    }
+    return out
+}
+
+
 // build_struct_instances returns the generic-struct INSTANCE keys in stage-0's monomorphization order — each
 // instance's runtime struct id is `declared_struct_count + its index here` (appended after the declared
 // structs, which include the generic base `Box<T>` itself).
@@ -1797,6 +1813,8 @@ struct CgcGen {
     cur_gopt: [string]         // param names whose type is a GENERIC Option/Result (Some/Ok payload is an erased
                                // type param T) — so a `case Some(v)` payload binds as a refcounted borrow
                                // (own_into_slot on return), matching stage-0's erased-generic ownership (OFI-205)
+    cur_lambda: int            // the em_fn index of the NEXT lambda this body lifts (fn_count + prior lambdas),
+                               // incremented at each `em_closure` site so a lambda VALUE gets its lifted slot (OFI-206)
 
 
     fn fresh_var(mut self) -> int {
@@ -2299,6 +2317,29 @@ struct CgcGen {
                     }
                 }
                 return cgc_internal_error("unsupported field access `.{name}` — boxed-generic element or qualified variant (OFI-173/OFI-202)")
+            }
+            case ELambda(params, body) {
+                // A lambda VALUE → `em_closure(&g_em, <lifted slot>, <ncap>, <cap0>, …)`. The captures are the
+                // lifted fn's leading params; each is the enclosing local's C expr — a scalar boxed to a Value,
+                // a heap value emitted as-is (em_closure retains it). The slot counter matches collect_lambdas'
+                // discovery order (OFI-206).
+                let caps = cgc_lambda_captures(params, body)
+                var s = "em_closure(&g_em, {self.cur_lambda}, {caps.len()}"
+                var ci = 0
+                loop {
+                    if ci >= caps.len() {
+                        break
+                    }
+                    let cn = self.lookup_cname(caps[ci])
+                    if self.lookup_unboxed(caps[ci]) {
+                        s = s + ", INT_VAL((int64_t){cn})"
+                    } else {
+                        s = s + ", {cn}"
+                    }
+                    ci = ci + 1
+                }
+                self.cur_lambda = self.cur_lambda + 1
+                return s + ")"
             }
             case _ {
                 return cgc_internal_error("unhandled expression kind (OFI-173; a lambda argument needs lambda lifting, OFI-206)")
@@ -4741,8 +4782,8 @@ fn enum_payload_generic(ty: ps.Ty, generics: [ps.GenericParam]) -> bool {
 }
 
 
-fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_ret_kind: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab) {
-    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_struct: [], sc_refc: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [] }
+fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_ret_kind: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab, lambda_start: int) {
+    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_struct: [], sc_refc: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_lambda: lambda_start }
     var ai = 0
     if has_self {
         g.push("self", "a0", 0 - 1, false, false, false, 0 - 1)
@@ -5096,6 +5137,442 @@ fn emit_struct_preamble(tab: StructTab) {
 }
 
 
+// ---- lambda lifting (OFI-206 / OFI-218 P3) — mirrors codegen.ig's FvCtx + LambdaSpec machinery ------
+// The C-emit lifts each lambda to a top-level `em_fn_N` numbered AFTER all declared fns+methods, in
+// body-traversal discovery order (matching stage-0's checker-appended lambda DECL_FNs). A lambda VALUE
+// becomes `em_closure(&g_em, N, ncap, cap0…)`; the lifted body's params are [captures…, own params…], all
+// boxed Value. Capture analysis (free variables) is duplicated here — the two backends duplicate by design.
+
+// CgcFv is the free-variable walker (copy of codegen.ig's FvCtx): free = referenced non-bound locals, in
+// traversal order = a lambda's captures.
+struct CgcFv {
+    bound: [string]
+    free: [string]
+
+
+    fn note(mut self, name: string) {
+        if index_of_str(self.bound, name) >= 0 {
+            return
+        }
+        if index_of_str(self.free, name) >= 0 {
+            return
+        }
+        self.free.append(name)
+    }
+
+
+    fn walk_expr(mut self, e: ps.Expr) {
+        match e {
+            case EIdent(name) {
+                self.note(name)
+            }
+            case EUnary(op, operand) {
+                self.walk_expr(operand.value)
+            }
+            case EBinary(op, l, r) {
+                self.walk_expr(l.value)
+                self.walk_expr(r.value)
+            }
+            case ECall(callee, args) {
+                self.walk_expr(callee.value)
+                self.walk_args(args)
+            }
+            case EGet(object, name) {
+                self.walk_expr(object.value)
+            }
+            case EIndex(object, index) {
+                self.walk_expr(object.value)
+                self.walk_expr(index.value)
+            }
+            case EArray(elems, lines) {
+                self.walk_args(elems)
+            }
+            case EStructLit(ty, fields) {
+                var i = 0
+                loop {
+                    if i >= fields.len() {
+                        break
+                    }
+                    self.walk_expr(fields[i].value)
+                    i = i + 1
+                }
+            }
+            case ETry(operand) {
+                self.walk_expr(operand.value)
+            }
+            case ERange(lo, hi) {
+                self.walk_expr(lo.value)
+                self.walk_expr(hi.value)
+            }
+            case EStr(parts) {
+                var i = 0
+                loop {
+                    if i >= parts.len() {
+                        break
+                    }
+                    if parts[i].hole.len() > 0 {
+                        self.walk_expr(parts[i].hole[0])
+                    }
+                    i = i + 1
+                }
+            }
+            case ELambda(params, body) {
+                let saved = clone_strs(self.bound)
+                var p = 0
+                loop {
+                    if p >= params.len() {
+                        break
+                    }
+                    self.bound.append(params[p].name)
+                    p = p + 1
+                }
+                self.walk_block(body)
+                self.bound = saved
+            }
+            case _ {
+            }
+        }
+    }
+
+
+    fn walk_args(mut self, args: [ps.Expr]) {
+        var i = 0
+        loop {
+            if i >= args.len() {
+                break
+            }
+            self.walk_expr(args[i])
+            i = i + 1
+        }
+    }
+
+
+    fn walk_stmt(mut self, s: ps.Stmt) {
+        match s {
+            case SLet(is_var, name, ty, value) {
+                self.walk_expr(value.value)
+                self.bound.append(name)
+            }
+            case SReturn(value, line) {
+                if value.len() > 0 {
+                    self.walk_expr(value[0].value)
+                }
+            }
+            case SExpr(expr) {
+                self.walk_expr(expr.value)
+            }
+            case SAssign(target, value) {
+                self.walk_expr(target.value)
+                self.walk_expr(value.value)
+            }
+            case SIf(cond, then_blk, els) {
+                self.walk_expr(cond.value)
+                self.walk_block(then_blk)
+                self.walk_block(els)
+            }
+            case SFor(vname, index_var, iter, body) {
+                self.walk_expr(iter.value)
+                let saved = clone_strs(self.bound)
+                self.bound.append(vname)
+                if index_var != "" {
+                    self.bound.append(index_var)
+                }
+                self.walk_block(body)
+                self.bound = saved
+            }
+            case SLoop(body) {
+                self.walk_block(body)
+            }
+            case SMatch(value, cases) {
+                self.walk_expr(value.value)
+                var ci = 0
+                loop {
+                    if ci >= cases.len() {
+                        break
+                    }
+                    let saved = clone_strs(self.bound)
+                    var bi = 0
+                    loop {
+                        if bi >= cases[ci].pattern.bindings.len() {
+                            break
+                        }
+                        self.bound.append(cases[ci].pattern.bindings[bi])
+                        bi = bi + 1
+                    }
+                    self.walk_block(cases[ci].body)
+                    self.bound = saved
+                    ci = ci + 1
+                }
+            }
+            case SBlock(body) {
+                self.walk_block(body)
+            }
+            case SSpawn(call) {
+                self.walk_expr(call.value)
+            }
+            case SNursery(body, line) {
+                self.walk_block(body)
+            }
+            case _ {
+            }
+        }
+    }
+
+
+    fn walk_block(mut self, body: [ps.Stmt]) {
+        let saved = clone_strs(self.bound)
+        var i = 0
+        loop {
+            if i >= body.len() {
+                break
+            }
+            self.walk_stmt(body[i])
+            i = i + 1
+        }
+        self.bound = saved
+    }
+}
+
+
+// cgc_lambda_captures returns a lambda's free-variable (capture) NAMES in traversal order.
+fn cgc_lambda_captures(params: [ps.Param], body: [ps.Stmt]) -> [string] {
+    var seed: [string] = []
+    var p = 0
+    loop {
+        if p >= params.len() {
+            break
+        }
+        seed.append(params[p].name)
+        p = p + 1
+    }
+    var ctx = CgcFv { bound: seed, free: [] }
+    ctx.walk_block(body)
+    return clone_strs(ctx.free)
+}
+
+
+// cgc_lifted_params builds a lifted lambda's C parameter list: [capture params…, own params…], every one
+// UNTYPED so it emits as a boxed `Value aN` (stage-0 forces inline_struct_id=-1 on a lifted param).
+fn cgc_lifted_params(caps: [string], own: [ps.Param]) -> [ps.Param] {
+    var out: [ps.Param] = []
+    var i = 0
+    loop {
+        if i >= caps.len() {
+            break
+        }
+        out.append(ps.Param { qual: 0, is_self: false, name: caps[i], ty: [] })
+        i = i + 1
+    }
+    var p = 0
+    loop {
+        if p >= own.len() {
+            break
+        }
+        out.append(ps.Param { qual: own[p].qual, is_self: false, name: own[p].name, ty: [] })
+        p = p + 1
+    }
+    return out
+}
+
+
+// LamColl collects each lambda as a synthetic lifted FnDecl into `lams`, in the SAME traversal order the
+// emit pass hits them (statement order, then expression left-to-right) — so the em_fn_N numbering the
+// collection assigns matches the `cur_lambda` counter the em_closure site increments. Flat lambdas only (a
+// lambda body is NOT re-walked; nested lambdas are a documented gap, as in the VM path).
+struct LamColl {
+    lams: [ps.FnDecl]
+
+
+    fn cl_expr(mut self, e: ps.Expr) {
+        match e {
+            case EUnary(op, operand) {
+                self.cl_expr(operand.value)
+            }
+            case EBinary(op, l, r) {
+                self.cl_expr(l.value)
+                self.cl_expr(r.value)
+            }
+            case ECall(callee, args) {
+                self.cl_expr(callee.value)
+                var i = 0
+                loop {
+                    if i >= args.len() {
+                        break
+                    }
+                    self.cl_expr(args[i])
+                    i = i + 1
+                }
+            }
+            case EGet(object, name) {
+                self.cl_expr(object.value)
+            }
+            case EIndex(object, index) {
+                self.cl_expr(object.value)
+                self.cl_expr(index.value)
+            }
+            case EArray(elems, lines) {
+                var i = 0
+                loop {
+                    if i >= elems.len() {
+                        break
+                    }
+                    self.cl_expr(elems[i])
+                    i = i + 1
+                }
+            }
+            case EStructLit(ty, fields) {
+                var i = 0
+                loop {
+                    if i >= fields.len() {
+                        break
+                    }
+                    self.cl_expr(fields[i].value)
+                    i = i + 1
+                }
+            }
+            case ETry(operand) {
+                self.cl_expr(operand.value)
+            }
+            case ERange(lo, hi) {
+                self.cl_expr(lo.value)
+                self.cl_expr(hi.value)
+            }
+            case EStr(parts) {
+                var i = 0
+                loop {
+                    if i >= parts.len() {
+                        break
+                    }
+                    if parts[i].hole.len() > 0 {
+                        self.cl_expr(parts[i].hole[0])
+                    }
+                    i = i + 1
+                }
+            }
+            case ELambda(params, body) {
+                let caps = cgc_lambda_captures(params, body)
+                let lp = cgc_lifted_params(caps, params)
+                self.lams.append(ps.FnDecl { name: "<lambda>", generics: [], params: lp, ret: [], has_body: true, body: body, reqs: [], req_lines: [], enss: [], ens_lines: [] })
+            }
+            case _ {
+            }
+        }
+    }
+
+
+    fn cl_stmt(mut self, s: ps.Stmt) {
+        match s {
+            case SLet(is_var, name, ty, value) {
+                self.cl_expr(value.value)
+            }
+            case SReturn(value, line) {
+                if value.len() > 0 {
+                    self.cl_expr(value[0].value)
+                }
+            }
+            case SExpr(expr) {
+                self.cl_expr(expr.value)
+            }
+            case SAssign(target, value) {
+                self.cl_expr(target.value)
+                self.cl_expr(value.value)
+            }
+            case SIf(cond, then_blk, els) {
+                self.cl_expr(cond.value)
+                self.cl_block(then_blk)
+                self.cl_block(els)
+            }
+            case SFor(vname, index_var, iter, body) {
+                self.cl_expr(iter.value)
+                self.cl_block(body)
+            }
+            case SLoop(body) {
+                self.cl_block(body)
+            }
+            case SMatch(value, cases) {
+                self.cl_expr(value.value)
+                var ci = 0
+                loop {
+                    if ci >= cases.len() {
+                        break
+                    }
+                    self.cl_block(cases[ci].body)
+                    ci = ci + 1
+                }
+            }
+            case SBlock(body) {
+                self.cl_block(body)
+            }
+            case SSpawn(call) {
+                self.cl_expr(call.value)
+            }
+            case SNursery(body, line) {
+                self.cl_block(body)
+            }
+            case _ {
+            }
+        }
+    }
+
+
+    fn cl_block(mut self, body: [ps.Stmt]) {
+        var i = 0
+        loop {
+            if i >= body.len() {
+                break
+            }
+            self.cl_stmt(body[i])
+            i = i + 1
+        }
+    }
+}
+
+
+// build_lam_coll walks every declared fn/method body in declaration order, returning a LamColl whose `lams`
+// holds each lambda as a synthetic lifted FnDecl. Slot for entry k is `fn_count(decls) + k`. Returned WHOLE
+// (not the field — a partial move is unsupported), read in place by emit_program.
+fn build_lam_coll(decls: [ps.Decl]) -> LamColl {
+    var c = LamColl { lams: [] }
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.has_body {
+                    c.cl_block(f.body)
+                }
+            }
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        c.cl_block(methods[mi].body)
+                    }
+                    mi = mi + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return c
+}
+
+
+// count_lambdas_body returns how many top-level lambdas a fn body contains (its em_closure counter span).
+fn count_lambdas_body(body: [ps.Stmt]) -> int {
+    var c = LamColl { lams: [] }
+    c.cl_block(body)
+    return c.lams.len()
+}
+
+
 // emit_program writes the whole C translation unit for the merged module declarations, byte-identical to
 // stage-0 `inglec --emit=c`. It iterates `decls` once per section, keeping a shared em_fn_N counter.
 fn emit_program(decls: [ps.Decl], filename: string) {
@@ -5111,6 +5588,8 @@ fn emit_program(decls: [ps.Decl], filename: string) {
     let fn_ret_elem_struct = build_fn_ret_elem_structs(decls, stab.names)
     let fn_ret_struct = build_fn_ret_structs(decls, stab)
     let fn_ret_enum = build_fn_ret_enum(decls, etab)
+    let lc = build_lam_coll(decls)             // lifted lambdas, numbered `total + k` (OFI-206)
+    let grand = total + lc.lams.len()                // total em_fn slots (declared + lambdas)
     println("// Generated by `inglec --emit=c` from {filename}. Do not edit.")
     println("// The bytecode VM is the reference semantics; tests/native diffs the two.")
     println("#include \"ember_rt.h\"")
@@ -5151,6 +5630,15 @@ fn emit_program(decls: [ps.Decl], filename: string) {
         }
         i = i + 1
     }
+    // lifted-lambda forward declarations (em_fn_{total+k}), in collection order
+    var lf = 0
+    loop {
+        if lf >= lc.lams.len() {
+            break
+        }
+        println("static {fn_ret_ctype(lc.lams[lf], stab)} em_fn_{total + lf}({fn_param_list(lc.lams[lf], false, stab, 0 - 1)});")
+        lf = lf + 1
+    }
     println("")
     // the em_invoke dispatcher
     println("Value em_invoke(EmberRt *ctx, int fn_index, Value *slots) \{")
@@ -5188,6 +5676,15 @@ fn emit_program(decls: [ps.Decl], filename: string) {
         }
         j = j + 1
     }
+    // lifted-lambda em_invoke cases (fn_index total+k)
+    var li = 0
+    loop {
+        if li >= lc.lams.len() {
+            break
+        }
+        emit_invoke_case(lc.lams[li], total + li, false, stab, 0 - 1)
+        li = li + 1
+    }
     println("        default: break;")
     println("    \}")
     println("    em_panic(\"em_invoke: not a callable function\");")
@@ -5196,6 +5693,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
     println("")
     // the function bodies
     var b = 0
+    var lam_next = total                          // the em_fn slot the NEXT lifted lambda takes
     var k = 0
     loop {
         if k >= decls.len() {
@@ -5204,9 +5702,10 @@ fn emit_program(decls: [ps.Decl], filename: string) {
         match decls[k] {
             case DFn(f) {
                 if f.has_body {
-                    emit_fn_body(f, b, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab)
+                    emit_fn_body(f, b, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next)
+                    lam_next = lam_next + count_lambdas_body(f.body)
                     b = b + 1
-                    if b < total {
+                    if b < grand {
                         println("")
                     }
                 }
@@ -5219,9 +5718,10 @@ fn emit_program(decls: [ps.Decl], filename: string) {
                         break
                     }
                     if methods[mi].has_body {
-                        emit_fn_body(methods[mi], b, true, owner, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab)
+                        emit_fn_body(methods[mi], b, true, owner, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next)
+                        lam_next = lam_next + count_lambdas_body(methods[mi].body)
                         b = b + 1
-                        if b < total {
+                        if b < grand {
                             println("")
                         }
                     }
@@ -5232,6 +5732,19 @@ fn emit_program(decls: [ps.Decl], filename: string) {
             }
         }
         k = k + 1
+    }
+    // lifted-lambda bodies (em_fn_{total+k}); a flat lambda body has no nested lambda, so lambda_start=0
+    var lb = 0
+    loop {
+        if lb >= lc.lams.len() {
+            break
+        }
+        emit_fn_body(lc.lams[lb], total + lb, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, 0)
+        b = b + 1
+        if b < grand {
+            println("")
+        }
+        lb = lb + 1
     }
     println("")
     // the C main wrapper, invoking the Ingle `main`
