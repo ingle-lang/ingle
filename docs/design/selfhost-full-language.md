@@ -308,6 +308,57 @@ bare-metal codegen rides — strengthening selfhost strengthens the endgame.
 
 ## 8. Progress log
 
+- **2026-07-22 — Phase 1 opened; diagnosis reshaped the map (favorably).**
+  - **Tier 3 is substantially DONE on the VM backend already**: `bounded_generic`,
+    `multibound_generic`, `hash_eq_bound`, `generic_bounded_ctor` all pass byte-identical today —
+    the witness machinery that landed with the OFI-175 unblock went far beyond what OFI-174
+    records. Phase 2's VM side is mostly verification + gating, not construction.
+  - The live Tier-2 frontier is a **10-file cluster**, split by severity: 6 byte-divergent but
+    run-correct (instance-numbering fidelity: `generic_hof_strings`, `generic_method`,
+    `generic_nested_struct`, `generic_struct_pack`, `stdlib_list`, `stdlib_list_sort`); **4
+    run-wrong, 3 of them silently** (`generic_literal_vs_lt` 220-not-149, `generic_nested` +
+    `generic_nested_enum` print `<obj>`, `map_array_value` SIGTRAP).
+  - **Every correctness failure traces to one root**: silent emit-nothing fallbacks in the VM
+    backend's typed dispatch (`gen_field_access`'s discarded boolean; `gen_method_call`'s
+    else-nothing paths), reached because type information does not flow through generic-instance
+    field reads, generic-enum payload bindings, nested-array elements — and `mono_arg_key` keys
+    any VARIABLE argument as `k0`, collapsing `map<[int]>`/`map<[string]>` into one instance.
+  - **P1a landed (`d258867`)**: ten `cg_internal_error` tripwires close every silent-nothing site
+    in `codegen.ig` — the VM twin of Phase 0. Gate 1477/0 armed; the 4 run-wrong files now exit
+    70 naming the exact untypeable construct; the 6 numbering-only files correctly do not trip.
+  - **P1b (next): the type-key flow substrate** — instance type-args through generic-struct field
+    reads (`field_type_kind` substitution), generic-enum payload bindings, nested-array element
+    codes, and a slot-aware `mono_arg_key`/instance keying matching stage-0's
+    `build_fn_instances` exactly. That is what makes the tripwires stop firing and the 10 files
+    byte-identical.
+- **2026-07-22 — P1b·1–3 landed: the Tier-2 RUN-CORRECTNESS class is CLOSED.** All 10 cluster
+  files now run correct through the self-hosted compiler; `map_array_value` is byte-identical too.
+  - **P1b·1 (`5a801aa`)** — `map_array_value` end-to-end: an ARRAY value-type case in
+    `scrutinee_call_payload` (+ `key_array_elem_code`, a no-slicing structural key mapper), the
+    `gret_bare` table (a `[T]`-returning generic whose `T` binds from a BARE-`T` param reads the
+    ARG's own type as the result element), and `field_receiver_targs` learning generic-struct
+    LOCALS from the existing `mrecv` record. Also verified from the stage-0 map: **the OFI-063
+    deep-clone needed NOTHING** — `own_into_slot` via `OP_INCREF` was already byte-identical
+    (OFI-174's (b)/(c) claims were stale; the erased retain/drop discipline had landed).
+  - **P1b·2 (`3b0061b`)** — nested-generic struct chains: `f_tpidx`/`st_ftpidx` + a
+    `tparam_field_code` receiver-substitution in `expr_type_kind`, so `b.value.value` on
+    `Box<Box<int>>` emits the stage-0 double-`GET_FIELD`. `generic_nested` => 7 (was `<obj>`),
+    `generic_literal_vs_lt` => 149 (was silently 220).
+  - **P1b·3 (`e5055ea`)** — the enum twin: `vf_tpidx`/`ev_ftpidx` + `erecv_name`/`erecv_targs`
+    (annotation targs of enum-typed locals) + a match-cascade substitution branch.
+    `generic_nested_enum` => 9. **The Phase-0 tripwire caught its own author**: the first version
+    used `self.erecv_targs[ei].split("_")` — the exact OFI-173 indexed-field-element lowering the
+    C-emit lacks — and the reproduction fixed point failed LOUDLY (1475/2) instead of shipping a
+    miscompiled compiler; fixed with the documented bind-to-local pattern. Gate 1477/0.
+  - **Remaining for full Phase-1 fidelity (P1b·4): the nested-key grammar + slot-aware keying.**
+    `ty_args_key`/`ty_key_name` flatten nested type args (`Box<Box<int>>` records `"Box"`,
+    losing `<int>`), so (a) depth-2 tparam fields can't prove their substitution is scalar — a
+    safe extra `INCREF` (runtime no-op) remains on `generic_nested`/`generic_literal_vs_lt`;
+    (b) `mono_arg_key` still keys variables as `k0`, collapsing `map<[int]>`/`map<[string]>`
+    (the `generic_hof_strings`/`stdlib_list*` missing-instance deltas). The key-format migration
+    must change the PRE-PASS (`FnInstColl`) and gen-pass coherently — instance-key strings are
+    internal, but both passes must produce identical keys and stage-0's instance SET and ORDER.
+
 - **2026-07-22 — campaign opened (OFI-218).** Phase 0 landed: the four `cgen_c.ig` silent stubs
   are hard `cgc_internal_error` exits (70); doc written; measurement below.
 - **2026-07-22 — Phase 0 baseline (the numbers the campaign moves):**
