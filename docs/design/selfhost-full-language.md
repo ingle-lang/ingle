@@ -449,6 +449,22 @@ bare-metal codegen rides — strengthening selfhost strengthens the endgame.
     `ps.TyName(...)` variant construction the backend can't emit → a parser-side ctor; and a
     `hof_srcs[hi].split("_")` indexed-element method call (OFI-173 C-emit gap) → bind-to-local. The
     tripwire discipline paid for itself again.
+- **2026-07-23 — Phase 3 opened: LAMBDA LIFTING in the C-emit landed (OFI-206 pt2, `d20d364`).** The
+  self-hosted C-emit (`cgen_c.ig`) can now compile a lambda used as a VALUE — the single biggest
+  C-emit capability gap. Mapped stage-0's machinery (a read-only agent over `src/cgen_c.c` +
+  `src/check.c`) then ported it: a lambda lifts to a top-level `em_fn_N` numbered AFTER all declared
+  fns/methods in body-traversal discovery order; a lambda value → `em_closure(&g_em, N, ncap, cap0…)`
+  (scalar captures boxed, heap captures as-is); the lifted body is `em_fn_N(Value <captures…>, Value
+  <own…>)`, all boxed, plus a forward decl + `em_invoke` case. New machinery: `CgcFv` capture walker
+  (duplicated from the VM's `FvCtx`), `LamColl` collection walker (mirrors the emit traversal so the
+  collected numbering == the `em_closure` counter), a 4th `emit_program` section, `CgcGen.cur_lambda`
+  threaded per fn. **Byte-identical verified:** bare lambda, capturing lambda (`|z| z*n`), and the
+  OFI-206 canonical `a.map(|x| x*2)`. Gated: `tests/selfhost/cgen_c/lambda_lift.ig`. `make selfhost`
+  **1480/0**; reproduction fixed point holds (the new machinery compiles itself byte-identically).
+  **Newly exposed (separate follow-on):** `generic_hof_strings`/`stdlib_list` still C-emit-diverge, but
+  on DEEPER C-emit generic-HOF gaps (closure-call string-temp arg masking, return-type-through-generic
+  `let` bindings, an OFI-173 field/method construct) that the lambda tripwire previously MASKED — the
+  lambda lifting is correct; these are the next C-emit-completeness items.
 
   - **THE COUPLING CONSTRAINT (why B-nested + A waited for the synthesis map):** `ty_args_key` is FLAT
     (`ty_key_name` collapses a nested generic to its head), and `mrecv_args` (its output) is used for
