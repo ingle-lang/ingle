@@ -503,6 +503,11 @@ struct Flare {
     // for one frame via set_click(); _fired(id) reports it, so a button/nav whose id matches registers a
     // click with no rect. Empty on the desktop, so it is inert there. See flare.html() / OFI-213.
     _click_id: string
+    // Web (WASM) text input. On the web the BROWSER's <input> owns the text (native caret/IME); Flare reads
+    // it back rather than running its own editor. The client drains DOM input events each frame and calls
+    // set_input(id, value); text_field/text_area consult this map. Reset every begin() so a stale entry
+    // never overrides a value the app changed programmatically. Empty on the desktop (inert).
+    _web_inputs: map.Map<string, string>
 
 
     // begin starts a frame: snapshot input, reset the layout tree, open the root column (it fills
@@ -533,6 +538,7 @@ struct Flare {
         self.rkind = []
         self.rtext = []
         self.rid = []
+        self._web_inputs = map.Map<string, string>{ buckets: [], count: 0 }   // web: injected after begin()
     }
 
 
@@ -1661,6 +1667,9 @@ struct Flare {
                     }
                 }
                 case None {}
+            }
+            if self._fired(id) {                     // web (WASM) client: a DOM click on the toggle
+                result = !on
             }
         }
         var kind = _CHECKBOX
@@ -2947,6 +2956,9 @@ struct Flare {
             }
             case None {}
         }
+        if self._fired(id) && !(self._modal && !self._in_modal) {   // web (WASM) client: a DOM click on this nav row
+            clicked = true
+        }
         var shown = txt                             // ellipsize the LABEL to the grown width (1-frame lag, like
         if w_last > 0 {                             // text_area's auto-grow) so long titles fill the pill, not 24 chars
             shown = self._fit_text(txt, w_last - self.ui.style.pad * 2)
@@ -4110,6 +4122,10 @@ struct Flare {
                 case None {}
             }
         }
+        match self._web_inputs.get(id) {         // web (WASM) client: the browser's <input> owns the text
+            case Some(v) { shown = v }
+            case None {}
+        }
         let node = self.lo.leaf(0, self.ui.style.row_h, 0)   // STRETCH align gives it the full width
         self._queue(node, _FIELD, shown, id)
         return shown
@@ -4136,6 +4152,10 @@ struct Flare {
                 }
                 case None {}
             }
+        }
+        match self._web_inputs.get(id) {         // web (WASM) client: the browser's <textarea> owns the text
+            case Some(v) { shown = v }
+            case None {}
         }
         // Auto-grow: height from the wrapped line count at LAST frame's width (1-frame lag, imperceptible).
         var w = 0
@@ -4302,6 +4322,14 @@ struct Flare {
     }
 
 
+    // set_input injects the browser's current text for a field id (data-fl-id). The web client calls this
+    // after begin() for each DOM input event it drained this frame; text_field/text_area then return that
+    // value so the app's state follows the <input>. Inert on the desktop, which never calls it.
+    fn set_input(mut self, id: string, value: string) {
+        self._web_inputs.set(id, value)
+    }
+
+
     // html renders the frame just built — the layout-intent tree plus the paint queue — to a
     // self-contained HTML+CSS page. This is the SSR terminal walk (OFI-212 / W3): a SECOND walk of the
     // exact structures finish() paints, so a component's build code is byte-identical on both surfaces.
@@ -4439,6 +4467,14 @@ struct Flare {
             return "<blockquote class=\"fl-quote\">" + str.replace(t, "\n", "<br>") + "</blockquote>"
         } else if k == _CODE {
             return "<pre class=\"fl-code\"><code>" + t + "</code></pre>"
+        } else if k == _CHECKBOX {
+            return "<span class=\"fl-check\"" + ida + "><span class=\"fl-pill\"></span>" + t + "</span>"
+        } else if k == _CHECKBOX_ON {
+            return "<span class=\"fl-check fl-on\"" + ida + "><span class=\"fl-pill\"></span>" + t + "</span>"
+        } else if k == _FIELD {
+            return "<input class=\"fl-field\"" + ida + " value=\"" + t + "\">"
+        } else if k == _TAREA {
+            return "<textarea class=\"fl-field fl-area\"" + ida + ">" + t + "</textarea>"
         }
         return "<span data-fl-kind=\"{k}\">" + t + "</span>"
     }
@@ -4618,6 +4654,18 @@ struct Flare {
             ".fl-quote\{margin:0;padding:.3em 1em;border-left:3px solid var(--accent);color:var(--muted)\}" +
             ".fl-badge\{align-self:flex-start;font-size:.8em;padding:.15em .5em;border-radius:999px;" +
             "background:var(--track);color:var(--muted)\}" +
+            ".fl-check\{display:inline-flex;align-items:center;gap:.5em;cursor:pointer;user-select:none;" +
+            "align-self:flex-start\}" +
+            ".fl-pill\{width:2em;height:1.15em;border-radius:999px;background:var(--track);position:relative;" +
+            "flex:none;transition:background .12s\}" +
+            ".fl-pill::after\{content:'';position:absolute;top:.15em;left:.15em;width:.85em;height:.85em;" +
+            "border-radius:50%;background:#fff;transition:left .12s\}" +
+            ".fl-check.fl-on .fl-pill\{background:var(--accent)\}" +
+            ".fl-check.fl-on .fl-pill::after\{left:calc(100% - 1em)\}" +
+            ".fl-field\{font:inherit;padding:.4em .6em;border:1px solid var(--border);border-radius:var(--radius);" +
+            "background:var(--panel);color:var(--ink);width:100%\}" +
+            ".fl-field:focus\{outline:2px solid var(--accent);outline-offset:-1px\}" +
+            ".fl-area\{min-height:4em;resize:vertical;font:inherit\}" +
             "hr\{width:100%;border:none;border-top:1px solid var(--border);margin:0\}" +
             "strong\{font-weight:700\}em\{font-style:italic\}"
         return root + rules
@@ -5024,7 +5072,8 @@ fn new() -> Flare {
         _toasts: [],
         _tnext: 0,
         _action: "",
-        _click_id: ""
+        _click_id: "",
+        _web_inputs: map.Map<string, string>{ buckets: [], count: 0 }
     }
 }
 

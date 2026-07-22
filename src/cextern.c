@@ -985,9 +985,14 @@ EM_JS(char *, ingle_dom_next_click, (void), {
     if (!globalThis.__ingleClicks || globalThis.__ingleClicks.length === 0) { return stringToNewUTF8(""); }
     return stringToNewUTF8(globalThis.__ingleClicks.shift());
 });
+EM_JS(char *, ingle_dom_next_input, (void), {
+    if (!globalThis.__ingleInputs || globalThis.__ingleInputs.length === 0) { return stringToNewUTF8(""); }
+    return stringToNewUTF8(globalThis.__ingleInputs.shift());   // "id\tvalue" of the next DOM input event
+});
 #else
 static void  ingle_dom_set_html(const char *s) { (void)s; }
 static char *ingle_dom_next_click(void)        { return strdup(""); }
+static char *ingle_dom_next_input(void)        { return strdup(""); }
 #endif
 
 // web_set_html(html) -> 0. Replace the page's #app content with the freshly rendered frame.
@@ -1002,6 +1007,14 @@ static int w_web_set_html(const Value *a, Value *o) {
 static int w_web_next_click(const Value *a, Value *o) {
     (void)a;
     o[0] = PTR_VAL(ingle_dom_next_click());
+    return 1;
+}
+
+// web_next_input() -> string. Pop the next DOM text-input change as "id\tvalue" (data-fl-id + the field's
+// current text), or "" if none. Same copied-and-freed string convention as web_next_click.
+static int w_web_next_input(const Value *a, Value *o) {
+    (void)a;
+    o[0] = PTR_VAL(ingle_dom_next_input());
     return 1;
 }
 
@@ -1073,6 +1086,7 @@ static const CExternSig g_sigs[] = {
     // indices baked into the emitted C match this table.
     { "web_set_html",   1, { 'p' }, 1, { 'i' }, 0, 0 },
     { "web_next_click", 0, { 0 },   1, { 'p' }, 0, 1 },
+    { "web_next_input", 0, { 0 },   1, { 'p' }, 0, 1 },
     { "web_sleep",      1, { 'i' }, 1, { 'i' }, 0, 0 },
 #endif
 #if EMBER_NET
@@ -1127,7 +1141,7 @@ static const CExternFn g_fns[] = {
     w_em_now_unix, w_em_mkdir, w_em_remove,
     w_em_tcp_listen, w_em_tcp_accept, w_em_tcp_connect, w_em_recv, w_em_send, w_em_close,
 #if EMBER_GFX_HEADLESS
-    w_web_set_html, w_web_next_click, w_web_sleep,
+    w_web_set_html, w_web_next_click, w_web_next_input, w_web_sleep,
 #endif
 #if EMBER_NET
     w_http_post,

@@ -461,13 +461,13 @@ web: $(RT_LIB_WEB) | build
 # needs emscripten (brew install emscripten); the rest of the build never touches it. The same Flare
 # builder API that draws the desktop window runs client-side in the browser, re-rendering on each click.
 # Usage:  make wasm APP=examples/web/counter.ig   → build/wasm/<name>.{html,js,wasm} (serve + open).
-WASM_APP  ?= examples/web/counter.ig
-WASM_NAME := $(notdir $(basename $(WASM_APP)))
+APP       ?= examples/web/counter.ig
+WASM_NAME := $(notdir $(basename $(APP)))
 WASM_EMFLAGS := -O2 -sASYNCIFY=1 -sEXPORTED_RUNTIME_METHODS=UTF8ToString,stringToNewUTF8 -sALLOW_MEMORY_GROWTH=1
 wasm: web | build
 	@command -v emcc >/dev/null 2>&1 || { echo "wasm: emcc not found — run 'brew install emscripten'"; exit 1; }
 	@mkdir -p build/wasm
-	$(WEB_BIN) --emit=c $(WASM_APP) > build/wasm/$(WASM_NAME).c
+	$(WEB_BIN) --emit=c $(APP) > build/wasm/$(WASM_NAME).c
 	emcc $(WASM_EMFLAGS) -Iinclude build/wasm/$(WASM_NAME).c src/runtime.c src/cextern.c src/graphics_headless.c \
 	  -DEMBER_GRAPHICS=1 -DEMBER_GFX_HEADLESS=1 --shell-file tools/wasm-shell.html -o build/wasm/$(WASM_NAME).html
 	@echo "  built build/wasm/$(WASM_NAME).{html,js,wasm} — serve build/wasm and open $(WASM_NAME).html"

@@ -13,10 +13,22 @@
 <div id="app" style="padding:1rem;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">loading Ingle → WASM…</div>
 <script>
   // Delegated click bridge: queue each clicked widget's data-fl-id for the Ingle loop (web_next_click).
+  // Inputs/textareas are skipped here (a click there is focus/caret, not a widget action) — they feed
+  // the input bridge below instead, and are left alone so focus and caret placement work normally.
   globalThis.__ingleClicks = [];
+  globalThis.__ingleInputs = [];
+  function isField(el) { return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'); }
   document.addEventListener('click', function (e) {
     var el = e.target && e.target.closest ? e.target.closest('[data-fl-id]') : null;
-    if (el) { e.preventDefault(); globalThis.__ingleClicks.push(el.getAttribute('data-fl-id')); }
+    if (el && !isField(el)) { e.preventDefault(); globalThis.__ingleClicks.push(el.getAttribute('data-fl-id')); }
+  });
+  // Delegated input bridge: on every keystroke queue "id\tvalue" so the Ingle loop (web_next_input) can
+  // mirror the field's current text into Flare's state. The browser's <input> owns the caret/IME.
+  document.addEventListener('input', function (e) {
+    var el = e.target;
+    if (isField(el) && el.hasAttribute('data-fl-id')) {
+      globalThis.__ingleInputs.push(el.getAttribute('data-fl-id') + '\t' + el.value);
+    }
   });
 
   // ingleMorph patches the live DOM toward `html` IN PLACE instead of replacing innerHTML — so an
@@ -41,6 +53,18 @@
       for (var m = 0; m < newN.attributes.length; m++) {
         var a = newN.attributes[m];
         if (oldN.getAttribute(a.name) !== a.value) { oldN.setAttribute(a.name, a.value); }
+      }
+      // Form fields: the browser owns .value while the user types. Only push a value the app CHANGED
+      // (differs from the live field) — a no-op during typing (Flare already mirrored it), so the caret is
+      // never disturbed; a real change (e.g. clearing after submit) applies and the caret is kept if focused.
+      if (isField(oldN)) {
+        var nv = newN.tagName === 'TEXTAREA' ? newN.textContent : (newN.getAttribute('value') || '');
+        if (oldN.value !== nv) {
+          var focused = document.activeElement === oldN, at = focused ? oldN.selectionStart : 0;
+          oldN.value = nv;
+          if (focused) { try { oldN.setSelectionRange(at, at); } catch (e) {} }
+        }
+        return;   // do not morph a field's children (a textarea's text is its .value, handled above)
       }
       morphChildren(oldN, [].slice.call(newN.childNodes));
     }

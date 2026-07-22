@@ -6,19 +6,41 @@
 // (the one web-flavored build — see `make web` / `make wasm` — runs everywhere, only DOES something in a
 // browser). Compile a component to a browser app with `make wasm APP=<file.ig>`. See flare.set_click().
 //
-// The event loop shape (see examples/web/counter.ig):
+// The event loop shape (see examples/web/todo.ig):
 //     loop {
-//         f.set_click(web.next_click())
 //         f.begin()
+//         web.pump(f)                  // drain this frame's DOM click + text-input events into f
 //         ...build the component...
 //         web.set_html(f.html())
 //         web.yield_ms(30)
 //     }
+import "std/flare" as flare
+import "std/string" as str
+
 
 extern "c" {
     fn web_set_html(html: string) -> i64
     fn web_next_click() -> string
+    fn web_next_input() -> string
     fn web_sleep(ms: i64) -> i64
+}
+
+
+// pump drains this frame's DOM events into `f`, right after begin(): the pending click (→ set_click) and
+// every text-input change (→ set_input, one per "id\tvalue" event). After this, build the component and
+// the clicked button / edited field register normally. The one call a Flare web app's loop needs.
+fn pump(mut f: flare.Flare) {
+    f.set_click(web_next_click())
+    loop {
+        let ev = web_next_input()
+        if ev == "" {
+            break
+        }
+        let tab = str.index_of(ev, "\t")
+        if tab >= 0 {
+            f.set_input(str.substring(ev, 0, tab), str.substring(ev, tab + 1, str.cp_count(ev)))
+        }
+    }
 }
 
 
