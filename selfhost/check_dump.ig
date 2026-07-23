@@ -4,6 +4,12 @@
 // `inglec --emit=bytecode` (exit 0 = accept, 65 = a check error).
 //
 //   inglec --emit=run selfhost/check_dump.ig <file.ig>
+//
+// NOTE: this is a SINGLE-FILE checker — it does NOT merge imports. A whole-program (merged) check would let
+// it see an imported declaration (e.g. a `std/web` direct extern, closing the 4 examples/web/*.ig misses),
+// but the checker's name resolution is not yet MODULE-SCOPED (OFI-073): two modules may legally share a
+// variant/helper name, and a merged global scope collides them → mass false-rejects (verified: merging
+// yielded 84). Merged checking (via checker.ig's check_decls) waits on module-scoped resolution.
 
 import "checker" as ck
 

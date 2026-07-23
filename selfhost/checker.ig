@@ -3603,8 +3603,15 @@ fn assignable(actual: int, expected: int, a_is_int_lit: bool, a_is_float_lit: bo
 
 // check parses + checks a source string and returns whether it was REJECTED (true = a diagnostic was
 // raised). M3a verdict parity; the diagnostic text + positions (M3c) follow.
+// check parses + checks a SINGLE source file (used by the single-file callers). check_decls checks an
+// already-merged declaration list (entry module + its transitive imports) so the checker sees imported
+// declarations — e.g. a `std/web` direct extern — exactly like stage-0's whole-program check (OFI-218 P4).
 fn check(src: string) -> bool {
-    let decls = ps.parse(src)
+    return check_decls(ps.parse(src))
+}
+
+
+fn check_decls(decls: [ps.Decl]) -> bool {
     var fns: [string] = []
     var structs: [string] = []
     var enums: [string] = ["Option", "Result"]                    // always-in-scope prelude enums
