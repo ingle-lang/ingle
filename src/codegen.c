@@ -1250,6 +1250,18 @@ static void gen_expr_raw(Codegen *cg, const Expr *e) {
                 break;
             }
 
+            // panic(msg): push the message string, then OP_PANIC — an unconditional abort that raises a
+            // runtime Fault (NEVER elided, unlike assert). It diverges (stmt_is_panic), so the trailing
+            // CONST 0 is never reached; it keeps the expression one value for the statement/arm context.
+            // Mirrored from the selfhost codegen — P5, the first Ingle-first feature.
+            if (callee->kind == EXPR_IDENT && strcmp(callee->as.ident, "panic") == 0 &&
+                e->as.call.arg_count == 1) {
+                gen_expr(cg, e->as.call.args[0]);   // the message string on the stack
+                emit(cg, OP_PANIC);
+                emit_const(cg, 0);   // placeholder result (unreachable — panic diverges)
+                break;
+            }
+
             // Data-carrying variant construction: `Circle(2.0)`. Prefer the checker's resolved enum
             // id + tag over a by-name lookup (no longer globally unique — OFI-073).
             if (callee->kind == EXPR_IDENT) {

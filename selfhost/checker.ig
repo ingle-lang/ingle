@@ -120,7 +120,7 @@ fn builtin_names() -> [string] {
         "mouse_down", "mouse_right_down", "mouse_wheel", "had_input", "set_event_waiting",
         "clipboard_get", "clipboard_set", "dropped_files",
         "tape_open", "tape_close", "tape_mark",
-        "assert", "clock", "len", "try_recv", "wrapping_add", "wrapping_sub", "wrapping_mul",
+        "assert", "panic", "clock", "len", "try_recv", "wrapping_add", "wrapping_sub", "wrapping_mul",
         "int", "float", "bool", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64"]
 }
 
@@ -2449,6 +2449,16 @@ struct Checker {
                                 self.error("assert's condition must be a bool")
                             }
                         }
+                        // panic(msg): a diverging trap. Exactly one argument, a string message (checked when
+                        // its type is concretely known). Its divergence is recognized in the return-flow walks
+                        // (expr_is_panic_call) so a `case None { panic(...) }` arm satisfies a `-> T` return.
+                        if name == "panic" {
+                            if args.len() != 1 {
+                                self.error("panic takes exactly one argument (its message)")
+                            } else if argtypes[0] != TY_INFER && argtypes[0] != TY_ERROR && argtypes[0] != TY_STRING {
+                                self.error("panic's message must be a string")
+                            }
+                        }
                         // D1: a bare-ident call to a top-level free function (not a local closure, builtin,
                         // method, or constructor) — arity, then argument types.
                         if self.resolve_local(name) == false && is_builtin(name) == false {
@@ -2919,6 +2929,37 @@ fn clone_bools(xs: [bool]) -> [bool] {
 }
 
 
+// stmt_is_panic reports whether `s` is a bare `panic(...)` call statement — the diverging builtin (P5).
+// A panic never returns, so the three return-flow walks below treat it as terminating: a `case None {
+// panic(msg) }` arm satisfies a `-> T` return with NO never-type (a narrow special-case, not a general
+// divergence analysis). Only the FREE-call form `panic(...)` diverges — a method form `x.panic()` (an
+// EGet callee) does not.
+fn stmt_is_panic(s: ps.Stmt) -> bool {
+    match s {
+        case SExpr(e) {
+            match e.value {
+                case ECall(callee, cargs) {
+                    match callee.value {
+                        case EIdent(nm) {
+                            return nm == "panic"
+                        }
+                        case _ {
+                            return false
+                        }
+                    }
+                }
+                case _ {
+                    return false
+                }
+            }
+        }
+        case _ {
+            return false
+        }
+    }
+}
+
+
 // block_exits_loop / stmt_exits_loop report whether a statement (sequence) ALWAYS leaves the enclosing loop
 // on every path — via `return` or a `break` that targets THIS loop. A body that always exits never reaches
 // the back-edge, so a move inside it can't recur (OFI-074). `continue` and fall-through reach the back-edge,
@@ -2956,7 +2997,7 @@ fn stmt_exits_loop(s: ps.Stmt) -> bool {
             return block_exits_loop(then_blk) && stmt_exits_loop(els[0])
         }
         case _ {
-            return false
+            return stmt_is_panic(s)                  // a `panic(...)` never reaches the back-edge (OFI-074)
         }
     }
 }
@@ -3005,7 +3046,7 @@ fn stmt_diverges(s: ps.Stmt) -> bool {
             return loop_exit_break(body) == false
         }
         case _ {
-            return false
+            return stmt_is_panic(s)                  // a `panic(...)` doesn't fall through to the join
         }
     }
 }
@@ -3060,7 +3101,7 @@ fn stmt_returns(s: ps.Stmt) -> bool {
             return loop_exit_break(body) == false    // an infinite loop with no exiting break diverges
         }
         case _ {
-            return false                             // let/assign/expr/for/spawn/nursery/break/continue
+            return stmt_is_panic(s)                  // a `panic(...)` terminates the block (satisfies `-> T`)
         }
     }
 }

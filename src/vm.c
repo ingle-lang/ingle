@@ -633,6 +633,22 @@ static void contract_fault(VM *vm, const CallFrame *frame, const char *msg) {
 }
 
 
+// panic_fault renders a user `panic(msg)` — an UNCONDITIONAL runtime trap (FCAT_RUNTIME, code "panic"),
+// distinct from a contract/assert violation (FCAT_CONTRACT, contract_fault). The message is the runtime
+// string the user handed to panic. The OP_PANIC handler owns the --check short-circuit (a reached panic
+// is a real counterexample), so this always renders.
+static void panic_fault(VM *vm, const CallFrame *frame, const char *msg) {
+    Fault f;
+    memset(&f, 0, sizeof f);
+    f.severity = FSEV_ERROR;
+    f.category = FCAT_RUNTIME;
+    f.code     = "panic";
+    f.message  = msg;
+    fault_fill_callstack(&f, vm, frame);
+    fault_render(&f, stderr);
+}
+
+
 
 
 
@@ -2479,6 +2495,22 @@ static VMResult run(VM *vm, Value *out, const Tracer *tracer) {
                     return VM_RUNTIME_ERROR;
                 }
                 VM_NEXT();
+            }
+            VM_CASE(OP_PANIC): {
+                // A user `panic(msg)`: the message string Value is on the stack (its expression was
+                // emitted just before — a literal or a runtime string, e.g. `expect`'s parameter).
+                // Unconditionally fatal, never elided — pop the message and raise a runtime Fault.
+                const char *msg = AS_STRING(vm->sp[-1])->chars;   // NUL-terminated (make_string)
+                vm->sp--;                                          // pop the message
+                if (vm->check_mode) {
+                    // Property-checking (§5j): a REACHED panic is a genuine counterexample (unlike a
+                    // `requires` violation, which just means the generated input is out of domain).
+                    vm->check_msg = msg;
+                    return VM_RUNTIME_ERROR;
+                }
+                emit_semantic_event(tracer, frame, vm, "panic", msg);
+                panic_fault(vm, frame, msg);
+                return VM_RUNTIME_ERROR;
             }
             VM_CASE(OP_LOOP): {
                 uint16_t offset = (uint16_t)((frame->ip[0] << 8) | frame->ip[1]);

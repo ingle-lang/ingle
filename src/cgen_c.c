@@ -1521,6 +1521,16 @@ static void emit_call(CgcGen *g, const Expr *e) {
             fputc(')', g->out);
             return;
         }
+        // panic(msg): a diverging user trap (never elided, unlike assert). The message is a runtime
+        // string Value (so `expect(o, msg)` can pass its parameter), so it goes through em_panic_val, not
+        // em_assert's const char*. em_panic_val returns void and diverges, so in expression position wrap it
+        // in a comma so the emitter still yields a Value (never evaluated). Mirrors the selfhost C-emit — P5.
+        if (e->as.call.arg_count == 1 && strcmp(nm, "panic") == 0) {
+            fputs("(em_panic_val(&g_em, ", g->out);
+            emit_expr(g, e->as.call.args[0]);
+            fputs("), INT_VAL(0))", g->out);
+            return;
+        }
         // Any remaining native builtin (read_line, file I/O, libm math, char/parse helpers,
         // concat, args/env/exit) → the em_native dispatcher. print/println keep their own path
         // above; the verification-only and graphics ids are not part of the native runtime.

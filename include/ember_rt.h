@@ -372,6 +372,16 @@ static inline void em_panic(const char *msg) {
     exit(70);
 }
 
+// em_panic_val — the user-facing `panic(msg)` on the native backend. Unlike em_panic (which takes a
+// C literal, used by the builtin traps above), the message is a runtime string Value, so `expect(o, msg)`
+// can hand its parameter straight through. Renders it and aborts like em_panic. Diverging, never elided.
+static inline void em_panic_val(EmberRt *ctx, Value msg) {
+    (void)ctx;
+    ObjString *s = AS_STRING(msg);
+    fprintf(stderr, "inglec: runtime error: %.*s\n", (int)s->length, s->chars);
+    exit(70);
+}
+
 // A value is truthy iff its integer payload is non-zero (bool is an int 0/1). Used
 // for `if`/`loop` conditions and the short-circuit operands of `&&`/`||`.
 static inline int em_truthy(Value v) {

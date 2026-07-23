@@ -1,0 +1,2 @@
+error[panic]: something went wrong
+  --> tests/run/panic.ig:5:11 (in main)

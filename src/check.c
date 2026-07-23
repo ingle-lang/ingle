@@ -5054,6 +5054,23 @@ static SemType check_expr_inner(Checker *c, Expr *e) {
                 return TY_UNIT;
             }
 
+            // panic(msg): a DIVERGING trap (P5 — the first Ingle-first feature, mirrored here from
+            // selfhost). Exactly one string message argument — a runtime string (so `expect(o, msg)` can
+            // hand its parameter straight through, unlike assert's literal-only message). Never elided.
+            // Returns TY_INFER (lenient): panic never actually yields a value, and its divergence is what
+            // the return-flow walks (stmt_is_panic) key on so a `case None { panic(...) }` arm satisfies a
+            // `-> T` return with no never-type.
+            if (callee->kind == EXPR_IDENT && strcmp(callee->as.ident, "panic") == 0) {
+                if (argc != 1) {
+                    type_error(c, e->line, e->col, "panic takes exactly one argument (its message)");
+                }
+                SemType mt = argc >= 1 ? check_expr(c, e->as.call.args[0]) : TY_ERROR;
+                if (mt != TY_ERROR && mt != TY_STRING) {
+                    type_error(c, e->line, e->col, "panic's message must be a string");
+                }
+                return TY_INFER;
+            }
+
             // Data-carrying variant construction: `Circle(2.0)`, `Some(5)`.
             if (callee->kind == EXPR_IDENT) {
                 VariantInfo *v = resolve_variant(c, callee->as.ident);
@@ -5750,6 +5767,22 @@ static void report_unconsumed_drop_fields(Checker *c, int line, int col) {
 // treated as falling through, and only the last statement of a block is examined).
 static int block_diverges(const Block *b);
 
+// stmt_is_panic reports whether `s` is a bare `panic(...)` call statement — the diverging builtin (P5).
+// A panic never returns, so the return-flow walks treat it as terminating: a `case None { panic(msg) }`
+// arm satisfies a `-> T` return with NO never-type (a narrow special-case). Only the FREE-call form
+// diverges — a method form `x.panic()` (an EXPR_GET callee) does not. Mirrors selfhost checker.ig.
+static int stmt_is_panic(const Stmt *s) {
+    if (s->kind != STMT_EXPR) {
+        return 0;
+    }
+    const Expr *e = s->as.expr.expr;
+    if (e->kind != EXPR_CALL) {
+        return 0;
+    }
+    const Expr *callee = e->as.call.callee;
+    return callee->kind == EXPR_IDENT && strcmp(callee->as.ident, "panic") == 0;
+}
+
 static int stmt_diverges(const Stmt *s) {
     switch (s->kind) {
         case STMT_RETURN:
@@ -5762,6 +5795,8 @@ static int stmt_diverges(const Stmt *s) {
             return s->as.if_.else_branch != NULL &&
                    block_diverges(&s->as.if_.then_blk) &&
                    stmt_diverges(s->as.if_.else_branch);
+        case STMT_EXPR:
+            return stmt_is_panic(s);            // a `panic(...)` doesn't fall through (P5)
         default:
             return 0;
     }
@@ -7550,8 +7585,10 @@ static int stmt_returns(const Stmt *s) {
         case STMT_LOOP:
             // An infinite loop with no exiting break never falls through — it diverges.
             return !loop_exit_break(&s->as.loop.body);
+        case STMT_EXPR:
+            return stmt_is_panic(s);   // a `panic(...)` terminates the block, satisfying `-> T` (P5)
         default:
-            return 0;   // let/assign/expr/for/spawn/nursery/break/continue
+            return 0;   // let/assign/for/spawn/nursery/break/continue
     }
 }
 

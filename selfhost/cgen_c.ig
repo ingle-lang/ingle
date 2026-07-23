@@ -3889,6 +3889,12 @@ struct CgcGen {
                 if self.en.is_case_variant(name) {
                     return self.emit_enum_ctor(name, args)   // an enum-variant construction `Circle(4)` / prelude `Some(5)`
                 }
+                // panic(msg) in EXPRESSION position (e.g. a `case None { panic(m) }` arm whose value is used):
+                // em_panic_val diverges (renders the runtime string + exit 70), so wrap it in a comma expression
+                // that yields a placeholder Value — never evaluated, but keeps the emitter a value to hand back.
+                if name == "panic" && args.len() == 1 {
+                    return "(em_panic_val(&g_em, {self.emit_expr(args[0])}), INT_VAL(0))"
+                }
                 let nid = native_id_for_name(name)
                 if is_em_native_id(nid) {
                     // a native runtime builtin (byte_slice, read_file, math, …) → em_native(&g_em, <id>, <argc>,
@@ -5701,6 +5707,9 @@ struct CgcGen {
                                     }
                                     println(s + "));")
                                 } else {
+                                    // panic(msg) as a statement flows here too: emit_call_stmt wraps the
+                                    // expression form `(em_panic_val(…), INT_VAL(0))` in `(void)(…);`, matching
+                                    // stage-0's generic STMT_EXPR path byte-for-byte.
                                     self.emit_call_stmt(expr.value)
                                 }
                             }

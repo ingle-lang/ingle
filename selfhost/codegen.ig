@@ -92,6 +92,7 @@ let OP_RETURN: int = 88
 let OP_CONCAT: int = 89
 let OP_DUP: int = 5
 let OP_ROUTE_HOP: int = 90
+let OP_PANIC: int = 91
 
 
 // ty_is_scalar reports whether a type is a scalar (so a struct of only scalars is multi-slot, not boxed).
@@ -3860,7 +3861,7 @@ fn op_names() -> [string] {
         "STR_CHAR_COUNT", "STR_BYTES", "STR_SPLIT", "STR_PARSE_INT", "INT_TO_FLOAT", "FLOAT_TO_INT",
         "CONV", "CLOCK", "TO_STRING", "NURSERY_BEGIN", "CONTRACT_CHECK", "SPAWN", "NURSERY_END",
         "CHANNEL_NEW", "SEND", "RECV", "TRY_RECV", "CLOSE", "DROP", "INCREF", "RELEASE", "RETURN_STRUCT",
-        "RETURN", "CONCAT", "ROUTE_HOP"]
+        "RETURN", "CONCAT", "ROUTE_HOP", "PANIC"]
 }
 
 
@@ -3870,14 +3871,14 @@ fn op_kstart() -> [int] {
     return [0, 1, 2, 2, 2, 2, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 10, 10, 10, 11, 12, 13, 14, 15, 16, 16, 16,
         17, 18, 19, 20, 21, 22, 23, 26, 31, 33, 35, 37, 38, 38, 40, 42, 43, 45, 48, 49, 50, 50, 51, 53,
         54, 55, 56, 57, 57, 59, 59, 59, 59, 59, 59, 59, 59, 59, 59, 59, 59, 59, 59, 62, 62, 62, 63, 63,
-        64, 64, 65, 67, 67, 67, 67, 70, 73, 73, 74, 74, 74, 75, 75, 75]
+        64, 64, 65, 67, 67, 67, 67, 70, 73, 73, 74, 74, 74, 75, 75, 75, 75]
 }
 
 
 fn op_kcount() -> [int] {
     return [1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1,
         1, 1, 3, 5, 2, 2, 2, 1, 0, 2, 2, 1, 2, 3, 1, 1, 0, 1, 2, 1, 1, 1, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 3, 0, 0, 1, 0, 1, 0, 1, 2, 0, 0, 0, 3, 3, 0, 1, 0, 0, 1, 0, 0, 0]
+        0, 0, 0, 0, 0, 0, 3, 0, 0, 1, 0, 1, 0, 1, 2, 0, 0, 0, 3, 3, 0, 1, 0, 0, 1, 0, 0, 0, 0]
 }
 
 
@@ -9460,6 +9461,20 @@ struct Chunk {
                             self.gen_expr(args[0], line)
                             self.cur_line = line
                             self.emit(OP_CLOSE)
+                            return
+                        }
+                        // panic(msg): push the message string, then OP_PANIC — an unconditional abort that
+                        // raises a runtime Fault (never elided). It DIVERGES (the checker's stmt_is_panic knows
+                        // this), so the trailing CONST 0 is never reached; it exists only to leave the expression
+                        // one value, matching a normal call, so the statement/arm context stays stack-balanced
+                        // (stage-0's assert does the same with emit_const 0).
+                        if name == "panic" && args.len() == 1 {
+                            self.gen_expr(args[0], line)
+                            self.cur_line = line
+                            self.emit(OP_PANIC)
+                            let pidx = self.add_const_int(0)
+                            self.emit(OP_CONST)
+                            self.emit_idx(pidx)
                             return
                         }
                         // An `extern "c"` registry call lowers to CALL_C <registry index> <op>, NOT a normal

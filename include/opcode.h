@@ -122,7 +122,8 @@ typedef enum {
     X(OP_RETURN_STRUCT, "RETURN_STRUCT", OPS1(IDX))             \
     X(OP_RETURN,        "RETURN",        OPS0())                 \
     X(OP_CONCAT,        "CONCAT",        OPS0())                 \
-    X(OP_ROUTE_HOP,     "ROUTE_HOP",     OPS0())
+    X(OP_ROUTE_HOP,     "ROUTE_HOP",     OPS0())                 \
+    X(OP_PANIC,         "PANIC",         OPS0())
 
 typedef enum {
 #define X(name, mnemonic, operands) name,
