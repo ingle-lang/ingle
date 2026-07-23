@@ -5036,8 +5036,7 @@ struct Chunk {
             case EIdent(nm) {
                 let ei = cg_index_of(self.erecv_name, nm)
                 if ei >= 0 {
-                    let ts = self.erecv_targs[ei]      // bind before .split — the OFI-173 safe pattern
-                    let parts = split_targs(ts)
+                    let parts = split_targs(self.erecv_targs[ei])   // field-element as a free-fn arg (OFI-173 un-dodged)
                     if ti < parts.len() {
                         if parts[ti] == "string" {
                             return 0 - 3
@@ -5103,8 +5102,7 @@ struct Chunk {
             case EIdent(nm) {
                 let ei = cg_index_of(self.erecv_name, nm)
                 if ei >= 0 {
-                    let ts = self.erecv_targs[ei]      // bind before .split — the OFI-173 safe pattern
-                    let parts = split_targs(ts)
+                    let parts = split_targs(self.erecv_targs[ei])   // field-element as a free-fn arg (OFI-173 un-dodged)
                     if ti < parts.len() {
                         let ec = self.key_array_elem_code(parts[ti])
                         if ec != 0 - 99 {
@@ -5977,8 +5975,7 @@ struct Chunk {
         }
         match args[fpi] {
             case ELambda(lparams, body) {
-                let sk = self.hof_srcs[hi]        // bind before .split — the OFI-173 safe pattern (indexed-element method)
-                let srcs = sk.split("_")
+                let srcs = self.hof_srcs[hi].split("_")   // indexed struct-field-element method call (OFI-173 un-dodged)
                 var j = 0
                 loop {
                     if j >= lparams.len() {

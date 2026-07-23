@@ -4655,8 +4655,10 @@ struct CgcGen {
             }
             case EIdent(name) {
                 // an owned string LOCAL, or a refcounted (string/enum) PAYLOAD binding (`case EIdent(name)` —
-                // treated as a string for a receiver method like `.len()`; an enum payload never calls one).
-                return (self.lookup_drop(name) || self.lookup_refc(name)) && self.lookup_array(name) == false
+                // treated as a string for a receiver method like `.len()`; an enum payload never calls one). A
+                // boxed STRUCT binding is owned/drop too but is NOT a string (lookup_struct >= 0) — excluding it
+                // lets `b.get().len()` (a method-array-return receiver) resolve as an array, not a string.
+                return (self.lookup_drop(name) || self.lookup_refc(name)) && self.lookup_array(name) == false && self.lookup_struct(name) < 0
             }
             case EGet(object, name) {
                 // a refcounted (string / enum) struct FIELD read `self.src` — treated as a string for a
@@ -4672,6 +4674,13 @@ struct CgcGen {
                 match object.value {
                     case EIdent(aname) {
                         return self.lookup_array(aname) && self.lookup_elem_aek(aname) == 0 && self.lookup_elem_struct(aname) < 0
+                    }
+                    case EGet(gobj, gname) {
+                        // `self.parts[0]` — an element of a struct's string-array FIELD (a boxed AEK-0, non-struct
+                        // element) is a string receiver, so `self.parts[0].len()`/`.split()` resolve directly —
+                        // no bind-to-local needed (OFI-173 indexed-field-element method call, un-dodged).
+                        let sid = self.struct_sid_any(gobj.value)
+                        return sid >= 0 && self.st.field_elem_aek(sid, gname) == 0 && self.st.field_elem_struct(sid, gname) < 0
                     }
                     case _ {
                     }
