@@ -479,9 +479,31 @@ bare-metal codegen rides — strengthening selfhost strengthens the endgame.
   - **string** (`b128822`): `gret_is_string` — gtwice's `T` from `x="hi"` → `shout.len()` → `em_str_len`.
   Reproduction-safe as predicted (the compiler internals use no bare-`T`-returning generic calls). Gated
   fixtures `tests/selfhost/cgen_c/{lambda_lift,str_elem_method}.ig`. `make selfhost` **1483/0**; reproduction
-  holds at every commit. **Remaining for `generic_hof_strings`/`stdlib_list` full byte-identity — a
-  diminishing-returns tail:** closure-call owning-temp string-arg staging (the OFI-176 family, C-emit side),
-  map's `[U]`-from-lambda element inference (needs lambda-body typing), and the `move`-`T` return-body dance.
+  holds at every commit.
+
+- **2026-07-23 — Phase 3: HOF LAMBDA PARAM TYPING across global lifting (the hard core of the OFI-206 tail).**
+  The C-emit lifts every lambda to a global `em_fn_<k>` with NO checker to stamp its param types, so a lifted
+  `|w| w.len()` couldn't know `w` is a string (→ tripwire) and a `map(words, |w| w.len())` binding couldn't
+  know its element is an `int`. Fixed by recovering each lifted lambda's param typing FROM ITS HOF CALL SITE
+  (where the enclosing scope is live) and routing it back to the global body: `hof_srcs_of`/`build_hof_srcs`
+  precompute, per HOF fn, a flat stride-6 block `[lam_arg, np, p0_arg, p0_elem, p1_arg, p1_elem]` (each lambda
+  param's source — the `[T]` input's element for map/filter/sort, the `U` init whole for reduce);
+  `record_hof_lambdas` (called from `emit_free_call`) types each lambda arg from that block + the live scope
+  and stashes a flat rec block keyed by the lambda's predicted em_fn slot; `emit_fn_body` returns the recs,
+  `emit_program` accumulates them across declared bodies and feeds each lifted body its own `pstr`/`pkind`
+  rows, which `emit_fn_body` applies to the lifted lambda's OWN params (a string param → owned+dropped, a
+  scalar → its width-kind). Combined with the map caller-side element inference (`map_lam_ret`), the full
+  `map(words, |w| w.len())` → `[int]` chain is byte-identical (a minimal repro + the new gated fixture
+  `tests/selfhost/cgen_c/hof_lambda_param_typing.ig` — string/scalar/capturing map params + a filter). `make
+  selfhost` **1483/0**; reproduction holds. **Three latent self-hosted C-emit gaps SURFACED and filed** (the
+  compiler's own internal tables tripped them, each avoided by staying in the proven subset so reproduction
+  stays byte-identical): **OFI-219** (a `[[T]]` element `xs[i]` mistyped as a string — flattened the tables to
+  `[int]`), **OFI-220** (an enum-payload array assigned into a var isn't retained — kept the payload inside the
+  `tyfn_*` helpers), **OFI-221** (a bare `[]` call arg isn't context-typed — passed typed-empty bindings). Each
+  is real and worth a head-on fix, but orthogonal to HOFs and hit by no corpus program. **Remaining OFI-206
+  tail (genuinely separate facets):** closure-call owning-temp string-arg staging (`gtwice(|s|…, "hi")` /
+  `reduce(words, "", …)` — the OFI-176 family, C-emit side) and the `move`-out-on-return of an owned local
+  (`stdlib_list_sort`) — the last diffs on `generic_hof_strings`/`stdlib_list`/`stdlib_list_sort`.
 
   - **THE COUPLING CONSTRAINT (why B-nested + A waited for the synthesis map):** `ty_args_key` is FLAT
     (`ty_key_name` collapses a nested generic to its head), and `mrecv_args` (its output) is used for

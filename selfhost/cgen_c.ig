@@ -438,6 +438,423 @@ fn ret_tparam_name_of(f: ps.FnDecl) -> string {
 }
 
 
+// ---- map-style return inference: a fn returning `[U]` where U is a fn-arg's RETURN type (map) -----------
+// `map<T,U>(xs:[T], f:fn(T)->U)->[U]` has its return ELEMENT = the lambda arg's return type — which needs
+// the lambda body typed with its param typed from xs's element. ret_lam_arg = the lambda value-arg index,
+// ret_lam_in = the input-array value-arg index (typing the lambda's param). Both -1 if not map-shaped.
+
+// tyfn_ret_tparam returns a fn-typed param's RETURN type-param name (`fn(T)->U` -> "U"), or "".
+fn tyfn_ret_tparam(t: ps.Ty) -> string {
+    match t {
+        case TyFn(fparams, fret) {
+            if fret.len() > 0 {
+                match fret[0] {
+                    case TyName(q, n) {
+                        if q == "" {
+                            return n
+                        }
+                    }
+                    case _ {
+                    }
+                }
+            }
+        }
+        case _ {
+        }
+    }
+    return ""
+}
+
+
+// tyfn_param0_tparam returns a fn-typed param's FIRST-param type-param name (`fn(T)->U` -> "T"), or "".
+fn tyfn_param0_tparam(t: ps.Ty) -> string {
+    match t {
+        case TyFn(fparams, fret) {
+            if fparams.len() > 0 {
+                match fparams[0] {
+                    case TyName(q, n) {
+                        if q == "" {
+                            return n
+                        }
+                    }
+                    case _ {
+                    }
+                }
+            }
+        }
+        case _ {
+        }
+    }
+    return ""
+}
+
+
+// value_param_typed_array returns the value-arg index of the first param typed `[tp]`, or -1.
+fn value_param_typed_array(f: ps.FnDecl, tp: string) -> int {
+    var i = 0
+    var vidx = 0
+    loop {
+        if i >= f.params.len() {
+            break
+        }
+        if f.params[i].is_self == false {
+            if f.params[i].ty.len() > 0 {
+                match f.params[i].ty[0] {
+                    case TyArray(elem) {
+                        match elem.value {
+                            case TyName(q, n) {
+                                if q == "" && n == tp {
+                                    return vidx
+                                }
+                            }
+                            case _ {
+                            }
+                        }
+                    }
+                    case _ {
+                    }
+                }
+            }
+            vidx = vidx + 1
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+
+// build_ret_lam_arg / build_ret_lam_in build the map-style tables per em_fn slot.
+fn build_ret_lam_arg(decls: [ps.Decl]) -> [int] {
+    var out: [int] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.has_body {
+                    out.append(map_lam_arg_of(f))
+                }
+            }
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        out.append(0 - 1)
+                    }
+                    mi = mi + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
+fn build_ret_lam_in(decls: [ps.Decl]) -> [int] {
+    var out: [int] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.has_body {
+                    out.append(map_lam_in_of(f))
+                }
+            }
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        out.append(0 - 1)
+                    }
+                    mi = mi + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
+// map_lam_arg_of returns a map-shaped fn's LAMBDA value-arg index (the `f:fn(T)->U` returning the `[U]`
+// return's element U), or -1. map_lam_in_of returns the INPUT-array value-arg index (typed `[T]`).
+fn map_lam_arg_of(f: ps.FnDecl) -> int {
+    let u = map_ret_elem_tparam(f)
+    if u == "" {
+        return 0 - 1
+    }
+    var i = 0
+    var vidx = 0
+    loop {
+        if i >= f.params.len() {
+            break
+        }
+        if f.params[i].is_self == false {
+            if f.params[i].ty.len() > 0 && tyfn_ret_tparam(f.params[i].ty[0]) == u {
+                return vidx
+            }
+            vidx = vidx + 1
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+
+fn map_lam_in_of(f: ps.FnDecl) -> int {
+    let u = map_ret_elem_tparam(f)
+    if u == "" {
+        return 0 - 1
+    }
+    // find the fn param returning U, get its first-param type-param T, then the value param typed [T].
+    var i = 0
+    loop {
+        if i >= f.params.len() {
+            break
+        }
+        if f.params[i].is_self == false && f.params[i].ty.len() > 0 && tyfn_ret_tparam(f.params[i].ty[0]) == u {
+            let tin = tyfn_param0_tparam(f.params[i].ty[0])
+            if tin == "" {
+                return 0 - 1
+            }
+            return value_param_typed_array(f, tin)
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+
+// map_ret_elem_tparam returns a fn's return-ELEMENT type-param name when the return is `[U]` (U a generic),
+// or "".
+fn map_ret_elem_tparam(f: ps.FnDecl) -> string {
+    if f.ret.len() == 0 {
+        return ""
+    }
+    match f.ret[0] {
+        case TyArray(elem) {
+            match elem.value {
+                case TyName(q, n) {
+                    if q == "" && generic_named(f.generics, n) {
+                        return n
+                    }
+                }
+                case _ {
+                }
+            }
+        }
+        case _ {
+        }
+    }
+    return ""
+}
+
+
+// tyfn_param_count returns a fn-typed value's param count (`fn(T,U)->V` -> 2), or 0.
+fn tyfn_param_count(t: ps.Ty) -> int {
+    match t {
+        case TyFn(fparams, fret) {
+            return fparams.len()
+        }
+        case _ {
+        }
+    }
+    return 0
+}
+
+
+// tyfn_param_tparam returns a fn-typed value's idx-th param type-param name (`fn(T,U)`, idx 1 -> "U"), or "".
+// Mirrors tyfn_param0_tparam but for any index — keeps all TyFn-payload access inside the helper (the self-
+// hosted C-emit doesn't yet retain a payload array stored into a caller variable — see OFI-220).
+fn tyfn_param_tparam(t: ps.Ty, idx: int) -> string {
+    match t {
+        case TyFn(fparams, fret) {
+            if idx >= 0 && idx < fparams.len() {
+                match fparams[idx] {
+                    case TyName(q, n) {
+                        if q == "" {
+                            return n
+                        }
+                    }
+                    case _ {
+                    }
+                }
+            }
+        }
+        case _ {
+        }
+    }
+    return ""
+}
+
+
+// value_param_typed_scalar returns the value-arg index of the first param typed exactly `tp` (a bare generic
+// type-param, `init: U`), or -1 — the "whole-value" source companion to value_param_typed_array.
+fn value_param_typed_scalar(f: ps.FnDecl, tp: string) -> int {
+    var i = 0
+    var vidx = 0
+    loop {
+        if i >= f.params.len() {
+            break
+        }
+        if f.params[i].is_self == false {
+            if f.params[i].ty.len() > 0 {
+                match f.params[i].ty[0] {
+                    case TyName(q, n) {
+                        if q == "" && n == tp {
+                            return vidx
+                        }
+                    }
+                    case _ {
+                    }
+                }
+            }
+            vidx = vidx + 1
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+
+// hof_srcs_of returns a FIXED stride-6 param-source block for a higher-order fn `f` — [lam_arg, np, p0_arg,
+// p0_elem, p1_arg, p1_elem] — mapping each of the fn-typed param's OWN params (≤2) to the value-arg (whole=0 /
+// element=1) that fixes its type: map's `f:fn(T)->U` param0 ← the `[T]` input's element; reduce's `f:fn(U,T)`
+// param0 ← the `U` init (whole), param1 ← the `[T]` input's element; sort's `less:fn(T,T)` both ← the input
+// element. lam_arg is -1 when `f` has no fn-typed param, >2 lambda params, or a source can't be resolved (the
+// lambda body then stays untyped, as before). OFI-206 — recovers the lambda-param types the C-emit lacks.
+fn hof_srcs_of(f: ps.FnDecl) -> [int] {
+    var out: [int] = []
+    out.append(0 - 1)                                // [0] lam_arg  (filled on success)
+    out.append(0)                                    // [1] np
+    out.append(0 - 1)                                // [2] p0_arg
+    out.append(0 - 1)                                // [3] p0_elem
+    out.append(0 - 1)                                // [4] p1_arg
+    out.append(0 - 1)                                // [5] p1_elem
+    // find the fn-typed value param; keep only its INT index (the TyFn payload stays inside the tyfn_* helpers,
+    // never stored in a var — the self-hosted C-emit doesn't retain a payload array assigned out, OFI-220).
+    var i = 0
+    var vidx = 0
+    var fpi = 0 - 1
+    var lam_arg = 0 - 1
+    loop {
+        if i >= f.params.len() {
+            break
+        }
+        if f.params[i].is_self == false {
+            if fpi < 0 && f.params[i].ty.len() > 0 && is_fn_ty(f.params[i].ty[0]) {
+                fpi = i
+                lam_arg = vidx
+            }
+            vidx = vidx + 1
+        }
+        i = i + 1
+    }
+    if fpi < 0 {
+        return out
+    }
+    let np = tyfn_param_count(f.params[fpi].ty[0])
+    if np == 0 || np > 2 {                           // not resolvable, or more lambda params than the stride holds
+        return out
+    }
+    var p = 0
+    loop {
+        if p >= np {
+            break
+        }
+        let tp = tyfn_param_tparam(f.params[fpi].ty[0], p)
+        if tp == "" {
+            return out                               // unresolved param → leave lam_arg -1 (block stays inert)
+        }
+        let ea = value_param_typed_array(f, tp)
+        if ea >= 0 {
+            out[2 + p * 2] = ea
+            out[3 + p * 2] = 1                        // an element source ([T] input)
+        } else {
+            let wa = value_param_typed_scalar(f, tp)
+            if wa < 0 {
+                return out
+            }
+            out[2 + p * 2] = wa
+            out[3 + p * 2] = 0                        // a whole-value source (U init)
+        }
+        p = p + 1
+    }
+    out[0] = lam_arg
+    out[1] = np
+    return out
+}
+
+
+// build_hof_srcs builds the per-em_fn HOF param-source table as a FLAT stride-6 array (fn slot k occupies
+// [k*6 .. k*6+6)); a non-HOF's block has lam_arg -1. Flat, not [[int]], to avoid the nested-array-element
+// `.len()` mistyping (OFI-219).
+fn build_hof_srcs(decls: [ps.Decl]) -> [int] {
+    var out: [int] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.has_body {
+                    let blk = hof_srcs_of(f)         // a fresh 6-int block (bind a fn result, then copy scalars)
+                    var j = 0
+                    loop {
+                        if j >= blk.len() {
+                            break
+                        }
+                        out.append(blk[j])
+                        j = j + 1
+                    }
+                }
+            }
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        let blk = hof_srcs_of(methods[mi])
+                        var j = 0
+                        loop {
+                            if j >= blk.len() {
+                                break
+                            }
+                            out.append(blk[j])
+                            j = j + 1
+                        }
+                    }
+                    mi = mi + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
 // c_escape renders a string's bytes as the contents of a C string literal (no surrounding quotes),
 // mirroring cgen_c.c:emit_c_string_literal: `"`/`\` are backslash-escaped, newline/tab/CR use their named
 // escapes, printable ASCII passes through, and any other byte is a 3-digit octal escape.
@@ -1455,6 +1872,25 @@ fn aek_to_render_kind(aek: int) -> int {
 }
 
 
+// scalar_kind_to_aek is the inverse of aek_to_scalar_kind: a scalar width-kind → its ArrayElemKind (int
+// kind 0 → AEK 4), so a map lambda's inferred scalar return element records a scalar AEK (not boxed 0),
+// and `lens[i]` reads plain instead of own_into_slot'd (OFI-206 follow-on).
+fn scalar_kind_to_aek(k: int) -> int {
+    if k == 0 { return 4 }
+    if k == 1 { return 1 }
+    if k == 2 { return 2 }
+    if k == 3 { return 3 }
+    if k == 4 { return 5 }
+    if k == 5 { return 6 }
+    if k == 6 { return 7 }
+    if k == 7 { return 8 }
+    if k == 8 { return 9 }
+    if k == 9 { return 10 }
+    if k == 10 { return 11 }
+    return 0
+}
+
+
 fn aek_to_scalar_kind(aek: int) -> int {
     if aek == 4 {
         return 0                       // i64 / int
@@ -1997,6 +2433,12 @@ fn build_fn_ret_enum(decls: [ps.Decl], en: EnumTab) -> [bool] {
 // scope maps an in-scope binding NAME to its C expression (`a0` for a param, `v3` for a `let`) and its
 // scalar width-kind (0 i64 … 9 f64, or -1 for a Value/struct binding). fn_names lets a call resolve to
 // `em_fn_<index>`. Built per increment, like the bytecode codegen.ig was.
+// A lifted lambda's inferred param typing is recorded as a FLAT int row (arrays copy freely between arrays,
+// unlike move-only structs): [slot, nparams, s0, k0, s1, k1…] where slot is the em_fn index, si=1 marks an
+// owned STRING param (dropped at exit) and ki carries a scalar param's width-kind (-1 = untyped). Discovered
+// at the HOF call site (where the enclosing scope is live) because the C-emit lifts lambdas globally with no
+// checker to stamp param types, so the globally-emitted body dispatches `.len()`/concat/arithmetic correctly
+// only once we route this back to it (OFI-206 follow-on).
 struct CgcGen {
     next_var: int
     sc_name: [string]          // binding name
@@ -2031,6 +2473,17 @@ struct CgcGen {
                                // incremented at each `em_closure` site so a lambda VALUE gets its lifted slot (OFI-206)
     fn_ret_det_arg: [int]      // ...per em_fn: the value-arg index determining a bare-`T`/`[T]` return (else -1),
     fn_ret_det_elem: [bool]    // ...and whether that arg is `[T]` (return type-param = its element) — OFI-206 follow-on
+    fn_ret_lam_arg: [int]      // ...map-style: the LAMBDA value-arg whose return type is a `[U]` return's element,
+    fn_ret_lam_in: [int]       // ...and the INPUT-array value-arg typing that lambda's param (else -1) — OFI-206
+    fn_hof_srcs: [int]         // ...per HOF fn, a FIXED stride-6 block [lam_arg, np, p0_arg, p0_elem, p1_arg,
+                               // p1_elem] (lam_arg -1 = not a HOF / >2 lambda params): the value-arg each
+                               // lifted-lambda param draws its type from (whole vs element) — OFI-206. Flat
+                               // (not [[int]]) because the self-hosted C-emit still mistypes a nested-array
+                               // element's `.len()` as a string (OFI-219) — every access here is a scalar index.
+    lam_recs: [int]            // lifted-lambda param typings discovered while emitting THIS body, as flat self-
+                               // describing blocks [slot, nparams, s0, k0, s1, k1…] (s=1 → owned string param,
+                               // k = scalar width-kind); returned to emit_program, which routes each into the
+                               // matching globally-emitted lifted body
 
 
     fn fresh_var(mut self) -> int {
@@ -3438,6 +3891,7 @@ struct CgcGen {
     // masked temps, then yield the result — a statement-expression so it stays usable in expression position
     // (cgen_c.c:emit_call). Shared by the bare-name and the module-qualified `mod.fn` call paths.
     fn emit_free_call(mut self, fi: int, args: [ps.Expr]) -> string {
+        self.record_hof_lambdas(fi, args)               // capture any lambda arg's param typing before it lifts
         var any_temp = false
         var ti = 0
         loop {
@@ -3522,6 +3976,69 @@ struct CgcGen {
     }
 
 
+    // record_hof_lambdas discovers, at a HOF call site, the param typing of each lambda argument and stashes
+    // it in lam_recs keyed by the lambda's lifted em_fn slot (predicted from cur_lambda plus any lambdas in
+    // the args emitted before it). The global lifted-body pass has no call context, so THIS is where a lambda
+    // param's string/scalar nature is fixed — from the input array's element (map/filter/sort) or the init
+    // value (reduce). Fires only for a call whose callee is a HOF (fn_hof_srcs non-empty). OFI-206 follow-on.
+    fn record_hof_lambdas(mut self, fi: int, args: [ps.Expr]) {
+        let base = fi * 6                            // fn_hof_srcs is a FLAT stride-6 table; scalar-index throughout
+        if fi < 0 || base + 5 >= self.fn_hof_srcs.len() {
+            return
+        }
+        let lam_arg = self.fn_hof_srcs[base + 0]
+        let np = self.fn_hof_srcs[base + 1]
+        if lam_arg < 0 || lam_arg >= args.len() {
+            return
+        }
+        match args[lam_arg] {
+            case ELambda(lparams, body) {
+                var slot = self.cur_lambda                   // the em_closure counter at this call
+                var a = 0
+                loop {
+                    if a >= lam_arg {
+                        break
+                    }
+                    slot = slot + count_lambdas_expr(args[a])   // earlier lambda-bearing args take slots first
+                    a = a + 1
+                }
+                self.lam_recs.append(slot)
+                self.lam_recs.append(lparams.len())
+                var pi = 0
+                loop {
+                    if pi >= lparams.len() {
+                        break
+                    }
+                    var is_str = 0
+                    var kind = 0 - 1
+                    if pi < np {
+                        let src_arg = self.fn_hof_srcs[base + 2 + pi * 2]
+                        let is_elem = self.fn_hof_srcs[base + 3 + pi * 2]
+                        if src_arg >= 0 && src_arg < args.len() {
+                            if is_elem == 1 {
+                                if self.arg_elem_aek_boxed(args[src_arg]) == 0 {   // the `[T]` input's element
+                                    is_str = 1
+                                }
+                                kind = self.value_elem_kind(args[src_arg])
+                            } else {
+                                if self.is_string_expr(args[src_arg]) {            // the whole `U` init value
+                                    is_str = 1
+                                }
+                                kind = self.scalar_kind_of(args[src_arg])
+                            }
+                        }
+                    }
+                    self.lam_recs.append(is_str)
+                    self.lam_recs.append(kind)
+                    pi = pi + 1
+                }
+            }
+            case _ {
+            }
+        }
+    }
+
+
     // recv_is_temp reports whether a method receiver is a FRESH owned temporary (an array literal or a call
     // result) — which the caller must drop after a borrowing method — rather than a borrow (a binding /
     // index read the owner drops). Mirrors cgen_c.c:recv_is_borrow (negated).
@@ -3544,6 +4061,90 @@ struct CgcGen {
     // subset), or -1 if it is not a known scalar (a string/struct/Value). Drives the `let` storage choice.
     // gret_scalar_kind resolves the scalar kind of a generic fn `fi`'s bare-`T` return from its determining
     // value arg (reduce's U from init), or falls back to fn_ret_kind (-1 for a type-param) — OFI-206 follow-on.
+    // map_ret_kind returns a map-style call's return-ELEMENT scalar kind (`map(words, |w| w.len())` -> 0,
+    // int), or -1 (a boxed/string element, or not a map call). map_ret_is_str is the string companion. Both
+    // TYPE the lambda arg's return expr with its param typed from the input array's element — the genuine
+    // lambda-body inference (OFI-206 follow-on). The two share map_lam_ret which does the push/type/restore.
+    fn map_lam_ret(mut self, value: ps.Expr, want_str: bool) -> int {
+        match value {
+            case ECall(callee, args) {
+                var fi = 0 - 1
+                match callee.value {
+                    case EIdent(name) {
+                        fi = self.fn_index(name)
+                    }
+                    case EGet(obj, mname) {
+                        fi = self.qual_free_fi(obj.value, mname)
+                    }
+                    case _ {
+                    }
+                }
+                if fi >= 0 && fi < self.fn_ret_lam_arg.len() {
+                    let la = self.fn_ret_lam_arg[fi]
+                    let inarg = self.fn_ret_lam_in[fi]
+                    if la >= 0 && la < args.len() {
+                        match args[la] {
+                            case ELambda(lparams, body) {
+                                var in_is_str = false
+                                var in_kind = 0 - 1
+                                if inarg >= 0 && inarg < args.len() {
+                                    in_is_str = self.arg_elem_aek_boxed(args[inarg]) == 0   // handles an EIdent array (words)
+                                    in_kind = self.value_elem_kind(args[inarg])
+                                }
+                                let mark = self.sc_name.len()
+                                var pi = 0
+                                loop {
+                                    if pi >= lparams.len() {
+                                        break
+                                    }
+                                    if in_is_str {
+                                        self.push(lparams[pi].name, "_lp{pi}", 0 - 1, false, true, false, 0 - 1)   // an owned STRING param
+                                    } else {
+                                        self.push(lparams[pi].name, "_lp{pi}", in_kind, false, false, false, 0 - 1) // a scalar param
+                                    }
+                                    pi = pi + 1
+                                }
+                                var res = 0 - 1
+                                var i = 0
+                                loop {
+                                    if i >= body.len() {
+                                        break
+                                    }
+                                    match body[i] {
+                                        case SReturn(rv, line) {
+                                            if rv.len() > 0 {
+                                                if want_str {
+                                                    if self.is_string_expr(rv[0].value) {
+                                                        res = 1
+                                                    } else {
+                                                        res = 0
+                                                    }
+                                                } else {
+                                                    res = self.scalar_kind_of(rv[0].value)
+                                                }
+                                            }
+                                        }
+                                        case _ {
+                                        }
+                                    }
+                                    i = i + 1
+                                }
+                                self.truncate_scope(mark)
+                                return res
+                            }
+                            case _ {
+                            }
+                        }
+                    }
+                }
+            }
+            case _ {
+            }
+        }
+        return 0 - 1
+    }
+
+
     // gret_is_string resolves whether a generic fn `fi`'s bare-`T` return is a STRING at this call site,
     // from its determining arg (gtwice's T from x="hi") — OFI-206 follow-on.
     fn gret_is_string(self, fi: int, args: [ps.Expr]) -> bool {
@@ -4304,6 +4905,14 @@ struct CgcGen {
                             elem_sk = ty_scalar_kind(elem_ty_of(ty[0]))
                         } else {
                             elem_sk = self.value_elem_kind(value.value)
+                            if elem_sk < 0 {
+                                // a map-style call (`map(words, |w| w.len())`): the return element is the
+                                // lambda's return type — type its body to recover a scalar element (OFI-206).
+                                let mk = self.map_lam_ret(value.value, false)
+                                if mk >= 0 {
+                                    elem_sk = mk
+                                }
+                            }
                         }
                     }
                     // An empty array literal `[]` carries no element kind in the literal — take it from the
@@ -4344,9 +4953,18 @@ struct CgcGen {
                             self.set_last_elem_aek(array_elem_kind_ty(elem_ty_of(ty[0])))   // element AEK (a [bool] element isn't refcounted)
                         } else {
                             esid = self.value_elem_struct(value.value)
-                            let bea = self.value_elem_aek_boxed(value.value)   // an inferred [string]-like array: mark its boxed element (OFI-206 follow-on)
+                            var bea = self.value_elem_aek_boxed(value.value)   // an inferred [string]-like array: mark its boxed element (OFI-206 follow-on)
+                            if bea != 0 && self.map_lam_ret(value.value, true) == 1 {
+                                bea = 0                                    // a map(…, |…| <string>) → boxed string element (OFI-206)
+                            }
                             if bea == 0 {
                                 self.set_last_elem_aek(0)
+                            } else {
+                                // a map(…, |…| <scalar>) → a SCALAR element AEK, so `lens[i]` reads plain (not own_into_slot).
+                                let msk = self.map_lam_ret(value.value, false)
+                                if msk >= 0 {
+                                    self.set_last_elem_aek(scalar_kind_to_aek(msk))
+                                }
                             }
                         }
                         if esid >= 0 {
@@ -5112,8 +5730,23 @@ fn enum_payload_generic(ty: ps.Ty, generics: [ps.GenericParam]) -> bool {
 }
 
 
-fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_ret_kind: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab, lambda_start: int, fn_ret_det_arg: [int], fn_ret_det_elem: [bool]) {
-    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_struct: [], sc_refc: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem }
+fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_ret_kind: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab, lambda_start: int, fn_ret_det_arg: [int], fn_ret_det_elem: [bool], fn_ret_lam_arg: [int], fn_ret_lam_in: [int], fn_hof_srcs: [int], lam_pstr: [bool], lam_pkind: [int]) -> [int] {
+    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_struct: [], sc_refc: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, lam_recs: [] }
+    // For a lifted lambda, lam_pstr/lam_pkind type its OWN params (the trailing params after the captures) so
+    // the body dispatches `.len()`/concat/arithmetic like stage-0 (the C signature stays all-`Value`). Captures
+    // lead and stay untyped. caps = (non-self param count) − (own params typed) — OFI-206 follow-on.
+    var nv = 0
+    var pv = 0
+    loop {
+        if pv >= f.params.len() {
+            break
+        }
+        if f.params[pv].is_self == false {
+            nv = nv + 1
+        }
+        pv = pv + 1
+    }
+    let lam_caps = nv - lam_pstr.len()
     var ai = 0
     if has_self {
         g.push("self", "a0", 0 - 1, false, false, false, 0 - 1)
@@ -5147,6 +5780,21 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: Stru
                     pesid = ty_struct_sid(elem_ty_of(f.params[p].ty[0]), st.names)   // a `[Struct]` param: `a[i]` is a boxed struct
                 }
                 psid = st.sid_of_ty(f.params[p].ty[0])   // value OR boxed struct sid this param carries (incl. a generic instance)
+            }
+            // A lifted lambda's own param (typeless in the AST) takes its type from the recorded call context:
+            // a string param is OWNED (dropped at exit); a scalar carries its width-kind. (ai == the non-self
+            // index here, as a lifted lambda has no `self`.)
+            if lam_pstr.len() > 0 && ai >= lam_caps {
+                let own_idx = ai - lam_caps
+                if own_idx < lam_pstr.len() {
+                    if lam_pstr[own_idx] {
+                        owned = true
+                        pk = 0 - 1
+                    } else if lam_pkind[own_idx] >= 0 {
+                        pk = lam_pkind[own_idx]
+                        owned = false
+                    }
+                }
             }
             g.push(f.params[p].name, "a{ai}", pk, false, owned, is_arr, ek)
             if is_arr {
@@ -5194,6 +5842,17 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: Stru
         println("    return INT_VAL(0);")
     }
     println("\}")
+    // copy the recorded rec blocks out into a fresh local (a field can't be moved out; scalars copy) — OFI-206
+    var out: [int] = []
+    var ci = 0
+    loop {
+        if ci >= g.lam_recs.len() {
+            break
+        }
+        out.append(g.lam_recs[ci])
+        ci = ci + 1
+    }
+    return out
 }
 
 
@@ -5903,6 +6562,15 @@ fn count_lambdas_body(body: [ps.Stmt]) -> int {
 }
 
 
+// count_lambdas_expr returns how many lambdas an expression subtree lifts — for predicting the em_fn slot of
+// a lambda that follows earlier lambda-bearing args in the same call.
+fn count_lambdas_expr(e: ps.Expr) -> int {
+    var c = LamColl { lams: [] }
+    c.cl_expr(e)
+    return c.lams.len()
+}
+
+
 // emit_program writes the whole C translation unit for the merged module declarations, byte-identical to
 // stage-0 `inglec --emit=c`. It iterates `decls` once per section, keeping a shared em_fn_N counter.
 fn emit_program(decls: [ps.Decl], filename: string) {
@@ -5920,6 +6588,9 @@ fn emit_program(decls: [ps.Decl], filename: string) {
     let fn_ret_enum = build_fn_ret_enum(decls, etab)
     let fn_ret_det_arg = build_ret_det_arg(decls)
     let fn_ret_det_elem = build_ret_det_elem(decls)
+    let fn_ret_lam_arg = build_ret_lam_arg(decls)
+    let fn_ret_lam_in = build_ret_lam_in(decls)
+    let fn_hof_srcs = build_hof_srcs(decls)    // per-HOF lifted-lambda param sources (OFI-206)
     let lc = build_lam_coll(decls)             // lifted lambdas, numbered `total + k` (OFI-206)
     let grand = total + lc.lams.len()                // total em_fn slots (declared + lambdas)
     println("// Generated by `inglec --emit=c` from {filename}. Do not edit.")
@@ -6023,9 +6694,14 @@ fn emit_program(decls: [ps.Decl], filename: string) {
     println("    return INT_VAL(0);")
     println("\}")
     println("")
-    // the function bodies
+    // the function bodies. Each declared body returns the param typings of any lambda it lifts (discovered at
+    // its HOF call sites); we accumulate them, then route each into the matching lifted body below (OFI-206).
     var b = 0
     var lam_next = total                          // the em_fn slot the NEXT lifted lambda takes
+    var all_recs: [int] = []                      // flat self-describing rec blocks accumulated across bodies
+    let eb: [bool] = []                           // typed-empty rows for a declared (non-lambda) body — passed as
+    let ei: [int] = []                            // bindings so their AEK matches stage-0 (a bare `[]` arg isn't
+                                                  // context-typed by the self-hosted C-emit — see OFI-221)
     var k = 0
     loop {
         if k >= decls.len() {
@@ -6034,7 +6710,15 @@ fn emit_program(decls: [ps.Decl], filename: string) {
         match decls[k] {
             case DFn(f) {
                 if f.has_body {
-                    emit_fn_body(f, b, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem)
+                    let recs = emit_fn_body(f, b, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, eb, ei)
+                    var ri = 0
+                    loop {
+                        if ri >= recs.len() {
+                            break
+                        }
+                        all_recs.append(recs[ri])
+                        ri = ri + 1
+                    }
                     lam_next = lam_next + count_lambdas_body(f.body)
                     b = b + 1
                     if b < grand {
@@ -6050,7 +6734,15 @@ fn emit_program(decls: [ps.Decl], filename: string) {
                         break
                     }
                     if methods[mi].has_body {
-                        emit_fn_body(methods[mi], b, true, owner, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem)
+                        let recs = emit_fn_body(methods[mi], b, true, owner, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, eb, ei)
+                        var ri = 0
+                        loop {
+                            if ri >= recs.len() {
+                                break
+                            }
+                            all_recs.append(recs[ri])
+                            ri = ri + 1
+                        }
                         lam_next = lam_next + count_lambdas_body(methods[mi].body)
                         b = b + 1
                         if b < grand {
@@ -6065,13 +6757,38 @@ fn emit_program(decls: [ps.Decl], filename: string) {
         }
         k = k + 1
     }
-    // lifted-lambda bodies (em_fn_{total+k}); a flat lambda body has no nested lambda, so lambda_start=0
+    // lifted-lambda bodies (em_fn_{total+k}); a flat lambda body has no nested lambda, so lambda_start=0. Each
+    // gets its own recorded param typing, decoded fresh from all_recs into LOCAL rows (no [[bool]]/[[int]]
+    // tables — a nested-array element trips OFI-219); empty rows if the lambda wasn't a HOF arg.
     var lb = 0
     loop {
         if lb >= lc.lams.len() {
             break
         }
-        emit_fn_body(lc.lams[lb], total + lb, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, 0, fn_ret_det_arg, fn_ret_det_elem)
+        let want = total + lb
+        var ps: [bool] = []
+        var pk: [int] = []
+        var pos = 0
+        loop {
+            if pos >= all_recs.len() {
+                break
+            }
+            let slot = all_recs[pos]              // block = [slot, nparams, s0, k0, s1, k1, …]
+            let np = all_recs[pos + 1]
+            if slot == want {
+                var pp = 0
+                loop {
+                    if pp >= np {
+                        break
+                    }
+                    ps.append(all_recs[pos + 2 + pp * 2] == 1)
+                    pk.append(all_recs[pos + 3 + pp * 2])
+                    pp = pp + 1
+                }
+            }
+            pos = pos + 2 + np * 2
+        }
+        let _drop = emit_fn_body(lc.lams[lb], total + lb, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, 0, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, ps, pk)
         b = b + 1
         if b < grand {
             println("")
