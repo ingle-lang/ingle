@@ -2315,6 +2315,16 @@ struct Checker {
                         break
                     }
                     if parts[i].hole.len() == 1 {
+                        // An interpolation hole whose contents don't lex/parse re-parses to EError — its `{`
+                        // did not begin a valid expression. Reject (mirrors stage-0's interp-brace error). An
+                        // EError only ever comes from a failed parse, so this never fires on a valid hole.
+                        match parts[i].hole[0] {
+                            case EError {
+                                self.error("'\{' begins a string interpolation, but its contents are not a valid expression (near '\{')")
+                            }
+                            case _ {
+                            }
+                        }
                         let pt = self.check_expr(parts[i].hole[0])
                         // OFI-139: an interpolation hole must be directly showable (numeric / bool / string)
                         // OR provide the Show contract (`fn show(self) -> string`, a struct method). A concrete
