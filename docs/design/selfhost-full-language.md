@@ -308,7 +308,7 @@ bare-metal codegen rides — strengthening selfhost strengthens the endgame.
 
 ## 8. Progress log
 
-- **2026-07-23 — Phase 4 CHECKER REJECT-PARITY (IN PROGRESS): 16 not-yet-rejected misses → 7 (9 checks
+- **2026-07-23 — Phase 4 CHECKER REJECT-PARITY (IN PROGRESS): 16 not-yet-rejected misses → 6 (10 checks
   closed, 0 false-rejects throughout).** The self-hosted checker (`selfhost/checker.ig`) accepted 16 programs stage-0 rejects.
   Enumerated them (stage-0 REJECT + selfhost ACCEPT over the corpus), mapped each against `src/check.c` via a
   read-only workflow, and closed the tractable ones — each verified corpus-wide for zero false-rejects (a false
@@ -328,13 +328,16 @@ bare-metal codegen rides — strengthening selfhost strengthens the endgame.
   - **match-nested** (`796d0ad`): added ev_fstart/ev_ftype variant field-TYPE tables; a nested enum pattern
     (`case Wrap(Loc(pt))`) binding a struct/array inner payload is rejected (a TY_INFER inner field stays
     lenient).
-  Checker verdict-parity **640→649/656**; `make selfhost` **1501/0**; reproduction byte-identical throughout.
-  **REMAINING 7 misses** (all harder / blocked, none a false-reject): 4 `examples/web/*.ig` need cross-module
-  IMPORT resolution the single-file checker does not do; `error_enum_named` needs an ECall AST-schema change
-  (arg-names, touching every ECall match + the dump) + a variant field-NAME table; `error_interp_brace` needs
-  a StrPart bad-hole flag; `error_resource_clone_match` needs Result/Option generic-payload typing (the checker
-  leaves them TY_INFER). These are the last reject-parity items before OFI-174 closes; each is a self-contained
-  follow-on (the AST-schema ones are a step-change in size from the 9 above).
+  - **interp-brace** (`2d3ae52`): a string-interpolation hole whose contents fail to lex/parse re-parses to
+    EError; the EStr loop now rejects an EError hole directly (an EError only ever comes from a failed parse,
+    so never a false-reject) — no parser/AST change.
+  Checker verdict-parity **640→650/656**; `make selfhost` **1501/0**; reproduction byte-identical throughout.
+  **REMAINING 6 misses** (all harder / blocked, none a false-reject): 4 `examples/web/*.ig` need cross-module
+  IMPORT resolution the single-file checker does not do (a genuinely new capability, useful well beyond these);
+  `error_enum_named` needs an ECall AST-schema change (arg-names on every ECall match + the dump) + a variant
+  field-NAME table; `error_resource_clone_match` needs Result/Option generic-payload typing (the checker leaves
+  them TY_INFER — the "dominant blocker"). These are the last reject-parity items before OFI-174 closes; the
+  two non-web are a step-change in size from the 10 above.
 
 - **2026-07-23 — Phase 4 OPENED: the C-emit ERASED-GENERIC OWNERSHIP facets (3 of 3), all corpus HOF files
   byte-identical.** The last diffs on `generic_hof_strings`/`stdlib_list`/`stdlib_list_sort` were three
