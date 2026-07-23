@@ -3607,7 +3607,12 @@ fn assignable(actual: int, expected: int, a_is_int_lit: bool, a_is_float_lit: bo
 // already-merged declaration list (entry module + its transitive imports) so the checker sees imported
 // declarations — e.g. a `std/web` direct extern — exactly like stage-0's whole-program check (OFI-218 P4).
 fn check(src: string) -> bool {
-    return check_decls(ps.parse(src))
+    // A malformed argument list (OFI-140: a duplicate named argument, or positional and named mixed) is a
+    // parser-level verdict the AST does not carry, so read it via the parser's side-channel and OR it in.
+    if check_decls(ps.parse(src)) {
+        return true
+    }
+    return ps.parse_bad_call(src)
 }
 
 

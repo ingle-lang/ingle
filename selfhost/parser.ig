@@ -1117,6 +1117,7 @@ struct Parser {
     src: string            // the source (for a strtod-style float over-read past the lexeme)
     no_struct: bool        // suppress `Name { … }` as a struct literal in if/for/match headers
     pending_gt: int        // a `>>` consumed as one generic close leaves a virtual `>` here (stage-0 splits the token)
+    bad_call: bool         // OFI-140: a call had malformed args (a dup named arg, or positional+named mixed)
 
 
     fn peek(self) -> lx.Token {
@@ -2016,16 +2017,38 @@ struct Parser {
         let saved = self.no_struct
         self.no_struct = false
         var args: [Expr] = []
+        var arg_names: [string] = []       // each arg's name ("" if positional) — for the OFI-140 dup/mixed check
+        var saw_named = false
+        var saw_positional = false
         loop {
             self.skip_newlines()
             if self.at(TAG_RPAREN) || self.is_eof() {
                 break
             }
-            // named arg `name:` — consume the name and colon, keep only the value (names not printed)
+            // named arg `name:` — consume the name and colon; the AST keeps only the value (names not printed,
+            // so `--emit=ast` stays byte-identical to stage-0), but we record the name here for the dup/mixed
+            // check below.
+            var nm = ""
             if self.at(TAG_IDENT) && self.at2(TAG_COLON) {
-                let _ = self.advance()
+                nm = self.advance().text
                 let _ = self.advance()
             }
+            if nm == "" {
+                saw_positional = true
+            } else {
+                saw_named = true
+                var di = 0
+                loop {
+                    if di >= arg_names.len() {
+                        break
+                    }
+                    if arg_names[di] == nm {
+                        self.bad_call = true      // this field name is set more than once
+                    }
+                    di = di + 1
+                }
+            }
+            arg_names.append(nm)
             args.append(self.parse_expr())
             self.skip_newlines()
             if self.at(TAG_COMMA) {
@@ -2037,6 +2060,16 @@ struct Parser {
         self.skip_newlines()
         self.no_struct = saved
         let _ = self.expect(TAG_RPAREN)
+        // OFI-140: named arguments are only valid — and each field set exactly once — when constructing an
+        // enum variant. A DUPLICATE named argument, or a MIX of positional and named, is rejected by stage-0
+        // for EVERY call (a plain function forbids names entirely; a variant forbids dups/mixing), so flagging
+        // it here can never false-reject. It is signalled via `self.bad_call` (a parser side-channel that
+        // check() consults) rather than an AST node, so the parse tree stays identical to stage-0. The full
+        // field validation (no-such-field / missing-field / a named argument on a plain function) needs the
+        // arg NAMES to reach the checker — an ECall AST field, tracked as OFI-222.
+        if saw_named && saw_positional {
+            self.bad_call = true
+        }
         return args
     }
 
@@ -2221,8 +2254,20 @@ fn strip_quotes(raw: string) -> string {
 
 // parse is the entry point: a source string -> the list of top-level declarations.
 fn parse(src: string) -> [Decl] {
-    var p = Parser{ toks: lx.lex(src), pos: 0, src: src, no_struct: false, pending_gt: 0 }
+    var p = Parser{ toks: lx.lex(src), pos: 0, src: src, no_struct: false, pending_gt: 0, bad_call: false }
     return p.parse_program()
+}
+
+
+// parse_bad_call parses `src` purely to report the OFI-140 side-channel verdict: did any call have a
+// malformed argument list (a duplicate named argument, or positional and named mixed)? It returns a plain
+// bool rather than folding the flag into `parse`'s result, because a cross-module struct field access
+// (`ps.ParseResult.decls` from the checker) is not yet handled by the self-hosted C-emit backend (OFI-223);
+// a bool return sidesteps that. check() calls this alongside parse() (a second, cheap parse).
+fn parse_bad_call(src: string) -> bool {
+    var p = Parser{ toks: lx.lex(src), pos: 0, src: src, no_struct: false, pending_gt: 0, bad_call: false }
+    let _ = p.parse_program()
+    return p.bad_call
 }
 
 
@@ -2243,7 +2288,7 @@ fn parse_hole(src: string, base_line: int) -> Expr {
         padded = from_char_code(10) + padded
         k = k + 1
     }
-    var p = Parser{ toks: lx.lex(padded), pos: 0, src: padded, no_struct: false, pending_gt: 0 }
+    var p = Parser{ toks: lx.lex(padded), pos: 0, src: padded, no_struct: false, pending_gt: 0, bad_call: false }
     p.skip_newlines()
     return p.parse_expr()
 }
