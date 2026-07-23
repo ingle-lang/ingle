@@ -332,9 +332,33 @@ bare-metal codegen rides — strengthening selfhost strengthens the endgame.
   VM. cgdiff breadth **316→320** byte-identical. **KEY: both facets are checker STAMPS the self-hosted C-emit
   re-derives** — F2 is NOT a liveness pass (stage-0 isn't either: "an OWNED non-Copy type-param local read at a
   consuming position is a MOVE", the no-later-read guarantee is the checker's use-after-move detection, not
-  cgen). **Phase 4 REMAINING (the broader un-dodging):** revert the source workarounds (OFI-176 arg-masking,
-  `string_ty()` ctor, bind-to-local dodges) now that the underlying holes are closed; drive the 16 checker
-  reject-parity tolerances to 0 (OFI-199/200); then OFI-174 closes.
+  cgen). **KEY: both facets are checker STAMPS the self-hosted C-emit re-derives.**
+
+- **2026-07-23 — Phase 4 THE GREAT UN-DODGING (3 underlying C-emit gaps closed, every source dodge reverted).**
+  With the holes closed, each selfhost-source workaround the outside audit flagged was reverted to the natural
+  form, keeping `make selfhost` green at every landing (mapped the reference in `src/cgen_c.c`/`src/codegen.c`
+  each time, then mirrored):
+  - **OFI-173 — method call on an indexed struct-FIELD-array element** (`self.parts[0].len()`/`.split()`). The
+    C-emit tripwired "unresolved callee". Fixed: `is_string_expr`'s EIndex arm recognises a string-array field
+    element (via `field_elem_aek`/`field_elem_struct`), AND its EIdent arm no longer mistakes a boxed STRUCT
+    binding for a string (`lookup_struct < 0`) so an array-returning METHOD-result receiver resolves as an
+    array. Reverted all three `let sk = self.hof_srcs[hi]; sk.split()` bind-to-local dodges in codegen.ig.
+    Fixture `indexed_field_method.ig`. (`b27148c`)
+  - **OFI-202 — module-qualified enum-variant construction** (`ps.TyName("", "string")`). Neither backend
+    compiled it. Fixed in BOTH: cgen_c.ig routes `alias.Variant(args)` to `emit_enum_ctor`; codegen.ig emits
+    `OP_NEW_ENUM` via `resolve_ctor_vi` on the module-qualified path. Reverted the `string_ty()` ctor dodge
+    (annotate_str_params uses `ps.TyName(...)` directly) and deleted the dead parser helper. (`a8f7cea`)
+  - **OFI-165 — an inline owning-temp array to a struct METHOD's borrow param** (`m.take(clone_bools(src))`).
+    The method path emitted inline with no drop. Fixed: the ident-receiver method path now stages owning-temp
+    args like `emit_free_call` (hoist, call self inline, drop the temp). Reverted the named-snapshot dodge in
+    checker.ig. Fixture `method_owning_temp_arg.ig`. (`0d13077`)
+  - A fourth flagged item (codegen.ig `erased_tparam_name`) proved STALE — the C-emit now `own_into_slot`s a
+    match-bound string returned from a loop; the helper form is now a plain style choice, comment corrected.
+  `make selfhost` **1489→1495/0**; reproduction byte-identical at every commit; both fixed points green. Every
+  known source dodge in the selfhost tree is gone — the compiler now expresses these constructs directly.
+  **Phase 4 REMAINING:** drive the 16 checker reject-parity tolerances to 0 (OFI-199/200) — the last gate
+  before OFI-174 closes; a few narrower C-emit ownership gaps remain latent (a string-returning-call `.len()`
+  receiver isn't staged; boxed-generic-element field read) but no source dodges around them.
 
 - **2026-07-22 — Phase 1 opened; diagnosis reshaped the map (favorably).**
   - **Tier 3 is substantially DONE on the VM backend already**: `bounded_generic`,

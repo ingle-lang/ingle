@@ -197,10 +197,9 @@ fn param_is_erased_tparam(p: ps.Param, generics: [ps.GenericParam]) -> bool {
 
 
 // erased_tparam_name returns the type-parameter name a param is typed as (`x: T` -> "T"), or "" if the param
-// is not a bare type parameter. Companion to param_is_erased_tparam. Implemented via param_is_erased_tparam +
-// ty_key_name (both byte-identical on both backends) rather than returning a match-pattern-bound string from
-// inside a loop — the latter is a construct the self-hosted C-emit backend doesn't clone (own_into_slot), an
-// OFI-173 sibling that would break the C-emit reproduction fixed point.
+// is not a bare type parameter. Companion to param_is_erased_tparam, sharing ty_key_name. (The C-emit now
+// own_into_slots a match-pattern-bound string returned from a loop — the OFI-173 concern that once shaped this
+// is closed, OFI-218 Phase 4 — so the helper form is a plain style choice, no longer a dodge.)
 fn erased_tparam_name(p: ps.Param, generics: [ps.GenericParam]) -> string {
     if param_is_erased_tparam(p, generics) {
         return ty_key_name(p.ty[0])
