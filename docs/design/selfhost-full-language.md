@@ -308,6 +308,34 @@ bare-metal codegen rides — strengthening selfhost strengthens the endgame.
 
 ## 8. Progress log
 
+- **2026-07-23 — Phase 4 OPENED: the C-emit ERASED-GENERIC OWNERSHIP facets (3 of 3), all corpus HOF files
+  byte-identical.** The last diffs on `generic_hof_strings`/`stdlib_list`/`stdlib_list_sort` were three
+  checker-STAMPED ownership decisions (`drop_mask`, `moves_local`) that the self-hosted C-emit re-parses
+  without — so it re-derives each locally (mapped exhaustively first via a read-only workflow of `Explore`
+  agents over `src/cgen_c.c` + `src/check.c`, cross-checked against the baseline):
+  - **F1 — owning-temp staging of a fresh STRING temp at an erased-generic-T BORROW param** (`gtwice(|s|.., "hi")`,
+    `reduce(words, "", …)`). check.c:3196 masks a fresh owning temp at a NOT-refcounted param (a generic-`T`
+    under erasure — is_refcounted(T)=false); a concrete `string` param moves/adopts it instead. New per-fn
+    generic-borrow-param bitmask (`build_fn_param_gen_mask`) + `is_fresh_string_temp` + a param-aware
+    `arg_owning_temp_p` hooked into `emit_free_call`'s hoist+drop. (`bf27ba5`)
+  - **F2 — move-on-last-use of an OWNED erased type-param LOCAL** (reduce's `var acc = init`). Stage-0's
+    `moves_local==1` nils the slot; the selfhost over-retained via `own_into_slot`. New `sc_tyvar` scope flag
+    (set on a generic-`T` param, propagated to `var acc = <tyvar read>`); `move_binding` nil-slot-moves an
+    owned tyvar local. Mirrors the VM's `tp_slot_name`/`move_local_slot`. (`bf27ba5`)
+  - **F3 — a `[T]`-returning call's element scalar kind, via gret** (`asc = sort(xs:[int])`). The selfhost left
+    asc's element unresolved (`fn_ret_elem_kind[sort]=-1`), so `index_elem_refcounted(asc)` was true and
+    `asc[i]` in a `+` got a spurious `own_into_slot`; stage-0 (checker knows asc is `[int]` in `main`) emits a
+    plain borrowing `em_index`. `value_elem_kind` now consults the gret determining-arg table (as
+    `value_elem_aek_boxed` already did) → element = the determining `[T]` arg's element kind. (`4fa1e62`)
+  Gated fixture `tests/selfhost/cgen_c/erased_generic_ownership.ig` (all three, byte-identical, runs => 23).
+  `make selfhost` **1489/0**; reproduction holds at every commit; all three corpus files run correct native +
+  VM. cgdiff breadth **316→320** byte-identical. **KEY: both facets are checker STAMPS the self-hosted C-emit
+  re-derives** — F2 is NOT a liveness pass (stage-0 isn't either: "an OWNED non-Copy type-param local read at a
+  consuming position is a MOVE", the no-later-read guarantee is the checker's use-after-move detection, not
+  cgen). **Phase 4 REMAINING (the broader un-dodging):** revert the source workarounds (OFI-176 arg-masking,
+  `string_ty()` ctor, bind-to-local dodges) now that the underlying holes are closed; drive the 16 checker
+  reject-parity tolerances to 0 (OFI-199/200); then OFI-174 closes.
+
 - **2026-07-22 — Phase 1 opened; diagnosis reshaped the map (favorably).**
   - **Tier 3 is substantially DONE on the VM backend already**: `bounded_generic`,
     `multibound_generic`, `hash_eq_bound`, `generic_bounded_ctor` all pass byte-identical today —
