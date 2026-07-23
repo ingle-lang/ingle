@@ -3544,6 +3544,23 @@ struct CgcGen {
     // subset), or -1 if it is not a known scalar (a string/struct/Value). Drives the `let` storage choice.
     // gret_scalar_kind resolves the scalar kind of a generic fn `fi`'s bare-`T` return from its determining
     // value arg (reduce's U from init), or falls back to fn_ret_kind (-1 for a type-param) — OFI-206 follow-on.
+    // gret_is_string resolves whether a generic fn `fi`'s bare-`T` return is a STRING at this call site,
+    // from its determining arg (gtwice's T from x="hi") — OFI-206 follow-on.
+    fn gret_is_string(self, fi: int, args: [ps.Expr]) -> bool {
+        if fi >= self.fn_ret_det_arg.len() || self.fn_ret_array[fi] {
+            return false
+        }
+        let da = self.fn_ret_det_arg[fi]
+        if da < 0 || da >= args.len() {
+            return false
+        }
+        if self.fn_ret_det_elem[fi] {
+            return self.arg_elem_aek_boxed(args[da]) == 0   // the `[T]` arg's element is a string
+        }
+        return self.is_string_expr(args[da])                // the whole arg is a string
+    }
+
+
     fn gret_scalar_kind(self, fi: int, args: [ps.Expr]) -> int {
         let base = self.fn_ret_kind[fi]
         if base >= 0 {
@@ -3701,6 +3718,46 @@ struct CgcGen {
                         return 0
                     }
                 }
+            }
+            case ECall(callee, args) {
+                // a `[T]`-returning generic call (`sort(words)`): its element AEK = the determining `[T]` arg's
+                // element AEK (words's), resolved through the gret return table (OFI-206 follow-on).
+                var fi = 0 - 1
+                match callee.value {
+                    case EIdent(name) {
+                        fi = self.fn_index(name)
+                    }
+                    case EGet(obj, mname) {
+                        fi = self.qual_free_fi(obj.value, mname)
+                    }
+                    case _ {
+                    }
+                }
+                if fi >= 0 && fi < self.fn_ret_det_arg.len() && self.fn_ret_array[fi] {
+                    let da = self.fn_ret_det_arg[fi]
+                    if da >= 0 && da < args.len() && self.fn_ret_det_elem[fi] {
+                        return self.arg_elem_aek_boxed(args[da])
+                    }
+                }
+            }
+            case _ {
+            }
+        }
+        return 0 - 1
+    }
+
+
+    // arg_elem_aek_boxed returns 0 when an array-typed arg's element is boxed refcounted (a [string] local /
+    // literal), else -1 — used to propagate a `[T]`-returning call's element AEK from its determining arg.
+    fn arg_elem_aek_boxed(self, e: ps.Expr) -> int {
+        match e {
+            case EIdent(name) {
+                if self.lookup_array(name) && self.lookup_elem_aek(name) == 0 {
+                    return 0
+                }
+            }
+            case EArray(elems, lines) {
+                return self.value_elem_aek_boxed(e)
             }
             case _ {
             }
@@ -3888,7 +3945,7 @@ struct CgcGen {
                     case EIdent(name) {
                         let fi = self.fn_index(name)
                         if fi >= 0 {
-                            return self.fn_ret_str[fi]
+                            return self.fn_ret_str[fi] || self.gret_is_string(fi, args)
                         }
                         if native_ret_kind(name) == 0 - 3 {
                             return true                  // a string-returning native builtin (byte_slice, read_file, …)
@@ -3905,7 +3962,7 @@ struct CgcGen {
                         }
                         let qfi = self.qual_free_fi(object.value, mname)   // a module-qualified free call `lx.kind_name(op)`
                         if qfi >= 0 {
-                            return self.fn_ret_str[qfi]
+                            return self.fn_ret_str[qfi] || self.gret_is_string(qfi, args)
                         }
                     }
                     case _ {
