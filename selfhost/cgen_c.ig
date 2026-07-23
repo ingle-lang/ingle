@@ -4521,12 +4521,10 @@ struct CgcGen {
                 }
             }
             case ECall(callee, args) {
+                var fi = 0 - 1
                 match callee.value {
                     case EIdent(name) {
-                        let fi = self.fn_index(name)
-                        if fi >= 0 {
-                            return self.fn_ret_elem_kind[fi]
-                        }
+                        fi = self.fn_index(name)
                     }
                     case EGet(object, mname) {
                         if self.is_string_expr(object.value) && mname == "bytes" {
@@ -4534,17 +4532,27 @@ struct CgcGen {
                         }
                         let sid = self.struct_sid_any(object.value)   // an array-returning struct METHOD `self.ty_arg_types()`
                         if sid >= 0 {
-                            let fi = self.fn_index("{self.st.names[sid]}.{mname}")
-                            if fi >= 0 {
-                                return self.fn_ret_elem_kind[fi]
-                            }
-                        }
-                        let qfi = self.qual_free_fi(object.value, mname)   // a module-qualified array-returning call
-                        if qfi >= 0 {
-                            return self.fn_ret_elem_kind[qfi]
+                            fi = self.fn_index("{self.st.names[sid]}.{mname}")
+                        } else {
+                            fi = self.qual_free_fi(object.value, mname)   // a module-qualified array-returning call
                         }
                     }
                     case _ {
+                    }
+                }
+                if fi >= 0 {
+                    let k = self.fn_ret_elem_kind[fi]
+                    if k >= 0 {
+                        return k
+                    }
+                    // a `[T]`-returning generic call (`sort(xs)`): its element scalar kind = the determining
+                    // `[T]` arg's element kind (xs's), resolved through the gret return table — so `asc[i]`
+                    // types as a scalar and is NOT own_into_slot'd in a consuming op (OFI-176, F3).
+                    if fi < self.fn_ret_det_arg.len() && self.fn_ret_array[fi] {
+                        let da = self.fn_ret_det_arg[fi]
+                        if da >= 0 && da < args.len() && self.fn_ret_det_elem[fi] {
+                            return self.value_elem_kind(args[da])
+                        }
                     }
                 }
                 return 0 - 1
