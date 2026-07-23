@@ -1553,6 +1553,24 @@ struct Checker {
             case SLet(is_var, name, ty, value) {
                 let vt = self.check_expr(value.value)  // initialiser checked BEFORE the binding is in scope
                 self.consume_move(value.value, value.line)   // `let q = p` moves an owned move-type p
+                // OFI-199: an integer LITERAL whose magnitude exceeds i64 is stored as a negative EInt.v (a u64
+                // reinterpreted signed). It is valid ONLY in a u64 context — a `u64` suffix (kind 7) or a `u64`
+                // binding annotation; otherwise reject (mirrors src/check.c's EXPR_INT range check).
+                match value.value {
+                    case EInt(iv, ik) {
+                        if iv < 0 && ik != 7 {
+                            var u64_ctx = false
+                            if ty.len() > 0 && self.annotation_type(ty[0]) == TY_U64 {
+                                u64_ctx = true
+                            }
+                            if u64_ctx == false {
+                                self.error("this integer literal exceeds the i64 range; only 'u64' can hold it (annotate the binding 'u64', or add the 'u64' suffix)")
+                            }
+                        }
+                    }
+                    case _ {
+                    }
+                }
                 if vt == TY_UNIT {
                     self.error("cannot bind a call that returns no value")
                 }
