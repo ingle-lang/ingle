@@ -332,12 +332,17 @@ bare-metal codegen rides — strengthening selfhost strengthens the endgame.
     EError; the EStr loop now rejects an EError hole directly (an EError only ever comes from a failed parse,
     so never a false-reject) — no parser/AST change.
   Checker verdict-parity **640→650/656**; `make selfhost` **1501/0**; reproduction byte-identical throughout.
-  **REMAINING 6 misses** (all harder / blocked, none a false-reject): 4 `examples/web/*.ig` need cross-module
-  IMPORT resolution the single-file checker does not do (a genuinely new capability, useful well beyond these);
+  **REMAINING 6 misses** (all harder / blocked, none a false-reject): 4 `examples/web/*.ig` need WHOLE-PROGRAM
+  (merged) checking so the checker sees `std/web`'s imported direct externs. `check()` was factored into
+  `check_decls(decls)` and a BFS import-merge was attempted in `check_dump.ig` (`f289fa7`) — it DID close all 4,
+  but the checker's name resolution is not yet MODULE-SCOPED (OFI-073: two modules may legally share a
+  variant/helper name — `variant_cross_module.ig` redefines `std/highlight`'s `Str`/`Number`/… variants), so a
+  merged global scope collided them into **84 false-rejects** (every flare/selfhost/cross-module file). Reverted
+  to single-file; merged checking waits on module-scoped resolution (the real blocker, a substantial feature).
   `error_enum_named` needs an ECall AST-schema change (arg-names on every ECall match + the dump) + a variant
   field-NAME table; `error_resource_clone_match` needs Result/Option generic-payload typing (the checker leaves
-  them TY_INFER — the "dominant blocker"). These are the last reject-parity items before OFI-174 closes; the
-  two non-web are a step-change in size from the 10 above.
+  them TY_INFER — the "dominant blocker"). These are the last reject-parity items before OFI-174 closes; each is
+  a step-change in size from the 10 above.
 
 - **2026-07-23 — Phase 4 OPENED: the C-emit ERASED-GENERIC OWNERSHIP facets (3 of 3), all corpus HOF files
   byte-identical.** The last diffs on `generic_hof_strings`/`stdlib_list`/`stdlib_list_sort` were three
