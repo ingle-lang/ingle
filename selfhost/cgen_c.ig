@@ -776,8 +776,8 @@ fn hof_srcs_of(f: ps.FnDecl) -> [int] {
 
 
 // build_hof_srcs builds the per-em_fn HOF param-source table as a FLAT stride-6 array (fn slot k occupies
-// [k*6 .. k*6+6)); a non-HOF's block has lam_arg -1. Flat, not [[int]], to avoid the nested-array-element
-// `.len()` mistyping (OFI-219).
+// [k*6 .. k*6+6)); a non-HOF's block has lam_arg -1. (A flat encoding — nested `[[int]]` arrays now compile
+// correctly on the self-hosted C-emit, OFI-219 closed, so this is a simplicity choice, no longer required.)
 fn build_hof_srcs(decls: [ps.Decl]) -> [int] {
     var out: [int] = []
     var i = 0
@@ -2483,6 +2483,8 @@ struct CgcGen {
     sc_array: [bool]           // ...is this binding an ARRAY? (passed to a call by BORROW, not moved like a string)
     sc_elem_kind: [int]        // ...for an array binding: its ELEMENT scalar width-kind (so `arr[i]` is a scalar), else -1
     sc_elem_aek: [int]         // ...for an array binding: its ELEMENT ArrayElemKind (0 boxed refcounted / 1..11 scalar) — so a `[bool]` element (11) is not mistaken for a refcounted one, else -1
+    sc_elem_is_array: [bool]   // ...for an array binding: is its ELEMENT itself an ARRAY (`[[T]]`)? so `grid[i].len()` is em_array_len, NOT em_str_len — a boxed (AEK-0) element that is an array, not a string (OFI-219)
+    sc_elem_elem_kind: [int]   // ...for a `[[T]]` binding: the INNER element's scalar width-kind (T's, so `grid[i][j]` reads plain, not own_into_slot'd), else -1 (OFI-219)
     sc_elem_struct: [int]      // ...for a STRUCT-array binding: its element struct sid (so `arr[i]` / `arr[i].f` resolve), else -1
     sc_refc: [bool]            // ...is this a REFCOUNTED BORROW (a string/enum enum-payload binding)? consuming it → own_into_slot
     sc_tyvar: [bool]           // ...is this an OWNED erased TYPE-PARAM local (`var acc = init`, init: U)? a whole-value
@@ -2539,6 +2541,8 @@ struct CgcGen {
         self.sc_array.append(is_arr)
         self.sc_elem_kind.append(elem_kind)
         self.sc_elem_aek.append(0 - 1)        // default: unknown element AEK (set_last_elem_aek overrides for array bindings)
+        self.sc_elem_is_array.append(false)   // default: element is not itself an array (set_last_elem_is_array overrides)
+        self.sc_elem_elem_kind.append(0 - 1)  // default: unknown inner element kind (set_last_elem_elem_kind overrides for [[T]])
         self.sc_elem_struct.append(0 - 1)     // default: not a struct-array binding (set_last_elem_struct overrides)
         self.sc_refc.append(false)            // default: not a refcounted borrow (set_last_refc overrides)
         self.sc_tyvar.append(false)           // default: not an owned type-param local (set_last_tyvar overrides)
@@ -2674,6 +2678,49 @@ struct CgcGen {
     }
 
 
+    // set_last_elem_is_array marks the most-recently pushed array binding's ELEMENT as itself an array (`[[T]]`),
+    // so `grid[i].len()` dispatches to em_array_len, not em_str_len (OFI-219).
+    fn set_last_elem_is_array(mut self, v: bool) {
+        self.sc_elem_is_array[self.sc_elem_is_array.len() - 1] = v
+    }
+
+
+    fn lookup_elem_is_array(self, name: string) -> bool {
+        var i = self.sc_name.len() - 1
+        loop {
+            if i < 0 {
+                break
+            }
+            if self.sc_name[i] == name {
+                return self.sc_elem_is_array[i]
+            }
+            i = i - 1
+        }
+        return false
+    }
+
+
+    // set_last_elem_elem_kind records the INNER element scalar kind of the most-recently pushed `[[T]]` binding.
+    fn set_last_elem_elem_kind(mut self, k: int) {
+        self.sc_elem_elem_kind[self.sc_elem_elem_kind.len() - 1] = k
+    }
+
+
+    fn lookup_elem_elem_kind(self, name: string) -> int {
+        var i = self.sc_name.len() - 1
+        loop {
+            if i < 0 {
+                break
+            }
+            if self.sc_name[i] == name {
+                return self.sc_elem_elem_kind[i]
+            }
+            i = i - 1
+        }
+        return 0 - 1
+    }
+
+
     // lookup_struct returns the value-struct sid of binding `name` (-1 if not a value-struct binding).
     fn lookup_struct(self, name: string) -> int {
         var i = self.sc_name.len() - 1
@@ -2796,6 +2843,8 @@ struct CgcGen {
         var na: [bool] = []
         var ne: [int] = []
         var nea: [int] = []
+        var neia: [bool] = []
+        var neek: [int] = []
         var nes: [int] = []
         var nrc: [bool] = []
         var ntv: [bool] = []
@@ -2814,6 +2863,8 @@ struct CgcGen {
             na.append(self.sc_array[i])
             ne.append(self.sc_elem_kind[i])
             nea.append(self.sc_elem_aek[i])
+            neia.append(self.sc_elem_is_array[i])
+            neek.append(self.sc_elem_elem_kind[i])
             nes.append(self.sc_elem_struct[i])
             nrc.append(self.sc_refc[i])
             ntv.append(self.sc_tyvar[i])
@@ -2822,6 +2873,8 @@ struct CgcGen {
             i = i + 1
         }
         self.sc_elem_struct = nes
+        self.sc_elem_is_array = neia
+        self.sc_elem_elem_kind = neek
         self.sc_refc = nrc
         self.sc_tyvar = ntv
         self.sc_name = nn
@@ -4480,6 +4533,22 @@ struct CgcGen {
     }
 
 
+    // value_elem_is_array reports whether an inferred array VALUE's element is itself an ARRAY (`[[T]]` — its
+    // first element is an array), so `grid[i].len()` is em_array_len not em_str_len (OFI-219).
+    fn value_elem_is_array(self, value: ps.Expr) -> bool {
+        match value {
+            case EArray(elems, lines) {
+                if elems.len() > 0 {
+                    return self.is_array_expr(elems[0])
+                }
+            }
+            case _ {
+            }
+        }
+        return false
+    }
+
+
     // value_elem_aek_boxed returns 0 when an array VALUE's element is BOXED refcounted (a string/enum/struct/
     // nested-array element — so `xs[i]` is a heap value, e.g. a string `.len()` receiver), else -1. Used to set
     // an inferred array binding's element AEK (annotated arrays get it from the `[T]` type). OFI-206 follow-on.
@@ -4633,6 +4702,18 @@ struct CgcGen {
                 }
                 return 0 - 1
             }
+            case EIndex(iobj, iidx) {
+                // `grid[i]` of a `[[T]]` binding → the INNER element scalar kind (T's), so `grid[i][j]` reads
+                // plain (a scalar) and isn't own_into_slot'd as a refcounted element (OFI-219).
+                match iobj.value {
+                    case EIdent(aname) {
+                        return self.lookup_elem_elem_kind(aname)
+                    }
+                    case _ {
+                    }
+                }
+                return 0 - 1
+            }
             case _ {
                 return 0 - 1
             }
@@ -4657,7 +4738,9 @@ struct CgcGen {
             case EIdent(name) {
                 let aek = self.lookup_elem_aek(name)   // a binding/param array with a KNOWN element AEK (a [bool] = 11 is scalar)
                 if aek >= 0 {
-                    return aek == 0
+                    // ...but a `[[T]]` element (a nested array, boxed AEK-0) is a unique-owner ARRAY the outer
+                    // array owns — a BORROW, not a refcounted single Value, so it is NOT own_into_slot'd (OFI-219).
+                    return aek == 0 && self.lookup_elem_is_array(name) == false
                 }
             }
             case _ {
@@ -4710,7 +4793,9 @@ struct CgcGen {
                 // approximation as the EGet/EIdent arms (the corpus only calls string methods on strings).
                 match object.value {
                     case EIdent(aname) {
-                        return self.lookup_array(aname) && self.lookup_elem_aek(aname) == 0 && self.lookup_elem_struct(aname) < 0
+                        // ...but NOT a `[[T]]` element (a nested array is boxed AEK-0 too) — that is an ARRAY
+                        // receiver (`grid[i].len()` → em_array_len), handled by is_array_expr instead (OFI-219).
+                        return self.lookup_array(aname) && self.lookup_elem_aek(aname) == 0 && self.lookup_elem_struct(aname) < 0 && self.lookup_elem_is_array(aname) == false
                     }
                     case EGet(gobj, gname) {
                         // `self.parts[0]` — an element of a struct's string-array FIELD (a boxed AEK-0, non-struct
@@ -4781,6 +4866,18 @@ struct CgcGen {
                 // a struct's ARRAY field `s.toks` (so `s.toks.len()` / `s.toks[i]` resolve)
                 let sid = self.struct_sid_any(object.value)
                 return sid >= 0 && self.st.field_is_array(sid, name)
+            }
+            case EIndex(object, index) {
+                // `grid[i]` of a `[[T]]` binding is itself an ARRAY (so `grid[i].len()` → em_array_len,
+                // `grid[i][j]` resolves) — OFI-219.
+                match object.value {
+                    case EIdent(aname) {
+                        return self.lookup_array(aname) && self.lookup_elem_is_array(aname)
+                    }
+                    case _ {
+                    }
+                }
+                return false
             }
             case ECall(callee, args) {
                 match callee.value {
@@ -5161,7 +5258,14 @@ struct CgcGen {
                         if ty.len() > 0 {
                             esid = ty_struct_sid(elem_ty_of(ty[0]), self.st.names)
                             self.set_last_elem_aek(array_elem_kind_ty(elem_ty_of(ty[0])))   // element AEK (a [bool] element isn't refcounted)
+                            if is_array_ty(elem_ty_of(ty[0])) {                            // a `[[T]]` binding (OFI-219)
+                                self.set_last_elem_is_array(true)
+                                self.set_last_elem_elem_kind(ty_scalar_kind(elem_ty_of(elem_ty_of(ty[0]))))   // T's scalar kind, so `grid[i][j]` reads plain
+                            }
                         } else {
+                            if self.value_elem_is_array(value.value) {
+                                self.set_last_elem_is_array(true)                          // an inferred `[[T]]` literal
+                            }
                             esid = self.value_elem_struct(value.value)
                             var bea = self.value_elem_aek_boxed(value.value)   // an inferred [string]-like array: mark its boxed element (OFI-206 follow-on)
                             if bea != 0 && self.map_lam_ret(value.value, true) == 1 {
@@ -5941,7 +6045,7 @@ fn enum_payload_generic(ty: ps.Ty, generics: [ps.GenericParam]) -> bool {
 
 
 fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_ret_kind: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab, lambda_start: int, fn_ret_det_arg: [int], fn_ret_det_elem: [bool], fn_ret_lam_arg: [int], fn_ret_lam_in: [int], fn_hof_srcs: [int], fn_param_gen_mask: [int], lam_pstr: [bool], lam_pkind: [int]) -> [int] {
-    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_struct: [], sc_refc: [], sc_tyvar: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, fn_param_gen_mask: fn_param_gen_mask, lam_recs: [] }
+    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_is_array: [], sc_elem_elem_kind: [], sc_elem_struct: [], sc_refc: [], sc_tyvar: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, fn_param_gen_mask: fn_param_gen_mask, lam_recs: [] }
     // For a lifted lambda, lam_pstr/lam_pkind type its OWN params (the trailing params after the captures) so
     // the body dispatches `.len()`/concat/arithmetic like stage-0 (the C signature stays all-`Value`). Captures
     // lead and stay untyped. caps = (non-self param count) − (own params typed) — OFI-206 follow-on.
@@ -5980,6 +6084,8 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: Stru
             var eaek = 0 - 1
             var psid = 0 - 1
             var pesid = 0 - 1
+            var peia = false
+            var peek = 0 - 1
             if f.params[p].ty.len() > 0 {
                 pk = ty_scalar_kind(f.params[p].ty[0])
                 owned = is_string_ty(f.params[p].ty[0]) || is_enum_ty(f.params[p].ty[0], en) || is_fn_ty(f.params[p].ty[0])   // string / enum / closure param is OWNED
@@ -5988,6 +6094,10 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: Stru
                     ek = ty_scalar_kind(elem_ty_of(f.params[p].ty[0]))   // its element scalar kind, so `a[i]` is a scalar
                     eaek = array_elem_kind_ty(elem_ty_of(f.params[p].ty[0]))   // its element AEK, so a `[bool]` element isn't owned
                     pesid = ty_struct_sid(elem_ty_of(f.params[p].ty[0]), st.names)   // a `[Struct]` param: `a[i]` is a boxed struct
+                    peia = is_array_ty(elem_ty_of(f.params[p].ty[0]))   // a `[[T]]` param: its element is an array (OFI-219)
+                    if peia {
+                        peek = ty_scalar_kind(elem_ty_of(elem_ty_of(f.params[p].ty[0])))   // its INNER element scalar kind
+                    }
                 }
                 psid = st.sid_of_ty(f.params[p].ty[0])   // value OR boxed struct sid this param carries (incl. a generic instance)
             }
@@ -6009,6 +6119,8 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: Stru
             g.push(f.params[p].name, "a{ai}", pk, false, owned, is_arr, ek)
             if is_arr {
                 g.set_last_elem_aek(eaek)
+                g.set_last_elem_is_array(peia)
+                g.set_last_elem_elem_kind(peek)
             }
             if psid >= 0 {
                 g.set_last_struct(psid)           // value param → read via aN.fM; boxed param → a borrowed Value
@@ -6970,8 +7082,8 @@ fn emit_program(decls: [ps.Decl], filename: string) {
         k = k + 1
     }
     // lifted-lambda bodies (em_fn_{total+k}); a flat lambda body has no nested lambda, so lambda_start=0. Each
-    // gets its own recorded param typing, decoded fresh from all_recs into LOCAL rows (no [[bool]]/[[int]]
-    // tables — a nested-array element trips OFI-219); empty rows if the lambda wasn't a HOF arg.
+    // gets its own recorded param typing, decoded fresh from all_recs into LOCAL rows (empty rows if the lambda
+    // wasn't a HOF arg). (Flat/local rows are a simplicity choice — nested arrays now compile, OFI-219 closed.)
     var lb = 0
     loop {
         if lb >= lc.lams.len() {
