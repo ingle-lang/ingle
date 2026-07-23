@@ -216,6 +216,8 @@ struct Checker {
     ev_enum: [int]             // enum-variant table: owning enum index (parallel to `enums`)
     ev_name: [string]          // ...variant name
     ev_arity: [int]            // ...payload field count
+    ev_fstart: [int]           // ...start index into ev_ftype for this variant's payload field types
+    ev_ftype: [int]            // ...each payload field's SemType (so a nested pattern can reject a struct payload)
     ifaces: [string]           // interface names — a value of interface type stays lenient (coercion)
     im_iface: [int]            // interface-method table: owning interface index (parallel to `ifaces`)
     im_name: [string]          // ...required method name (a conforming struct must declare it)
@@ -334,6 +336,27 @@ struct Checker {
             return true
         }
         return t == TY_ARRAY || t == TY_PTR
+    }
+
+
+    // variant_field_type returns the SemType of enum variant `vname`'s `fidx`-th payload field (via the
+    // ev_fstart/ev_ftype tables), or TY_INFER if unknown — so a nested pattern can tell a struct/array payload
+    // (not bindable) from a scalar/string/enum one. By-name (like variant_enum); a modelled struct resolves.
+    fn variant_field_type(self, vname: string, fidx: int) -> int {
+        var i = 0
+        loop {
+            if i >= self.ev_name.len() {
+                break
+            }
+            if self.ev_name[i] == vname {
+                if fidx >= 0 && fidx < self.ev_arity[i] {
+                    return self.ev_ftype[self.ev_fstart[i] + fidx]
+                }
+                return TY_INFER
+            }
+            i = i + 1
+        }
+        return TY_INFER
     }
 
 
@@ -1060,6 +1083,15 @@ struct Checker {
                         self.ev_enum.append(eid)
                         self.ev_name.append(variants[v].name)
                         self.ev_arity.append(variants[v].fields.len())
+                        self.ev_fstart.append(self.ev_ftype.len())
+                        var vf = 0
+                        loop {
+                            if vf >= variants[v].fields.len() {
+                                break
+                            }
+                            self.ev_ftype.append(self.annotation_type(variants[v].fields[vf].ty))   // a struct/array payload can't be bound by a nested pattern
+                            vf = vf + 1
+                        }
                         v = v + 1
                     }
                 }
@@ -2148,6 +2180,14 @@ struct Checker {
                             loop {
                                 if ij >= cases[ci].pattern.binding_pats[bi].bindings.len() {
                                     break
+                                }
+                                // A one-level nested enum pattern (`case Wrap(Loc(pt))`) can bind only single-Value
+                                // inner payloads (scalar/string/enum). If the inner variant's field is a STRUCT or
+                                // ARRAY, reject — destructure it with a further nested `match` instead. A TY_INFER
+                                // (unmodelled) inner field stays lenient (no false-reject).
+                                let ift = self.variant_field_type(cases[ci].pattern.binding_pats[bi].variant, ij)
+                                if self.is_move_type(ift) {
+                                    self.error("a nested enum pattern can only bind scalar/string payloads for now (bind the payload and use a nested `match`)")
                                 }
                                 self.declare(cases[ci].pattern.binding_pats[bi].bindings[ij], TY_INFER, false, false, false)
                                 ij = ij + 1
@@ -3604,7 +3644,7 @@ fn check(src: string) -> bool {
     var tparams: [string] = []
     var locals: [Local] = []
     var diags: [string] = []
-    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_ret: fn_ret, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, fn_ptparam: fn_ptparam, fn_extern: fn_extern, fg_name: fg_name, fg_param: fg_param, fg_bound: fg_bound, struct_garity: struct_garity, struct_kind: struct_kind, sg_struct: sg_struct, sg_param: sg_param, sg_bound: sg_bound, simpl_struct: simpl_struct, simpl_iface: simpl_iface, newtypes: newtypes, newtype_base: newtype_base, sf_owner: sf_owner, sf_tparam: sf_tparam, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_moveself: sm_moveself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, nursery_depth: 0, locals: locals, local_moved: [], local_frozen: [], local_consumed: [], loop_break_consumed: [], loop_saw_break: false, local_unbounded_tp: [], scope_depth: 0, diags: diags }
+    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_ret: fn_ret, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, fn_ptparam: fn_ptparam, fn_extern: fn_extern, fg_name: fg_name, fg_param: fg_param, fg_bound: fg_bound, struct_garity: struct_garity, struct_kind: struct_kind, sg_struct: sg_struct, sg_param: sg_param, sg_bound: sg_bound, simpl_struct: simpl_struct, simpl_iface: simpl_iface, newtypes: newtypes, newtype_base: newtype_base, sf_owner: sf_owner, sf_tparam: sf_tparam, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_moveself: sm_moveself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ev_fstart: [], ev_ftype: [], ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, nursery_depth: 0, locals: locals, local_moved: [], local_frozen: [], local_consumed: [], loop_break_consumed: [], loop_saw_break: false, local_unbounded_tp: [], scope_depth: 0, diags: diags }
     c.register(decls)                    // pass 1: NAMES (so forward references resolve)
     c.register_types(decls)              // pass 1b: signatures, fields, variants (needs names registered)
     c.check_all(decls)                   // pass 2: bodies
