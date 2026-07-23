@@ -229,6 +229,8 @@ struct Checker {
     locals: [Local]
     local_moved: [bool]        // MUTABLE move state, parallel to `locals` (element-struct writeback isn't
                                // self-compilable yet — OFI-061 — so the moved flag lives in a scalar array)
+    local_frozen: [bool]       // ...is this array local FROZEN by a live slice (`let s = a[0..hi]`)? a mutating
+                               // method (append/remove_last/remove_at) on a frozen array is rejected (OFI-218 P4)
     local_consumed: [bool]     // the must-consume DUAL (AND-merge): for an OWNED Ptr local, false = an open
                                // handle obligation (leaks at an exit), true = discharged; true for everything
                                // else (no obligation). OFI-049.
@@ -268,6 +270,7 @@ struct Checker {
         }
         self.locals.append(Local{ name: name, depth: self.scope_depth, ty: ty, is_var: is_var, owned: owned, mvparam: mvparam })
         self.local_moved.append(false)
+        self.local_frozen.append(false)
         // an OWNED Ptr local is an OPEN obligation (consumed=false); everything else has none (true).
         self.local_consumed.append((owned && ty == TY_PTR) == false)
         self.local_unbounded_tp.append(false)   // set true by check_fn only for an unbounded-type-param param
@@ -1417,6 +1420,8 @@ struct Checker {
         self.locals = fresh
         var freshm: [bool] = []
         self.local_moved = freshm
+        var freshf: [bool] = []
+        self.local_frozen = freshf
         var freshc: [bool] = []
         self.local_consumed = freshc
         var freshbrk: [bool] = []
@@ -1498,6 +1503,7 @@ struct Checker {
     fn truncate_locals(mut self, n: int) {
         var kept: [Local] = []
         var keptm: [bool] = []
+        var keptf: [bool] = []
         var keptc: [bool] = []
         var keptu: [bool] = []
         var i = 0
@@ -1507,12 +1513,14 @@ struct Checker {
             }
             kept.append(Local{ name: self.locals[i].name, depth: self.locals[i].depth, ty: self.locals[i].ty, is_var: self.locals[i].is_var, owned: self.locals[i].owned, mvparam: self.locals[i].mvparam })
             keptm.append(self.local_moved[i])           // a move on an OUTER local persists past an inner scope
+            keptf.append(self.local_frozen[i])          // ...as does a freeze by a live slice
             keptc.append(self.local_consumed[i])
             keptu.append(self.local_unbounded_tp[i])
             i = i + 1
         }
         self.locals = kept
         self.local_moved = keptm
+        self.local_frozen = keptf
         self.local_consumed = keptc
         self.local_unbounded_tp = keptu
     }
@@ -1624,6 +1632,30 @@ struct Checker {
                             }
                             if u64_ctx == false {
                                 self.error("this integer literal exceeds the i64 range; only 'u64' can hold it (annotate the binding 'u64', or add the 'u64' suffix)")
+                            }
+                        }
+                    }
+                    case _ {
+                    }
+                }
+                // slice creation `let s = a[lo..hi]` FREEZES the source array `a` for the rest of its scope — a
+                // later mutation (append/remove_last/remove_at) of `a` while the borrowed view is live dangles.
+                match value.value {
+                    case EIndex(sobj, sidx) {
+                        match sidx.value {
+                            case ERange(slo, shi) {
+                                match sobj.value {
+                                    case EIdent(aname) {
+                                        let aslot = self.local_slot(aname)
+                                        if aslot >= 0 {
+                                            self.local_frozen[aslot] = true
+                                        }
+                                    }
+                                    case _ {
+                                    }
+                                }
+                            }
+                            case _ {
                             }
                         }
                     }
@@ -2460,6 +2492,10 @@ struct Checker {
                                 let rslot = self.local_slot(rname)
                                 if rslot >= 0 && self.local_unbounded_tp[rslot] {
                                     self.error("cannot call a method on an unbounded type parameter")
+                                }
+                                // a MUTATING array method on an array FROZEN by a live slice would dangle the view
+                                if rslot >= 0 && self.local_frozen[rslot] && (mname == "append" || mname == "remove_last" || mname == "remove_at") {
+                                    self.error("cannot mutate an array while it is borrowed by a slice (the view would dangle)")
                                 }
                             }
                             case _ {
@@ -3568,7 +3604,7 @@ fn check(src: string) -> bool {
     var tparams: [string] = []
     var locals: [Local] = []
     var diags: [string] = []
-    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_ret: fn_ret, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, fn_ptparam: fn_ptparam, fn_extern: fn_extern, fg_name: fg_name, fg_param: fg_param, fg_bound: fg_bound, struct_garity: struct_garity, struct_kind: struct_kind, sg_struct: sg_struct, sg_param: sg_param, sg_bound: sg_bound, simpl_struct: simpl_struct, simpl_iface: simpl_iface, newtypes: newtypes, newtype_base: newtype_base, sf_owner: sf_owner, sf_tparam: sf_tparam, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_moveself: sm_moveself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, nursery_depth: 0, locals: locals, local_moved: [], local_consumed: [], loop_break_consumed: [], loop_saw_break: false, local_unbounded_tp: [], scope_depth: 0, diags: diags }
+    var c = Checker{ fns: fns, structs: structs, enums: enums, variants: variants, globals: globals, aliases: aliases, fn_names: fn_names, fn_arity: fn_arity, fn_ret: fn_ret, fn_pstart: fn_pstart, fn_ptype: fn_ptype, fn_pqual: fn_pqual, fn_ptparam: fn_ptparam, fn_extern: fn_extern, fg_name: fg_name, fg_param: fg_param, fg_bound: fg_bound, struct_garity: struct_garity, struct_kind: struct_kind, sg_struct: sg_struct, sg_param: sg_param, sg_bound: sg_bound, simpl_struct: simpl_struct, simpl_iface: simpl_iface, newtypes: newtypes, newtype_base: newtype_base, sf_owner: sf_owner, sf_tparam: sf_tparam, sf_name: sf_name, sf_type: sf_type, sm_owner: sm_owner, sm_name: sm_name, sm_arity: sm_arity, sm_pstart: sm_pstart, sm_ptype: sm_ptype, sm_mutself: sm_mutself, sm_moveself: sm_moveself, sm_ret: sm_ret, ev_enum: ev_enum, ev_name: ev_name, ev_arity: ev_arity, ifaces: ifaces, im_iface: im_iface, im_name: im_name, im_arity: im_arity, im_ret: im_ret, tparams: tparams, current_return: TY_UNIT, self_is_var: false, loop_depth: 0, nursery_depth: 0, locals: locals, local_moved: [], local_frozen: [], local_consumed: [], loop_break_consumed: [], loop_saw_break: false, local_unbounded_tp: [], scope_depth: 0, diags: diags }
     c.register(decls)                    // pass 1: NAMES (so forward references resolve)
     c.register_types(decls)              // pass 1b: signatures, fields, variants (needs names registered)
     c.check_all(decls)                   // pass 2: bodies
