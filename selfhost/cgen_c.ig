@@ -855,6 +855,66 @@ fn build_hof_srcs(decls: [ps.Decl]) -> [int] {
 }
 
 
+// gen_param_mask_of returns a per-value-param bitmask for a fn: bit v is set iff value-param v is a bare
+// ERASED generic type-param passed by BORROW (`x: T`, not `move T`). Stage-0's drop_mask masks a fresh owning
+// temp at such a param (it is NOT refcounted under erasure, so the callee borrows it and the CALLER drops) —
+// unlike a concrete refcounted param (moved/adopted, no caller drop). check.c:3196 `!is_refcounted(param)`.
+fn gen_param_mask_of(f: ps.FnDecl) -> int {
+    var mask = 0
+    var i = 0
+    var vidx = 0
+    loop {
+        if i >= f.params.len() {
+            break
+        }
+        if f.params[i].is_self == false {
+            if f.params[i].qual != 2 && f.params[i].ty.len() > 0 && ty_is_generic_param(f.params[i].ty[0], f.generics) {
+                mask = mask | (1 << vidx)
+            }
+            vidx = vidx + 1
+        }
+        i = i + 1
+    }
+    return mask
+}
+
+
+// build_fn_param_gen_mask builds the per-em_fn generic-borrow-param bitmask table (index = the fn's em_fn
+// slot), parallel to build_fn_names. Used by emit_free_call to mask a string temp passed to a generic-T param.
+fn build_fn_param_gen_mask(decls: [ps.Decl]) -> [int] {
+    var out: [int] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.has_body {
+                    out.append(gen_param_mask_of(f))
+                }
+            }
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        out.append(gen_param_mask_of(methods[mi]))
+                    }
+                    mi = mi + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
 // c_escape renders a string's bytes as the contents of a C string literal (no surrounding quotes),
 // mirroring cgen_c.c:emit_c_string_literal: `"`/`\` are backslash-escaped, newline/tab/CR use their named
 // escapes, printable ASCII passes through, and any other byte is a 3-digit octal escape.
@@ -2452,6 +2512,8 @@ struct CgcGen {
     sc_elem_aek: [int]         // ...for an array binding: its ELEMENT ArrayElemKind (0 boxed refcounted / 1..11 scalar) — so a `[bool]` element (11) is not mistaken for a refcounted one, else -1
     sc_elem_struct: [int]      // ...for a STRUCT-array binding: its element struct sid (so `arr[i]` / `arr[i].f` resolve), else -1
     sc_refc: [bool]            // ...is this a REFCOUNTED BORROW (a string/enum enum-payload binding)? consuming it → own_into_slot
+    sc_tyvar: [bool]           // ...is this an OWNED erased TYPE-PARAM local (`var acc = init`, init: U)? a whole-value
+                               // consume MOVES it (nil-slot), not own_into_slot — stage-0's moves_local==1 (OFI-176, F2)
     sc_struct: [int]           // ...for a VALUE-STRUCT binding: its struct sid (so `p.f` / storage type resolve), else -1
     sc_render: [int]           // ...its interpolation render-kind (int_kind: 0 int, 8 f32, 9 float, 10 bool, 1..7 sized), for `{x}`
     indent: int                // current C indentation depth (1 = the function-body level, 4 spaces each)
@@ -2475,6 +2537,8 @@ struct CgcGen {
     fn_ret_det_elem: [bool]    // ...and whether that arg is `[T]` (return type-param = its element) — OFI-206 follow-on
     fn_ret_lam_arg: [int]      // ...map-style: the LAMBDA value-arg whose return type is a `[U]` return's element,
     fn_ret_lam_in: [int]       // ...and the INPUT-array value-arg typing that lambda's param (else -1) — OFI-206
+    fn_param_gen_mask: [int]   // ...per fn: a bitmask of value-params that are erased generic-T BORROW params
+                               // (`x: T`) — a fresh string temp at such a param is caller-dropped (OFI-176, F1)
     fn_hof_srcs: [int]         // ...per HOF fn, a FIXED stride-6 block [lam_arg, np, p0_arg, p0_elem, p1_arg,
                                // p1_elem] (lam_arg -1 = not a HOF / >2 lambda params): the value-arg each
                                // lifted-lambda param draws its type from (whole vs element) — OFI-206. Flat
@@ -2504,6 +2568,7 @@ struct CgcGen {
         self.sc_elem_aek.append(0 - 1)        // default: unknown element AEK (set_last_elem_aek overrides for array bindings)
         self.sc_elem_struct.append(0 - 1)     // default: not a struct-array binding (set_last_elem_struct overrides)
         self.sc_refc.append(false)            // default: not a refcounted borrow (set_last_refc overrides)
+        self.sc_tyvar.append(false)           // default: not an owned type-param local (set_last_tyvar overrides)
         self.sc_struct.append(0 - 1)          // default: not a struct binding (set_last_struct overrides)
         self.sc_render.append(0)              // default: int render-kind (set_last_render overrides for float/bool/sized)
     }
@@ -2547,6 +2612,28 @@ struct CgcGen {
             }
             if self.sc_name[i] == name {
                 return self.sc_refc[i]
+            }
+            i = i - 1
+        }
+        return false
+    }
+
+
+    // set_last_tyvar marks the most-recently pushed binding as an OWNED erased TYPE-PARAM local, so a whole-
+    // value consume MOVES it (nil-slot) rather than own_into_slot — stage-0's moves_local==1 (OFI-176, F2).
+    fn set_last_tyvar(mut self, v: bool) {
+        self.sc_tyvar[self.sc_tyvar.len() - 1] = v
+    }
+
+
+    fn lookup_tyvar(self, name: string) -> bool {
+        var i = self.sc_name.len() - 1
+        loop {
+            if i < 0 {
+                break
+            }
+            if self.sc_name[i] == name {
+                return self.sc_tyvar[i]
             }
             i = i - 1
         }
@@ -2738,6 +2825,7 @@ struct CgcGen {
         var nea: [int] = []
         var nes: [int] = []
         var nrc: [bool] = []
+        var ntv: [bool] = []
         var ns: [int] = []
         var nrd: [int] = []
         var i = 0
@@ -2755,12 +2843,14 @@ struct CgcGen {
             nea.append(self.sc_elem_aek[i])
             nes.append(self.sc_elem_struct[i])
             nrc.append(self.sc_refc[i])
+            ntv.append(self.sc_tyvar[i])
             ns.append(self.sc_struct[i])
             nrd.append(self.sc_render[i])
             i = i + 1
         }
         self.sc_elem_struct = nes
         self.sc_refc = nrc
+        self.sc_tyvar = ntv
         self.sc_name = nn
         self.sc_cname = nc
         self.sc_kind = nk
@@ -3511,9 +3601,12 @@ struct CgcGen {
         // A UNIQUE-OWNER binding — an ARRAY or a plain (non-rc) BOXED STRUCT — is moved by NIL-ing its slot
         // (a retain would deep-CLONE it; neither is refcounted). A refcounted STRING / ENUM / rc-struct is
         // owned into the new slot via own_into_slot (a retain balanced by its scope-exit drop).
+        // An OWNED erased TYPE-PARAM local (a reduce accumulator `var acc = init`) also MOVES by nil-ing its
+        // slot — stage-0's moves_local==1 for a whole-value read of an owned type-param (OFI-176 F2). It reaches
+        // move_binding only when owned (lookup_drop), so a BORROWED type-param param still retains elsewhere.
         let sid = self.lookup_struct(name)
         let unique_owner_struct = sid >= 0 && self.st.is_value(sid) == false && self.st.kinds[sid] == 0
-        if self.lookup_array(name) || unique_owner_struct {
+        if self.lookup_array(name) || unique_owner_struct || self.lookup_tyvar(name) {
             let m = self.fresh_var()
             return "(\{ Value v{m} = {cn}; {cn} = INT_VAL(0); v{m}; \})"
         }
@@ -3676,6 +3769,48 @@ struct CgcGen {
                 return false
             }
         }
+    }
+
+
+    // is_fresh_string_temp reports whether `e` is a FRESH string temporary (a literal, a `+` concat, or a
+    // string-returning call) — NOT a place-read (a binding/field/element read the owner keeps). Mirrors
+    // check.c:2766 is_owning_temp restricted to refcounted string temps (the string case of the drop_mask).
+    fn is_fresh_string_temp(self, e: ps.Expr) -> bool {
+        match e {
+            case EStr(parts) {
+                return true
+            }
+            case EBinary(op, l, r) {
+                return self.is_string_expr(e)          // a string `+` concat is a fresh owned temp
+            }
+            case ECall(callee, args) {
+                return self.is_string_expr(e)          // a string-returning call is a fresh owned temp
+            }
+            case _ {
+                return false                           // EIdent/EGet/EIndex string reads are borrows (not temps)
+            }
+        }
+    }
+
+
+    // param_is_gen_borrow reports whether value-param `pidx` of fn `fi` is an erased generic-T BORROW param.
+    fn param_is_gen_borrow(self, fi: int, pidx: int) -> bool {
+        if fi < 0 || fi >= self.fn_param_gen_mask.len() {
+            return false
+        }
+        return ((self.fn_param_gen_mask[fi] >> pidx) & 1) != 0
+    }
+
+
+    // arg_owning_temp_p is the PARAM-AWARE owning-temp test used at a resolved call: a param-independent owning
+    // temp (array / boxed-struct literal or call — arg_is_owning_temp), OR a fresh STRING temp passed to an
+    // erased generic-T BORROW param (which is not refcounted, so the caller drops it — check.c:3196 drop_mask,
+    // OFI-176 F1). A string temp at a CONCRETE string param is moved/adopted (refcounted), NOT dropped.
+    fn arg_owning_temp_p(self, fi: int, pidx: int, e: ps.Expr) -> bool {
+        if self.arg_is_owning_temp(e) {
+            return true
+        }
+        return self.param_is_gen_borrow(fi, pidx) && self.is_fresh_string_temp(e)
     }
 
 
@@ -3898,7 +4033,7 @@ struct CgcGen {
             if ti >= args.len() {
                 break
             }
-            if self.arg_is_owning_temp(args[ti]) {
+            if self.arg_owning_temp_p(fi, ti, args[ti]) {
                 any_temp = true
             }
             ti = ti + 1
@@ -3935,7 +4070,7 @@ struct CgcGen {
                 if k >= args.len() {
                     break
                 }
-                if self.arg_is_owning_temp(args[k]) {
+                if self.arg_owning_temp_p(fi, k, args[k]) {
                     s = s + "drop_value(&g_em, c{argids[k]}); "
                 }
                 k = k + 1
@@ -4944,6 +5079,21 @@ struct CgcGen {
                     if bsid >= 0 {
                         self.set_last_struct(bsid)          // track the boxed-struct sid so `c.field` resolves
                     }
+                    if owned {
+                        // `var acc = init` / `let a = d` where the RHS reads an erased TYPE-PARAM binding: the
+                        // new owner is an owned type-param local — a whole-value consume MOVES it (nil-slot),
+                        // not own_into_slot (stage-0's moves_local==1, OFI-176 F2). A concrete string/array RHS
+                        // is NOT a type-param read, so this leaves it on the retain path.
+                        match value.value {
+                            case EIdent(vn) {
+                                if self.lookup_tyvar(vn) {
+                                    self.set_last_tyvar(true)
+                                }
+                            }
+                            case _ {
+                            }
+                        }
+                    }
                     if arr {
                         // a `[Struct]` array binding tracks its element struct sid (so `xs[i]` is a boxed-struct
                         // borrow) — from the `[T]` annotation, else from an array-returning CALL's element struct.
@@ -5730,8 +5880,8 @@ fn enum_payload_generic(ty: ps.Ty, generics: [ps.GenericParam]) -> bool {
 }
 
 
-fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_ret_kind: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab, lambda_start: int, fn_ret_det_arg: [int], fn_ret_det_elem: [bool], fn_ret_lam_arg: [int], fn_ret_lam_in: [int], fn_hof_srcs: [int], lam_pstr: [bool], lam_pkind: [int]) -> [int] {
-    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_struct: [], sc_refc: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, lam_recs: [] }
+fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_ret_kind: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab, lambda_start: int, fn_ret_det_arg: [int], fn_ret_det_elem: [bool], fn_ret_lam_arg: [int], fn_ret_lam_in: [int], fn_hof_srcs: [int], fn_param_gen_mask: [int], lam_pstr: [bool], lam_pkind: [int]) -> [int] {
+    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_struct: [], sc_refc: [], sc_tyvar: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, fn_param_gen_mask: fn_param_gen_mask, lam_recs: [] }
     // For a lifted lambda, lam_pstr/lam_pkind type its OWN params (the trailing params after the captures) so
     // the body dispatches `.len()`/concat/arithmetic like stage-0 (the C signature stays all-`Value`). Captures
     // lead and stay untyped. caps = (non-self param count) − (own params typed) — OFI-206 follow-on.
@@ -5810,6 +5960,7 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: Stru
                 // An erased generic-`T` param (`d: T`) is a refcounted borrow — own_into_slot on return (OFI-205).
                 if ty_is_generic_param(f.params[p].ty[0], f.generics) {
                     g.set_last_refc(true)
+                    g.set_last_tyvar(true)        // mark it a type-param read source, so `var acc = <this>` inherits (F2)
                 }
                 // A generic Option/Result param (`o: Option<T>`) — record it so `case Some(v)`/`case Ok(v)` on it
                 // binds its erased payload as a refcounted borrow too.
@@ -6591,6 +6742,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
     let fn_ret_lam_arg = build_ret_lam_arg(decls)
     let fn_ret_lam_in = build_ret_lam_in(decls)
     let fn_hof_srcs = build_hof_srcs(decls)    // per-HOF lifted-lambda param sources (OFI-206)
+    let fn_param_gen_mask = build_fn_param_gen_mask(decls)   // per-fn generic-borrow-param bitmask (OFI-176, F1)
     let lc = build_lam_coll(decls)             // lifted lambdas, numbered `total + k` (OFI-206)
     let grand = total + lc.lams.len()                // total em_fn slots (declared + lambdas)
     println("// Generated by `inglec --emit=c` from {filename}. Do not edit.")
@@ -6710,7 +6862,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
         match decls[k] {
             case DFn(f) {
                 if f.has_body {
-                    let recs = emit_fn_body(f, b, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, eb, ei)
+                    let recs = emit_fn_body(f, b, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, eb, ei)
                     var ri = 0
                     loop {
                         if ri >= recs.len() {
@@ -6734,7 +6886,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
                         break
                     }
                     if methods[mi].has_body {
-                        let recs = emit_fn_body(methods[mi], b, true, owner, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, eb, ei)
+                        let recs = emit_fn_body(methods[mi], b, true, owner, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, eb, ei)
                         var ri = 0
                         loop {
                             if ri >= recs.len() {
@@ -6788,7 +6940,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
             }
             pos = pos + 2 + np * 2
         }
-        let _drop = emit_fn_body(lc.lams[lb], total + lb, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, 0, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, ps, pk)
+        let _drop = emit_fn_body(lc.lams[lb], total + lb, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, 0, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, ps, pk)
         b = b + 1
         if b < grand {
             println("")
