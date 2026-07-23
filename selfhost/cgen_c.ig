@@ -224,6 +224,220 @@ fn build_fn_ret_kinds(decls: [ps.Decl]) -> [int] {
 }
 
 
+// ---- generic return-type resolution (OFI-206 follow-on) — the C-emit mirror of the VM's gret machinery -
+// A generic fn returning a bare type-param T or `[T]` (`reduce<T,U>(…, init:U, …)->U`, `sort<T>(xs:[T],…)->[T]`)
+// has an unknown static return kind (ty_scalar_kind(T) = -1). We resolve T at a call site from the value
+// arg that determines it (init for reduce, xs's element for sort), so `let total = reduce(…)` binds int not
+// Value and `bylen[i]` types as its element. Mirrors codegen.ig's ret_tparam_name / param_of_shape_index.
+
+// ret_tparam_name returns the type-param NAME a fn's return exposes: `T` for a `-> T` or `-> [T]` return
+// (T one of the fn's generics), else "".
+fn ret_tparam_name(ret: ps.Ty, generics: [ps.GenericParam]) -> string {
+    match ret {
+        case TyName(qual, name) {
+            if qual == "" && generic_named(generics, name) {
+                return name
+            }
+        }
+        case TyArray(elem) {
+            match elem.value {
+                case TyName(q2, n2) {
+                    if q2 == "" && generic_named(generics, n2) {
+                        return n2
+                    }
+                }
+                case _ {
+                }
+            }
+        }
+        case _ {
+        }
+    }
+    return ""
+}
+
+
+// generic_named reports whether `name` is one of a fn's generic type-param names.
+fn generic_named(generics: [ps.GenericParam], name: string) -> bool {
+    var i = 0
+    loop {
+        if i >= generics.len() {
+            break
+        }
+        if generics[i].name == name {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+
+// ret_det_arg returns the VALUE-arg index that determines a fn's return type-param (the first value param
+// typed exactly `tp` or `[tp]`), or -1. `out_elem` companion below reports whether it was `[tp]` (element).
+fn ret_det_arg(f: ps.FnDecl, tp: string) -> int {
+    var i = 0
+    var vidx = 0
+    loop {
+        if i >= f.params.len() {
+            break
+        }
+        if f.params[i].is_self == false {
+            if f.params[i].ty.len() > 0 {
+                match f.params[i].ty[0] {
+                    case TyName(q, n) {
+                        if q == "" && n == tp {
+                            return vidx
+                        }
+                    }
+                    case TyArray(elem) {
+                        match elem.value {
+                            case TyName(q2, n2) {
+                                if q2 == "" && n2 == tp {
+                                    return vidx
+                                }
+                            }
+                            case _ {
+                            }
+                        }
+                    }
+                    case _ {
+                    }
+                }
+            }
+            vidx = vidx + 1
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+
+// ret_det_is_elem reports whether the determining value arg (at ret_det_arg) is typed `[tp]` (so the return
+// type-param is the arg's ELEMENT — sort) rather than `tp` (the whole arg — reduce).
+fn ret_det_is_elem(f: ps.FnDecl, tp: string) -> bool {
+    var i = 0
+    loop {
+        if i >= f.params.len() {
+            break
+        }
+        if f.params[i].is_self == false && f.params[i].ty.len() > 0 {
+            match f.params[i].ty[0] {
+                case TyName(q, n) {
+                    if q == "" && n == tp {
+                        return false
+                    }
+                }
+                case TyArray(elem) {
+                    match elem.value {
+                        case TyName(q2, n2) {
+                            if q2 == "" && n2 == tp {
+                                return true
+                            }
+                        }
+                        case _ {
+                        }
+                    }
+                }
+                case _ {
+                }
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+
+// build_ret_det builds, per em_fn slot, the determining value-arg index for a type-param return (-1 if the
+// return is not a bare `T`/`[T]`) — parallel to build_fn_ret_kinds.
+fn build_ret_det_arg(decls: [ps.Decl]) -> [int] {
+    var out: [int] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.has_body {
+                    let tp = ret_tparam_name_of(f)
+                    if tp == "" {
+                        out.append(0 - 1)
+                    } else {
+                        out.append(ret_det_arg(f, tp))
+                    }
+                }
+            }
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        out.append(0 - 1)             // struct methods: no bare-tparam-return resolution needed yet
+                    }
+                    mi = mi + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
+fn build_ret_det_elem(decls: [ps.Decl]) -> [bool] {
+    var out: [bool] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.has_body {
+                    let tp = ret_tparam_name_of(f)
+                    if tp == "" {
+                        out.append(false)
+                    } else {
+                        out.append(ret_det_is_elem(f, tp))
+                    }
+                }
+            }
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        out.append(false)
+                    }
+                    mi = mi + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
+// ret_tparam_name_of returns a free fn's return type-param name (or "") — the fn-decl convenience wrapper.
+fn ret_tparam_name_of(f: ps.FnDecl) -> string {
+    if f.ret.len() == 0 {
+        return ""
+    }
+    return ret_tparam_name(f.ret[0], f.generics)
+}
+
+
 // c_escape renders a string's bytes as the contents of a C string literal (no surrounding quotes),
 // mirroring cgen_c.c:emit_c_string_literal: `"`/`\` are backslash-escaped, newline/tab/CR use their named
 // escapes, printable ASCII passes through, and any other byte is a 3-digit octal escape.
@@ -1815,6 +2029,8 @@ struct CgcGen {
                                // (own_into_slot on return), matching stage-0's erased-generic ownership (OFI-205)
     cur_lambda: int            // the em_fn index of the NEXT lambda this body lifts (fn_count + prior lambdas),
                                // incremented at each `em_closure` site so a lambda VALUE gets its lifted slot (OFI-206)
+    fn_ret_det_arg: [int]      // ...per em_fn: the value-arg index determining a bare-`T`/`[T]` return (else -1),
+    fn_ret_det_elem: [bool]    // ...and whether that arg is `[T]` (return type-param = its element) — OFI-206 follow-on
 
 
     fn fresh_var(mut self) -> int {
@@ -3326,6 +3542,27 @@ struct CgcGen {
 
     // scalar_kind_of statically classifies an expression's numeric width-kind (0 i64 … for the M5a int
     // subset), or -1 if it is not a known scalar (a string/struct/Value). Drives the `let` storage choice.
+    // gret_scalar_kind resolves the scalar kind of a generic fn `fi`'s bare-`T` return from its determining
+    // value arg (reduce's U from init), or falls back to fn_ret_kind (-1 for a type-param) — OFI-206 follow-on.
+    fn gret_scalar_kind(self, fi: int, args: [ps.Expr]) -> int {
+        let base = self.fn_ret_kind[fi]
+        if base >= 0 {
+            return base
+        }
+        if fi >= self.fn_ret_det_arg.len() || self.fn_ret_array[fi] {
+            return base                                 // not a bare-T return (an array/concrete return)
+        }
+        let da = self.fn_ret_det_arg[fi]
+        if da < 0 || da >= args.len() {
+            return base
+        }
+        if self.fn_ret_det_elem[fi] {
+            return self.value_elem_kind(args[da])       // T = the `[T]` arg's element scalar kind
+        }
+        return self.scalar_kind_of(args[da])            // T = the whole arg's scalar kind
+    }
+
+
     fn scalar_kind_of(self, e: ps.Expr) -> int {
         match e {
             case EInt(v, kind) {
@@ -3358,7 +3595,7 @@ struct CgcGen {
                         }
                         let fi = self.fn_index(name)
                         if fi >= 0 {
-                            return self.fn_ret_kind[fi]
+                            return self.gret_scalar_kind(fi, args)
                         }
                     }
                     case EGet(object, mname) {
@@ -3379,7 +3616,7 @@ struct CgcGen {
                         }
                         let qfi = self.qual_free_fi(object.value, mname)   // a module-qualified scalar-returning call `ps.binop_class(op)`
                         if qfi >= 0 {
-                            return self.fn_ret_kind[qfi]
+                            return self.gret_scalar_kind(qfi, args)
                         }
                     }
                     case _ {
@@ -4782,8 +5019,8 @@ fn enum_payload_generic(ty: ps.Ty, generics: [ps.GenericParam]) -> bool {
 }
 
 
-fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_ret_kind: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab, lambda_start: int) {
-    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_struct: [], sc_refc: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_lambda: lambda_start }
+fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_ret_kind: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab, lambda_start: int, fn_ret_det_arg: [int], fn_ret_det_elem: [bool]) {
+    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_struct: [], sc_refc: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem }
     var ai = 0
     if has_self {
         g.push("self", "a0", 0 - 1, false, false, false, 0 - 1)
@@ -5588,6 +5825,8 @@ fn emit_program(decls: [ps.Decl], filename: string) {
     let fn_ret_elem_struct = build_fn_ret_elem_structs(decls, stab.names)
     let fn_ret_struct = build_fn_ret_structs(decls, stab)
     let fn_ret_enum = build_fn_ret_enum(decls, etab)
+    let fn_ret_det_arg = build_ret_det_arg(decls)
+    let fn_ret_det_elem = build_ret_det_elem(decls)
     let lc = build_lam_coll(decls)             // lifted lambdas, numbered `total + k` (OFI-206)
     let grand = total + lc.lams.len()                // total em_fn slots (declared + lambdas)
     println("// Generated by `inglec --emit=c` from {filename}. Do not edit.")
@@ -5702,7 +5941,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
         match decls[k] {
             case DFn(f) {
                 if f.has_body {
-                    emit_fn_body(f, b, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next)
+                    emit_fn_body(f, b, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem)
                     lam_next = lam_next + count_lambdas_body(f.body)
                     b = b + 1
                     if b < grand {
@@ -5718,7 +5957,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
                         break
                     }
                     if methods[mi].has_body {
-                        emit_fn_body(methods[mi], b, true, owner, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next)
+                        emit_fn_body(methods[mi], b, true, owner, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem)
                         lam_next = lam_next + count_lambdas_body(methods[mi].body)
                         b = b + 1
                         if b < grand {
@@ -5739,7 +5978,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
         if lb >= lc.lams.len() {
             break
         }
-        emit_fn_body(lc.lams[lb], total + lb, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, 0)
+        emit_fn_body(lc.lams[lb], total + lb, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, 0, fn_ret_det_arg, fn_ret_det_elem)
         b = b + 1
         if b < grand {
             println("")
