@@ -465,6 +465,23 @@ bare-metal codegen rides — strengthening selfhost strengthens the endgame.
   on DEEPER C-emit generic-HOF gaps (closure-call string-temp arg masking, return-type-through-generic
   `let` bindings, an OFI-173 field/method construct) that the lambda tripwire previously MASKED — the
   lambda lifting is correct; these are the next C-emit-completeness items.
+- **2026-07-23 — Phase 3 continued: C-emit GENERIC RETURN-TYPE INFERENCE (the gret mirror), 3 facets.**
+  A generic fn returning a bare `T`/`[T]` had an unknown static return type in the C-emit (`ty_scalar_kind(T)
+  = -1`), so results bound as `Value` and their methods/indexing tripwired. Built the C-emit's gret machinery
+  (`build_ret_det_arg`/`build_ret_det_elem` — per em_fn, the value arg determining the return type-param +
+  whether it's the arg's element — threaded into `CgcGen`) and resolved three facets at each call site:
+  - **scalar** (`e032b27`): `gret_scalar_kind` — reduce's `U` from `init` → `let total = reduce(…)` binds
+    `int64_t` not `Value`.
+  - **array element AEK** (`067661f` + `b128822`): inferred string-array literals record a boxed element AEK
+    (`value_elem_aek_boxed`), and `is_string_expr` gains an `EIndex` arm → `xs[0].len()` → `em_str_len`; the
+    `[T]`-returning-call case propagates the element AEK from the determining arg (`sort(words)` → `bylen`'s
+    element = words's) → `bylen[0].len()` works.
+  - **string** (`b128822`): `gret_is_string` — gtwice's `T` from `x="hi"` → `shout.len()` → `em_str_len`.
+  Reproduction-safe as predicted (the compiler internals use no bare-`T`-returning generic calls). Gated
+  fixtures `tests/selfhost/cgen_c/{lambda_lift,str_elem_method}.ig`. `make selfhost` **1483/0**; reproduction
+  holds at every commit. **Remaining for `generic_hof_strings`/`stdlib_list` full byte-identity — a
+  diminishing-returns tail:** closure-call owning-temp string-arg staging (the OFI-176 family, C-emit side),
+  map's `[U]`-from-lambda element inference (needs lambda-body typing), and the `move`-`T` return-body dance.
 
   - **THE COUPLING CONSTRAINT (why B-nested + A waited for the synthesis map):** `ty_args_key` is FLAT
     (`ty_key_name` collapses a nested generic to its head), and `mrecv_args` (its output) is used for
