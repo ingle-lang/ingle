@@ -6665,6 +6665,26 @@ struct Chunk {
                         }
                         return
                     }
+                    // a MODULE-QUALIFIED enum-variant CONSTRUCTION `ps.TyName("", "string")` — the alias is
+                    // inert and `mname` is an enum variant; emit it exactly like the unqualified `Variant(args)`
+                    // (push payload args, NEW_ENUM eid tag arity). The checker erases the qualifier (OFI-202).
+                    let cvi = self.resolve_ctor_vi(mname, args.len())
+                    if cvi >= 0 {
+                        var ca = 0
+                        loop {
+                            if ca >= args.len() {
+                                break
+                            }
+                            self.gen_consume(args[ca], line)
+                            ca = ca + 1
+                        }
+                        self.cur_line = line
+                        self.emit(OP_NEW_ENUM)
+                        self.emit_idx(self.ev_owner[cvi])
+                        self.emit_idx(self.ev_tag[cvi])
+                        self.emit_idx(self.ev_arity[cvi])
+                        return
+                    }
                     // a NON-generic module-qualified free function (`lx.dump(lx.lex(..))`): route through
                     // gen_user_call with mask_obj=false — exactly like the bare non-generic free-fn path — so an
                     // owning-temp ARRAY arg is kept + PICK'd + DROP_UNDER'd (but a struct temp is NOT, matching
@@ -11463,7 +11483,7 @@ fn annotate_str_params(params: [ps.Param], strs: [string]) -> [ps.Param] {
         }
         var nty: [ps.Ty] = []
         if params[i].ty.len() == 0 && strs.len() > 0 && cg_index_of(strs, params[i].name) >= 0 {
-            nty.append(ps.string_ty())                   // annotate an untyped string param (via a parser-side ctor)
+            nty.append(ps.TyName("", "string"))          // annotate an untyped string param (qualified variant ctor, OFI-202 un-dodged)
         } else {
             var k = 0
             loop {

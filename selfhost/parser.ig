@@ -178,14 +178,6 @@ fn ind(depth: int) -> string {
 }
 
 
-// string_ty returns the `string` type — a constructor helper so a consumer (codegen's HOF lambda-param
-// annotation) can build a Ty without a qualified `ps.TyName(...)` construction, which the self-hosted
-// backend does not compile (OFI-218 P3; keeps the variant construction inside the parser module).
-fn string_ty() -> Ty {
-    return TyName("", "string")
-}
-
-
 fn ty_str(t: Ty) -> string {
     match t {
         case TyName(q, n) {

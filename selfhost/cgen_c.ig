@@ -3890,6 +3890,19 @@ struct CgcGen {
                 }
             }
             case EGet(object, mname) {
+                // A MODULE-QUALIFIED enum-variant CONSTRUCTION `mod.Variant(args)` (`ps.TyName("", "string")`) —
+                // the receiver is an import alias (not a binding/struct) and the name is an enum variant. Route
+                // it to emit_enum_ctor like the unqualified `Variant(args)` (EIdent) case does — the checker
+                // erases the module qualifier, so it lowers to the same em_enum (OFI-202, un-dodged).
+                match object.value {
+                    case EIdent(recv) {
+                        if self.lookup_cname(recv) == "" && self.lookup_struct(recv) < 0 && self.en.is_case_variant(mname) {
+                            return self.emit_enum_ctor(mname, args)
+                        }
+                    }
+                    case _ {
+                    }
+                }
                 // A MODULE-QUALIFIED free call `mod.fn(args)` — the receiver is an import alias, not an
                 // in-scope binding (no cname, not a struct binding). The self-hosted path has no checker to
                 // stamp `resolved_fn`, so we resolve `fn` in the merged declaration-order fn table ourselves
