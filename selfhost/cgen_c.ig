@@ -3690,6 +3690,25 @@ struct CgcGen {
     }
 
 
+    // value_elem_aek_boxed returns 0 when an array VALUE's element is BOXED refcounted (a string/enum/struct/
+    // nested-array element — so `xs[i]` is a heap value, e.g. a string `.len()` receiver), else -1. Used to set
+    // an inferred array binding's element AEK (annotated arrays get it from the `[T]` type). OFI-206 follow-on.
+    fn value_elem_aek_boxed(self, value: ps.Expr) -> int {
+        match value {
+            case EArray(elems, lines) {
+                if elems.len() > 0 {
+                    if self.is_string_expr(elems[0]) || self.is_array_expr(elems[0]) || self.struct_sid_of(elems[0]) >= 0 || self.is_enum_expr(elems[0]) {
+                        return 0
+                    }
+                }
+            }
+            case _ {
+            }
+        }
+        return 0 - 1
+    }
+
+
     fn value_elem_kind(self, value: ps.Expr) -> int {
         match value {
             case EArray(elems, lines) {
@@ -3844,6 +3863,19 @@ struct CgcGen {
                 // corpus only calls string methods on string fields (a benign over-approximation).
                 let sid = self.struct_sid_any(object.value)
                 return sid >= 0 && self.st.field_is_refcounted(sid, name)
+            }
+            case EIndex(object, index) {
+                // `xs[i]` of a [string]-like array (element AEK 0 = boxed refcounted, not a struct element) —
+                // treated as a string receiver so `xs[0].len()` → em_str_len. The same benign over-
+                // approximation as the EGet/EIdent arms (the corpus only calls string methods on strings).
+                match object.value {
+                    case EIdent(aname) {
+                        return self.lookup_array(aname) && self.lookup_elem_aek(aname) == 0 && self.lookup_elem_struct(aname) < 0
+                    }
+                    case _ {
+                    }
+                }
+                return false
             }
             case EBinary(op, l, r) {
                 if ps.binop_id(op) == 1 {
@@ -4255,6 +4287,10 @@ struct CgcGen {
                             self.set_last_elem_aek(array_elem_kind_ty(elem_ty_of(ty[0])))   // element AEK (a [bool] element isn't refcounted)
                         } else {
                             esid = self.value_elem_struct(value.value)
+                            let bea = self.value_elem_aek_boxed(value.value)   // an inferred [string]-like array: mark its boxed element (OFI-206 follow-on)
+                            if bea == 0 {
+                                self.set_last_elem_aek(0)
+                            }
                         }
                         if esid >= 0 {
                             self.set_last_elem_struct(esid)
