@@ -116,6 +116,23 @@ fn is_builtin(name: string) -> bool {
 }
 
 
+// ffi_registry_names is the DEFAULT-profile hosted FFI registry — the extern "c" functions with a bytecode-VM
+// binding (src/cextern.c g_sigs, the entries NOT behind #if EMBER_GFX_HEADLESS/NET/SQLITE). An extern NOT in
+// this set is a DIRECT extern: native-only (no VM binding), and its params/return must be scalar or Ptr.
+fn ffi_registry_names() -> [string] {
+    return ["sin", "cos", "tan", "asin", "acos", "atan", "atan2", "exp", "log", "log2", "log10", "sinh", "cosh",
+        "tanh", "cbrt", "trunc", "hypot", "fmod", "cvec2_len", "cvec2_dot", "cvec2_add", "cvec2_scale",
+        "strlen", "strncmp", "fopen", "fread", "fwrite", "fclose", "proc_run", "proc_exit", "proc_stdout",
+        "proc_stderr", "proc_free", "em_now_unix", "em_mkdir", "em_remove", "em_tcp_listen", "em_tcp_accept",
+        "em_tcp_connect", "em_recv", "em_send", "em_close"]
+}
+
+
+fn is_ffi_registry(name: string) -> bool {
+    return contains(ffi_registry_names(), name)
+}
+
+
 // builtin_ret_type returns the SemType a built-in call yields, for the cases the checker relies on: the
 // pure side-effecting builtins return UNIT (so binding/assigning their result is an error). Everything
 // else stays TY_INFER (lenient) — a value-returning builtin is never wrongly rejected.
@@ -815,11 +832,21 @@ struct Checker {
                                 self.fn_pqual.append(q)
                                 self.fn_ptparam.append(0 - 1)   // externs aren't generic (keep parallel to fn_ptype)
                                 // A C call passes args BY VALUE: a qualified struct param would skip the leaf-
-                                // flattening the boundary needs. Two qualifiers ARE meaningful — `mut` on a buffer
-                                // ([T]) the C fn writes in place, and `move` on a `Ptr` handle it takes ownership
-                                // of (fclose consumes it). Everything else is rejected (check.c:7493).
-                                if (q == 2 && pt != TY_PTR) || (q == 1 && pt != TY_ARRAY) {
-                                    self.error("an 'extern' parameter must be plain, 'mut' on a buffer ([T]), or 'move' on a Ptr handle")
+                                // flattening the boundary needs. For a HOSTED (registry) extern two qualifiers ARE
+                                // meaningful — `mut` on a buffer ([T]) the C fn writes in place, and `move` on a
+                                // `Ptr` handle it takes ownership of (fclose consumes it).
+                                if is_ffi_registry(fns[e].name) {
+                                    if (q == 2 && pt != TY_PTR) || (q == 1 && pt != TY_ARRAY) {
+                                        self.error("an 'extern' parameter must be plain, 'mut' on a buffer ([T]), or 'move' on a Ptr handle")
+                                    }
+                                } else {
+                                    // A DIRECT extern (not in the registry) has a NARROW boundary: every param must
+                                    // be a bare scalar (i8..u64/f32/f64/bool) or a Ptr handle — a string/buffer/
+                                    // struct arg needs a registry FFI entry; `mut` is disallowed, `move` only on a
+                                    // Ptr. Mirrors src/check.c's direct-extern param validation (OFI-167).
+                                    if q == 1 || (q == 2 && pt != TY_PTR) || (is_numeric(pt) == false && pt != TY_BOOL && pt != TY_PTR) {
+                                        self.error("a direct extern parameter must be a scalar (i8..u64/f32/f64/bool) or a Ptr handle; a string/buffer/struct argument needs a registry FFI entry")
+                                    }
                                 }
                             }
                             ep = ep + 1
@@ -2312,6 +2339,13 @@ struct Checker {
                         // method, or constructor) — arity, then argument types.
                         if self.resolve_local(name) == false && is_builtin(name) == false {
                             let fi = self.fn_index_of(name)
+                            // OFI-167: a DIRECT extern (an `extern "c"` fn NOT in the hosted FFI registry) has no
+                            // bytecode-VM binding — it is native-only (`--emit=c`). CALLING one in the default
+                            // (VM) profile is rejected (a scalar-only direct extern that is never called still
+                            // passes). Mirrors src/codegen.c's extern_direct call reject.
+                            if fi >= 0 && self.fn_extern[fi] && is_ffi_registry(name) == false {
+                                self.error("extern \"c\" function '{name}' is not in the hosted FFI registry, so it has no bytecode-VM binding; build native with `inglec --emit=c` / `-o`")
+                            }
                             if fi >= 0 {
                                 if args.len() != self.fn_arity[fi] {
                                     self.error("wrong number of arguments to function")
