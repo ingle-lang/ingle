@@ -1792,11 +1792,8 @@ struct Checker {
                     self.error("'break' outside of a loop")
                 }
                 // record the consumed-state on this break path — the post-loop state AND-merges every break.
-                // (A named snapshot, not an inline `clone_bools(...)` arg — the self-hosted codegen doesn't yet
-                // drop an inline owning-temp array passed to a method's borrow parameter. OFI-165.)
                 if self.loop_saw_break {
-                    let snap = clone_bools(self.local_consumed)
-                    self.merge_into_break(snap)
+                    self.merge_into_break(clone_bools(self.local_consumed))   // inline owning-temp array → method borrow param (OFI-165 un-dodged)
                 } else {
                     self.loop_break_consumed = clone_bools(self.local_consumed)
                     self.loop_saw_break = true

@@ -3997,6 +3997,57 @@ struct CgcGen {
                                 return h + "v{rv}; \})"
                             }
                         }
+                        // If any argument is a fresh OWNING TEMP passed by borrow (an inline `clone_bools(src)`
+                        // array to a borrow param), stage the call: hoist every arg into a `c%d` local, call
+                        // with `self` inline, drop the masked temps, yield the result — mirroring emit_free_call
+                        // (OFI-165 un-dodged). Otherwise emit the call inline.
+                        var mtemp = false
+                        var mt = 0
+                        loop {
+                            if mt >= args.len() {
+                                break
+                            }
+                            if self.arg_is_owning_temp(args[mt]) {
+                                mtemp = true
+                            }
+                            mt = mt + 1
+                        }
+                        if mtemp {
+                            let rid = self.fresh_var()          // result id, taken BEFORE the arg ids (OFI-166)
+                            var argids: [int] = []
+                            var s = "(\{ "
+                            var i = 0
+                            loop {
+                                if i >= args.len() {
+                                    break
+                                }
+                                let aid = self.fresh_var()
+                                argids.append(aid)
+                                s = s + "Value c{aid} = {self.emit_call_arg(args[i])}; "
+                                i = i + 1
+                            }
+                            s = s + "Value c{rid} = em_fn_{fi}(" + self.emit_expr(object.value)   // self inline
+                            var j = 0
+                            loop {
+                                if j >= argids.len() {
+                                    break
+                                }
+                                s = s + ", c{argids[j]}"
+                                j = j + 1
+                            }
+                            s = s + "); "
+                            var k = 0
+                            loop {
+                                if k >= args.len() {
+                                    break
+                                }
+                                if self.arg_is_owning_temp(args[k]) {
+                                    s = s + "drop_value(&g_em, c{argids[k]}); "
+                                }
+                                k = k + 1
+                            }
+                            return s + "c{rid}; \})"
+                        }
                         var s = "em_fn_{fi}(" + self.emit_expr(object.value)   // self (em_s value / boxed Value)
                         var i = 0
                         loop {
