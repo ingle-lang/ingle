@@ -354,11 +354,26 @@ bare-metal codegen rides — strengthening selfhost strengthens the endgame.
     checker.ig. Fixture `method_owning_temp_arg.ig`. (`0d13077`)
   - A fourth flagged item (codegen.ig `erased_tparam_name`) proved STALE — the C-emit now `own_into_slot`s a
     match-bound string returned from a loop; the helper form is now a plain style choice, comment corrected.
-  `make selfhost` **1489→1495/0**; reproduction byte-identical at every commit; both fixed points green. Every
-  known source dodge in the selfhost tree is gone — the compiler now expresses these constructs directly.
+  Then the three C-emit gaps from the OFI-206 map work (my own dodges) were closed and their workarounds
+  retired:
+  - **OFI-220 — a borrowed ARRAY read stored into a new owner isn't retained** (`ks = kids` from an enum
+    payload). `emit_assign_value` now `own_into_slot`s a non-drop array binding (clone; the borrow's owner
+    keeps its reference). With it closed, `hof_srcs_of` reverted to `case TyFn(fps,..) { fparams = fps }` and
+    the two dodge-helpers were deleted. Fixture `payload_array_store.ig`. (`55a0be4`)
+  - **OFI-219 — nested arrays `[[T]]`.** Two scope facets (`sc_elem_is_array`, `sc_elem_elem_kind`) fix
+    `grid[i].len()`→em_array_len (was em_str_len), `grid[i][j]` plain-scalar, and `grid[i]`→a `[T]` param as a
+    borrow. Nested arrays are now first-class; the flat OFI-206 tables became a simplicity choice, not a
+    workaround. Fixture `nested_array.ig`. (`235f58d`)
+  - **OFI-221 — a bare `[]` call arg isn't context-typed** (defaults AEK 0 vs the param's 11/4). LEFT as-is:
+    its workaround (passing typed-empty `let eb: [bool] = []` bindings) is idiomatic, not a tripwire/miscompile
+    dodge, and the proper fix (a per-callee param-element-AEK table) is disproportionate to a narrow gap.
+  `make selfhost` **1489→1501/0**; reproduction byte-identical at every commit; both fixed points green. Every
+  SUBSTANTIVE source dodge in the selfhost tree is gone — the compiler expresses these constructs directly; the
+  one remaining "workaround" (OFI-221) is a clean idiomatic form, not a dodge.
   **Phase 4 REMAINING:** drive the 16 checker reject-parity tolerances to 0 (OFI-199/200) — the last gate
   before OFI-174 closes; a few narrower C-emit ownership gaps remain latent (a string-returning-call `.len()`
-  receiver isn't staged; boxed-generic-element field read) but no source dodges around them.
+  receiver isn't staged; boxed-generic-element field read; OFI-221 empty-array-arg) but no source dodges
+  around them.
 
 - **2026-07-22 — Phase 1 opened; diagnosis reshaped the map (favorably).**
   - **Tier 3 is substantially DONE on the VM backend already**: `bounded_generic`,
