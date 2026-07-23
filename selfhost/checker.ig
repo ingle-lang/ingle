@@ -1633,6 +1633,20 @@ struct Checker {
                             self.error("returned value's type does not match the function's return type")
                         }
                     }
+                    // A BORROWED move-type value (a plain struct/array param, not a `move` param) returned would
+                    // ESCAPE — the caller still owns it, so the returned reference dangles. Reject (take the
+                    // parameter as 'move' to transfer ownership). is_boxed_move carries the multi-slot-copy
+                    // carve-out (an all-scalar struct is returned by value).
+                    match value[0].value {
+                        case EIdent(rname) {
+                            let rslot = self.local_slot(rname)
+                            if rslot >= 0 && self.locals[rslot].owned == false && self.is_boxed_move(rslot) {
+                                self.error("cannot return a borrowed value — it would escape the function; take the parameter as 'move'")
+                            }
+                        }
+                        case _ {
+                        }
+                    }
                     self.consume_move(value[0].value, line)   // a returned owned handle transfers out (discharges it)
                 }
                 self.report_unconsumed_ptrs(0)                // every owned Ptr still open on this exit path leaks
@@ -2205,6 +2219,13 @@ struct Checker {
                 if ve >= 0 {
                     return ve
                 }
+                // OFI-168: a foreign (extern "c") function has no first-class value — it is not a closure, has
+                // no bytecode slot, and (for a direct extern) no address the VM can hold. Using its bare name
+                // in value position (`let f = sin`) is rejected; it may only be CALLED directly.
+                let efi = self.fn_index_of(name)
+                if efi >= 0 && self.fn_extern[efi] {
+                    self.error("a foreign (extern \"c\") function cannot be used as a function value; call it directly")
+                }
                 return TY_INFER                      // function / global / prelude variant / struct name
             }
             case EUnary(op, operand) {
@@ -2323,6 +2344,40 @@ struct Checker {
                                             self.check_tparam_bounds(name, g, argtypes[a])
                                         }
                                         a = a + 1
+                                    }
+                                    // borrow-conflict: passing the SAME value to a 'mut'/'move' parameter while
+                                    // ALSO aliasing it by another argument (`combine(p, p)` where combine takes
+                                    // `mut a`) is a write-through-alias hazard. Reject every ordered pair of
+                                    // bare-ident args naming the same variable where at least one param is
+                                    // qualified (mut=1 / move=2). Mirrors src/check.c's cross-argument check.
+                                    var bi = 0
+                                    loop {
+                                        if bi >= args.len() {
+                                            break
+                                        }
+                                        var bj = bi + 1
+                                        loop {
+                                            if bj >= args.len() {
+                                                break
+                                            }
+                                            match args[bi] {
+                                                case EIdent(ni) {
+                                                    match args[bj] {
+                                                        case EIdent(nj) {
+                                                            if ni == nj && ni != "_" && (self.fn_pqual[self.fn_pstart[fi] + bi] != 0 || self.fn_pqual[self.fn_pstart[fi] + bj] != 0) {
+                                                                self.error("the same value is passed to a 'mut'/'move' parameter and aliased by another argument")
+                                                            }
+                                                        }
+                                                        case _ {
+                                                        }
+                                                    }
+                                                }
+                                                case _ {
+                                                }
+                                            }
+                                            bj = bj + 1
+                                        }
+                                        bi = bi + 1
                                     }
                                 }
                             }
