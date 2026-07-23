@@ -344,6 +344,33 @@ bare-metal codegen rides — strengthening selfhost strengthens the endgame.
   them TY_INFER — the "dominant blocker"). These are the last reject-parity items before OFI-174 closes; each is
   a step-change in size from the 10 above.
 
+- **2026-07-23 — Phase 4 CHECKER REJECT-PARITY (STILL IN PROGRESS): 6 misses → 1 (5 more checks closed, still
+  0 false-rejects).** Two of the "harder / blocked" remainders fell to cheaper, provably-safe approaches than
+  first assumed:
+  - **4 web misses via CLOSURE-OR whole-program checking** (`2143fca`): rather than a merged global scope (the
+    84-false-reject trap above), `check_dump.ig` now BFS-walks the entry's transitive import closure and checks
+    each module ON ITS OWN, rejecting iff ANY module rejects. This lets the checker see `std/web.ig`'s own
+    direct-extern violation (which single-file checking already rejects — it's a corpus match) without ever
+    merging scopes. Provably false-reject-free: the corpus already proves every single module single-file-checks
+    with 0 false-rejects, and OR-ing over the closure only ever turns an ACCEPT into a REJECT. (The module-scoped
+    MERGED checker remains a future option, not a prerequisite — `emberc.ig` itself checks the entry single-file
+    and codegens merged, so whole-program *type-flow* checking is a capability upgrade, not on the flip's path.)
+  - **`error_enum_named` via a parser side-channel** (`ba47d76`): the checker now rejects the two purely-SYNTACTIC
+    named-construction errors — a DUPLICATE named argument, and a MIX of positional and named (OFI-140). Stage-0
+    rejects both in every call, so the check can never false-reject. `parse_args` records each arg's name and sets
+    a `Parser.bad_call` flag on dup/mixed; `ps.parse_bad_call(src)` returns it (a plain `bool`, not a struct —
+    sidesteps a cross-module struct field-access gap in the self-hosted C-emit, raised as **OFI-223**); `check()`
+    ORs it in. Signalling out-of-band (not an AST node) keeps `--emit=ast` byte-identical to stage-0. The full
+    field validation (no-such-field / missing-field / named-arg-on-a-plain-function) still needs the arg NAMES in
+    an `ECall` AST field (~70 match sites) — deferred as **OFI-222**; no corpus program needs it beyond the subset.
+  Checker verdict-parity **650→655/656**; `make selfhost` **1501/0**; parser AST **665/665**; reproduction +
+  serializer fixed points byte-identical throughout. **REMAINING 1 miss:** `error_resource_clone_match` — needs
+  Result/Option generic-payload typing (type-arg tracking on a local's annotation + variant payload substitution,
+  so `case Ok(r)` over `res: Result<R, string>` types `r` as the resource `R` and the resource-out-of-borrow check
+  fires). The checker scrutinee types to TY_INFER today (Result/Option are out of the enum table, OFI-204), so
+  this is the deep type-model change — the last reject-parity item, and the one with real false-reject risk if
+  rushed. OFI-174 closes when it lands.
+
 - **2026-07-23 — Phase 4 OPENED: the C-emit ERASED-GENERIC OWNERSHIP facets (3 of 3), all corpus HOF files
   byte-identical.** The last diffs on `generic_hof_strings`/`stdlib_list`/`stdlib_list_sort` were three
   checker-STAMPED ownership decisions (`drop_mask`, `moves_local`) that the self-hosted C-emit re-parses
