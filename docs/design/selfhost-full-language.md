@@ -308,6 +308,31 @@ bare-metal codegen rides — strengthening selfhost strengthens the endgame.
 
 ## 8. Progress log
 
+- **2026-07-23 — Phase 4 CHECKER REJECT-PARITY: 16 not-yet-rejected misses → 8 (8 checks closed, 0 false-
+  rejects throughout).** The self-hosted checker (`selfhost/checker.ig`) accepted 16 programs stage-0 rejects.
+  Enumerated them (stage-0 REJECT + selfhost ACCEPT over the corpus), mapped each against `src/check.c` via a
+  read-only workflow, and closed the tractable ones — each verified corpus-wide for zero false-rejects (a false
+  reject is the gated bug; a miss is just unfinished):
+  - **OFI-199 over-i64 literal** (`88effcc`): an int literal with magnitude in (i64max, u64max] is stored as a
+    negative `EInt.v`; the SLet handler rejects it outside a u64 context (u64 suffix kind 7 or annotation).
+  - **OFI-168 extern-fn-as-value** + **escape-borrow** (return of a borrowed move-type param) + **borrow-
+    conflict** (same value to a mut/move param aliased by another arg) (`41f669e`) — each reusing existing
+    machinery (`fn_extern`, `is_boxed_move`, `fn_pqual`).
+  - **OFI-167 direct-extern FFI** (`3baee0a`): modelled the default-profile hosted FFI registry
+    (`ffi_registry_names` — the 42 `src/cextern.c` g_sigs entries not behind `#if`), so a DIRECT extern
+    (native-only) is distinguished from a hosted one. Rejects calling a direct extern in the VM profile, and a
+    direct extern with a non-scalar/Ptr param. Closes `error_direct_extern_vm` + `std/web.ig`.
+  - **slice-escape** (`9535c6b`): `Slice<T>` rejected as a return/field/payload type (a borrowed view).
+  - **slice-frozen** (`2c416ba`): a new `local_frozen` facet — `let s = a[lo..hi]` freezes `a`; a mutating
+    array method on it is rejected.
+  Checker verdict-parity **640→648/656**; `make selfhost` **1501/0**; reproduction byte-identical throughout.
+  **REMAINING 8 misses** (all harder / blocked, none a false-reject): 4 `examples/web/*.ig` need cross-module
+  IMPORT resolution the single-file checker does not do; `error_enum_named` + `error_interp_brace` need parser
+  AST-schema changes (ECall arg-names; a StrPart bad-hole flag) that must stay out of the reproduction-critical
+  dump; `error_match_nested` needs a variant field-TYPE table + nested-pattern descent; `error_resource_clone_
+  match` needs Result/Option generic-payload typing (the checker leaves them TY_INFER). These are the last
+  reject-parity items before OFI-174 closes; each is a self-contained follow-on.
+
 - **2026-07-23 — Phase 4 OPENED: the C-emit ERASED-GENERIC OWNERSHIP facets (3 of 3), all corpus HOF files
   byte-identical.** The last diffs on `generic_hof_strings`/`stdlib_list`/`stdlib_list_sort` were three
   checker-STAMPED ownership decisions (`drop_mask`, `moves_local`) that the self-hosted C-emit re-parses
