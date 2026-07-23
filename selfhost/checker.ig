@@ -47,6 +47,20 @@ fn is_numeric(t: int) -> bool {
 }
 
 
+// is_slice_ty reports whether a type annotation is `Slice<T>` — a BORROWED array view, legal only as a
+// parameter type or a `let` binding, never a return / field / element / payload type (OFI-218 P4).
+fn is_slice_ty(ty: ps.Ty) -> bool {
+    match ty {
+        case TyGeneric(qual, name, args) {
+            return qual == "" && name == "Slice"
+        }
+        case _ {
+        }
+    }
+    return false
+}
+
+
 // is_numeric_typename reports whether a name is a numeric WIDTH-conversion spelling (`u8(x)`, `i32(x)`)
 // — the exact set check.c:numeric_typename recognises. Note `float`/`bool`/`string` are NOT here (only
 // `f32`/`f64`/`i*`/`u*`/`int`): a call to a free function so named parses as a conversion (OFI-066).
@@ -639,6 +653,8 @@ struct Checker {
                     }
                     self.fn_arity.append(pc)
                     if f.ret.len() > 0 {
+                        self.reject_if_slice(f.ret[0])
+
                         self.fn_ret.append(self.annotation_type(f.ret[0]))
                     } else {
                         self.fn_ret.append(TY_UNIT)
@@ -730,6 +746,8 @@ struct Checker {
                         }
                         self.fn_arity.append(ec)
                         if fns[e].ret.len() > 0 {
+                            self.reject_if_slice(fns[e].ret[0])
+
                             self.fn_ret.append(self.annotation_type(fns[e].ret[0]))
                         } else {
                             self.fn_ret.append(TY_UNIT)
@@ -962,6 +980,8 @@ struct Checker {
                         if fi >= fields.len() {
                             break
                         }
+                        self.reject_if_slice(fields[fi].ty)
+
                         let ft = self.annotation_type(fields[fi].ty)
                         self.sf_owner.append(sid)
                         self.sf_name.append(fields[fi].name)
@@ -1018,6 +1038,8 @@ struct Checker {
                         self.sm_mutself.append(mself)
                         self.sm_moveself.append(msmove)
                         if methods[mi].ret.len() > 0 {
+                            self.reject_if_slice(methods[mi].ret[0])
+
                             self.sm_ret.append(self.annotation_type(methods[mi].ret[0]))
                         } else {
                             self.sm_ret.append(TY_UNIT)          // a method with no `-> T` returns unit
@@ -1089,6 +1111,16 @@ struct Checker {
                 }
             }
             i = i + 1
+        }
+    }
+
+
+    // reject_if_slice rejects a `Slice<T>` used in a position where a borrowed view may not appear — a return
+    // type, a struct field, or an enum payload (it would outlive its source). Slice is legal only as a param
+    // type or a `let` binding. OFI-218 P4.
+    fn reject_if_slice(mut self, ty: ps.Ty) {
+        if is_slice_ty(ty) {
+            self.error("a Slice<T> may appear only as a parameter type or a let binding — it cannot be returned, stored in a field, or be an element (it is a borrowed view); return an owned copy with .slice(a, b) instead")
         }
     }
 
