@@ -666,44 +666,6 @@ fn map_ret_elem_tparam(f: ps.FnDecl) -> string {
 }
 
 
-// tyfn_param_count returns a fn-typed value's param count (`fn(T,U)->V` -> 2), or 0.
-fn tyfn_param_count(t: ps.Ty) -> int {
-    match t {
-        case TyFn(fparams, fret) {
-            return fparams.len()
-        }
-        case _ {
-        }
-    }
-    return 0
-}
-
-
-// tyfn_param_tparam returns a fn-typed value's idx-th param type-param name (`fn(T,U)`, idx 1 -> "U"), or "".
-// Mirrors tyfn_param0_tparam but for any index — keeps all TyFn-payload access inside the helper (the self-
-// hosted C-emit doesn't yet retain a payload array stored into a caller variable — see OFI-220).
-fn tyfn_param_tparam(t: ps.Ty, idx: int) -> string {
-    match t {
-        case TyFn(fparams, fret) {
-            if idx >= 0 && idx < fparams.len() {
-                match fparams[idx] {
-                    case TyName(q, n) {
-                        if q == "" {
-                            return n
-                        }
-                    }
-                    case _ {
-                    }
-                }
-            }
-        }
-        case _ {
-        }
-    }
-    return ""
-}
-
-
 // value_param_typed_scalar returns the value-arg index of the first param typed exactly `tp` (a bare generic
 // type-param, `init: U`), or -1 — the "whole-value" source companion to value_param_typed_array.
 fn value_param_typed_scalar(f: ps.FnDecl, tp: string) -> int {
@@ -747,38 +709,49 @@ fn hof_srcs_of(f: ps.FnDecl) -> [int] {
     out.append(0 - 1)                                // [3] p0_elem
     out.append(0 - 1)                                // [4] p1_arg
     out.append(0 - 1)                                // [5] p1_elem
-    // find the fn-typed value param; keep only its INT index (the TyFn payload stays inside the tyfn_* helpers,
-    // never stored in a var — the self-hosted C-emit doesn't retain a payload array assigned out, OFI-220).
+    // find the fn-typed value param and destructure its TyFn payload (OFI-220 closed — a payload array assigned
+    // out is now own_into_slot'd, so we store `fparams` directly rather than routing through helper accessors).
     var i = 0
     var vidx = 0
-    var fpi = 0 - 1
     var lam_arg = 0 - 1
+    var fparams: [ps.Ty] = []
     loop {
         if i >= f.params.len() {
             break
         }
         if f.params[i].is_self == false {
-            if fpi < 0 && f.params[i].ty.len() > 0 && is_fn_ty(f.params[i].ty[0]) {
-                fpi = i
-                lam_arg = vidx
+            if lam_arg < 0 && f.params[i].ty.len() > 0 {
+                match f.params[i].ty[0] {
+                    case TyFn(fps, fret) {
+                        lam_arg = vidx
+                        fparams = fps
+                    }
+                    case _ {
+                    }
+                }
             }
             vidx = vidx + 1
         }
         i = i + 1
     }
-    if fpi < 0 {
-        return out
-    }
-    let np = tyfn_param_count(f.params[fpi].ty[0])
-    if np == 0 || np > 2 {                           // not resolvable, or more lambda params than the stride holds
+    if lam_arg < 0 || fparams.len() > 2 {            // not a HOF, or more lambda params than the stride holds
         return out
     }
     var p = 0
     loop {
-        if p >= np {
+        if p >= fparams.len() {
             break
         }
-        let tp = tyfn_param_tparam(f.params[fpi].ty[0], p)
+        var tp = ""
+        match fparams[p] {
+            case TyName(q, n) {
+                if q == "" {
+                    tp = n
+                }
+            }
+            case _ {
+            }
+        }
         if tp == "" {
             return out                               // unresolved param → leave lam_arg -1 (block stays inert)
         }
@@ -797,7 +770,7 @@ fn hof_srcs_of(f: ps.FnDecl) -> [int] {
         p = p + 1
     }
     out[0] = lam_arg
-    out[1] = np
+    out[1] = fparams.len()
     return out
 }
 
@@ -4966,6 +4939,12 @@ struct CgcGen {
         match e {
             case EIdent(name) {
                 if self.lookup_drop(name) {
+                    return "own_into_slot(&g_em, {self.lookup_cname(name)})"
+                }
+                if self.lookup_array(name) {
+                    // a BORROWED array read (an enum-payload array `case Branch(kids,..)`, or a borrow-array
+                    // param) stored into a new owner is own_into_slot'd — it clones (arrays are unique-owner),
+                    // the borrow's owner keeps its reference (stage-0's moves_local==2, OFI-220 un-dodged).
                     return "own_into_slot(&g_em, {self.lookup_cname(name)})"
                 }
             }
