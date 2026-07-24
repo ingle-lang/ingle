@@ -175,7 +175,7 @@ DEPS    := $(OBJECTS:.o=.d)
 GEN_BIN := build/gen_editor_assets
 GRAMMAR := editors/vscode/syntaxes/ember.tmLanguage.json
 
-.PHONY: all test test-update test-lsp doctor help release asan asan-par asan-trace install install-vscode build-zed install-zed parallel mn tsan-mn asan-mn mn-stress mn-graphics mn-net-graphics graphics web wasm wasm-hydrate net net-graphics db test-db test-quog test-quog-native quog install-quog test-graphics test-web test-net test-parallel kernel test-kernel selfhost crucible ceilings ledger opcheck verify docs string-diff bench parbench gen-editor-assets check-editor-sync clean
+.PHONY: all test test-update test-lsp doctor help release asan asan-par asan-trace install install-vscode build-zed install-zed parallel mn tsan-mn asan-mn mn-stress mn-graphics mn-net-graphics graphics web wasm wasm-hydrate net net-graphics db test-db test-quog test-quog-native quog install-quog test-graphics test-web test-net test-parallel kernel test-kernel selfhost bootstrap bootstrap-refresh crucible ceilings ledger opcheck verify docs string-diff bench parbench gen-editor-assets check-editor-sync clean
 
 all: $(BIN) $(RT_LIB) $(RT_LIB_PAR)
 
@@ -598,6 +598,24 @@ test-net: net
 # (needed by `emberc -o`'s native link) exist; dependency-free, no display/libs.
 selfhost: all
 	@tests/run-selfhost.sh
+
+# Bootstrap independence (OFI-218 Phase 6): prove Ingle builds its OWN compiler from a checked-in C
+# seed (bootstrap/seed/inglec_boot.c = the C-emit of the whole self-hosted compiler), with NO src/
+# FRONTEND in the loop — only cc, the seed, and the RUNTIME library. This is what makes the language
+# self-sustaining: developed and extended in Ingle, not gated on the C reference compiler. Depends on
+# $(RT_LIB) ONLY (the runtime — src/runtime.c + cextern.c) and deliberately NOT on $(BIN), so no
+# frontend object is ever compiled for this target. See tools/bootstrap.sh + bootstrap/README.md.
+bootstrap: $(RT_LIB)
+	@tools/bootstrap.sh
+
+# Re-snapshot the seed from the CURRENT selfhost sources (a deliberate maintenance step — the Go-1.5
+# model only requires the seed able to COMPILE the current source, which `make bootstrap` proves, so a
+# refresh is a "raise the floor" action at releases, not per-edit). Uses the reference compiler to emit
+# the fresh seed; `make bootstrap` then re-verifies the fixed point with no frontend.
+bootstrap-refresh: $(BIN)
+	@echo "refreshing bootstrap/seed/inglec_boot.c from the current selfhost sources…"
+	@EMBER_STD="$(CURDIR)/std" $(BIN) --emit=c selfhost/cgen_c_dump.ig > bootstrap/seed/inglec_boot.c
+	@echo "seed re-snapshotted; run 'make bootstrap' to verify the fixed point."
 
 # Crucible — the memory-ownership fuzzer (tools/crucible.{c,sh}). Generates danger-zone programs
 # (value-structs through erased generics/aggregates, field mutation, interpolation, loops) and runs
