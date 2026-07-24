@@ -6446,7 +6446,16 @@ struct CgcGen {
                 let kind = self.scalar_kind_of(value.value)
                 if ssid >= 0 {
                     // A VALUE-struct binding: stored as the C `em_s<sid>` aggregate (value semantics, no drop).
-                    println("{self.ind()}em_s{ssid} v{id} = {self.emit_expr(value.value)};")
+                    if self.object_is_value_read(value.value) {
+                        // The RHS is a value struct read from an ERASED slot (a boxed-struct FIELD via
+                        // em_enum_field, or an ARRAY element via em_index) — a boxed Value, so it is UNBOXED into
+                        // the em_s aggregate; the materialised copy is dropped after the copy-out. (OFI-218)
+                        let fc = self.st.field_count(ssid)
+                        let ov = self.fresh_var()
+                        println("{self.ind()}Value v{ov} = {self.emit_expr(value.value)}; em_s{ssid} v{id}; em_unbox_struct(&g_em, {ssid}, v{ov}, (Value*)&v{id}, {fc}); drop_value(&g_em, v{ov});")
+                    } else {
+                        println("{self.ind()}em_s{ssid} v{id} = {self.emit_expr(value.value)};")
+                    }
                     self.push(name, "v{id}", 0 - 1, false, false, false, 0 - 1)
                     self.set_last_struct(ssid)
                 } else if kind >= 0 {
