@@ -361,6 +361,89 @@ fn fn_ret_render_kind(f: ps.FnDecl) -> int {
 }
 
 
+// generic_index returns the 0-based position of type-param `name` in `generics`, or -1.
+fn generic_index(generics: [ps.GenericParam], name: string) -> int {
+    var i = 0
+    loop {
+        if i >= generics.len() {
+            break
+        }
+        if generics[i].name == name {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+
+// method_opt_payload_param inspects a METHOD's return type: if it is `Option<Vp>` or `Result<Vp, …>` where
+// `Vp` is one of the OWNER struct's generic params, it returns that param's INDEX in `owner_generics` (so a
+// call site can read the receiver's concrete type-arg at that index — `Map<string,Rect>.get()` → Option<V>,
+// V is param 1, so the Some payload is the receiver's arg[1] = Rect). Returns -1 otherwise. The self-hosted
+// re-derivation of stage-0's `subst(inst, var->fields[b])` — there is no checker to stamp the concrete sid.
+fn method_opt_payload_param(m: ps.FnDecl, owner_generics: [ps.GenericParam]) -> int {
+    if m.ret.len() == 0 {
+        return 0 - 1
+    }
+    match m.ret[0] {
+        case TyGeneric(q, n, args) {
+            if q == "" && (n == "Option" || n == "Result") && args.len() >= 1 {
+                match args[0] {
+                    case TyName(q2, pname) {
+                        if q2 == "" {
+                            return generic_index(owner_generics, pname)   // the Some/Ok payload param's index
+                        }
+                    }
+                    case _ {
+                    }
+                }
+            }
+        }
+        case _ {
+        }
+    }
+    return 0 - 1
+}
+
+
+// build_ret_opt_param is parallel to build_fn_names: for a method whose return is Option/Result of an OWNER
+// generic param, the param INDEX (so a `match recv.get(k) { case Some(r) … }` types `r` from recv's concrete
+// type-arg); -1 for a free fn or a non-generic-payload return. Keyed by em_fn index like the other ret tables.
+fn build_ret_opt_param(decls: [ps.Decl]) -> [int] {
+    var out: [int] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.has_body {
+                    out.append(0 - 1)          // a free fn is not a container method
+                }
+            }
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        out.append(method_opt_payload_param(methods[mi], generics))
+                    }
+                    mi = mi + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
 // ---- generic return-type resolution (OFI-206 follow-on) — the C-emit mirror of the VM's gret machinery -
 // A generic fn returning a bare type-param T or `[T]` (`reduce<T,U>(…, init:U, …)->U`, `sort<T>(xs:[T],…)->[T]`)
 // has an unknown static return kind (ty_scalar_kind(T) = -1). We resolve T at a call site from the value
@@ -1656,6 +1739,8 @@ struct StructTab {
     f_elem: [int]              // ...for an array field: its ELEMENT scalar kind (so `s.field[i]` is a scalar), else -1
     f_elem_struct: [int]       // ...for a `[Struct]` field: its element struct sid (so `s.field[i]` / `s.field[i].f` resolve), else -1
     f_elem_aek: [int]          // ...for an array field: its ELEMENT ArrayElemKind (so `s.field = []` builds em_array(0, aek)), else -1
+    f_ty: [ps.Ty]              // flat field -> its DECLARED type node (WITH generic args, e.g. `Map<string, Rect>`) — the
+                               // only place the value type of a generic-container field survives, for typing `s.field.get(k)`
     inst_keys: [string]        // generic-struct INSTANCE keys (`Box<Ty>`, …); instance sid = names.len() + index
 
 
@@ -1817,6 +1902,18 @@ struct StructTab {
             i = i + 1
         }
         return 0 - 1
+    }
+
+
+    // field_ty returns the DECLARED type node of field `fname` of struct `sid` (with its generic args, e.g.
+    // `Map<string, Rect>`), or a sentinel `TyName("", "")` (sid_of_ty → -1) if there is no such field. The one
+    // way to recover a generic-container field's value type when typing `s.field.get(k)` : Option<V>.
+    fn field_ty(self, sid: int, fname: string) -> ps.Ty {
+        let flat = self.field_flat(sid, fname)
+        if flat < 0 {
+            return ps.TyName("", "")
+        }
+        return self.f_ty[flat]
     }
 
 
@@ -2021,6 +2118,23 @@ fn ty_struct_sid(t: ps.Ty, names: [string]) -> int {
 }
 
 
+// field_struct_sid_g resolves a struct FIELD's type to its struct sid, GENERIC-AWARE: a generic-struct field
+// (`Map<K, V>`) resolves to its BASE struct sid (the method table + field layout live on the base; the value
+// type-args ride separately in f_ty), while a plain-named field defers to ty_struct_sid. This is what lets
+// `self.rects.get(id)` dispatch to `Map.get`. Mirrors codegen.ig's ty_struct_id (the VM already does this).
+// A generic ENUM field (`Option<int>`) has no struct-table entry, so it stays -1. OFI-218 generic keystone.
+fn field_struct_sid_g(t: ps.Ty, names: [string]) -> int {
+    match t {
+        case TyGeneric(qual, name, args) {
+            return index_of_str(names, name)
+        }
+        case _ {
+            return ty_struct_sid(t, names)
+        }
+    }
+}
+
+
 // aek_to_scalar_kind maps a NUMERIC ArrayElemKind byte (i8..f64) to its C width-kind (0 i64 … 9 f64) for
 // the unboxed-scalar-binding decision, or -1 for a non-numeric kind. Matches the checker's
 // `is_numeric_type(t) ? int_kind(t) : -1` (check.c) — BOOL is NOT numeric, so a `let x = s.boolField` keeps
@@ -2166,6 +2280,7 @@ fn build_struct_tab(decls: [ps.Decl]) -> StructTab {
     var fel: [int] = []
     var fes: [int] = []
     var fea: [int] = []
+    var fty_arr: [ps.Ty] = []
     var sid = 0
     var j = 0
     loop {
@@ -2182,7 +2297,8 @@ fn build_struct_tab(decls: [ps.Decl]) -> StructTab {
                     let fty = fields[fi].ty
                     fo.append(sid)
                     fnm.append(fields[fi].name)
-                    fsd.append(ty_struct_sid(fty, names))
+                    fty_arr.append(fty)                 // keep the declared field type (with generic args) for later
+                    fsd.append(field_struct_sid_g(fty, names))   // generic-aware: a Map<K,V> field → base Map sid (method dispatch)
                     let aek = array_elem_kind_ty(fty)   // 0 for string/array/struct (boxed), 1..11 for a scalar
                     fa.append(aek)
                     fsc.append(aek != 0)
@@ -2207,7 +2323,7 @@ fn build_struct_tab(decls: [ps.Decl]) -> StructTab {
         j = j + 1
     }
     let insts = build_struct_instances(decls, names)
-    return StructTab { names: names, kinds: kinds, f_owner: fo, f_name: fnm, f_aek: fa, f_scalar: fsc, f_struct: fsd, f_array: far, f_elem: fel, f_elem_struct: fes, f_elem_aek: fea, inst_keys: insts }
+    return StructTab { names: names, kinds: kinds, f_owner: fo, f_name: fnm, f_aek: fa, f_scalar: fsc, f_struct: fsd, f_array: far, f_elem: fel, f_elem_struct: fes, f_elem_aek: fea, f_ty: fty_arr, inst_keys: insts }
 }
 
 
@@ -2634,6 +2750,8 @@ struct CgcGen {
     fn_names: [string]         // every body-bearing fn in em_fn_N order (free fns + `Struct.method`)
     fn_ret_kind: [int]         // ...each fn's return width-kind (for a `let x = f()` scalar binding)
     fn_ret_render: [int]       // ...each fn's return-type interp render-kind (so `{r.ok()}` renders bool, not int)
+    fn_ret_opt_param: [int]    // ...for a method returning Option/Result of an owner generic param: that param's
+                               // index (so `match recv.get(k) { case Some(r) }` types r from recv's concrete arg), else -1
     fn_ret_str: [bool]         // ...does each fn return a string (a `let x = f()` owned binding)?
     fn_ret_array: [bool]       // ...does each fn return an array (a `let x = f()` owned array binding)?
     fn_ret_elem_kind: [int]    // ...for an array-returning fn: its element scalar kind (so `f()[i]` is a scalar), else -1
@@ -3105,6 +3223,63 @@ struct CgcGen {
                 return i
             }
             i = i + 1
+        }
+        return 0 - 1
+    }
+
+
+    // recv_container_ty returns the DECLARED type of a method-call receiver when it is a struct FIELD access
+    // (`self.rects` / `obj.field`) — a `TyGeneric` carrying the container's value type-args (`Map<string,
+    // Rect>`). Returns the sentinel `TyName("","")` for anything else (a local, a call result, …). P6 keystone.
+    fn recv_container_ty(self, recv: ps.Expr) -> ps.Ty {
+        match recv {
+            case EGet(object, fname) {
+                let osid = self.struct_sid_any(object.value)
+                if osid >= 0 {
+                    return self.st.field_ty(osid, fname)
+                }
+            }
+            case _ {
+            }
+        }
+        return ps.TyName("", "")
+    }
+
+
+    // match_payload_sid resolves the CONCRETE struct sid of a `Some(r)`/`Ok(r)` payload for a match scrutinee
+    // shaped `recv.get(k)` — a generic-container method returning Option<V>/Result<V,…>. It reads the receiver
+    // FIELD's declared type-args and the method's payload-param index (fn_ret_opt_param), indexing the former
+    // by the latter: `self.rects.get(id)` with rects: Map<string,Rect>, get's payload param = 1 → Rect. This
+    // is the self-hosted stand-in for stage-0's checker `subst(inst, var->fields[b])` (no checker in this
+    // pipeline to stamp Pattern.binding_struct). Returns -1 when not resolvable — the caller leaves the payload
+    // erased, exactly as before. OFI-218 generic-payload keystone.
+    fn match_payload_sid(self, scrut: ps.Expr) -> int {
+        match scrut {
+            case ECall(callee, args) {
+                match callee.value {
+                    case EGet(recv, mname) {
+                        match self.recv_container_ty(recv.value) {
+                            case TyGeneric(q, cname, cargs) {
+                                let fi = self.fn_index("{cname}.{mname}")
+                                if fi < 0 {
+                                    return 0 - 1
+                                }
+                                let idx = self.fn_ret_opt_param[fi]
+                                if idx < 0 || idx >= cargs.len() {
+                                    return 0 - 1
+                                }
+                                return self.st.sid_of_ty(cargs[idx])
+                            }
+                            case _ {
+                            }
+                        }
+                    }
+                    case _ {
+                    }
+                }
+            }
+            case _ {
+            }
         }
         return 0 - 1
     }
@@ -5805,6 +5980,32 @@ struct CgcGen {
                                 bi = bi + 1
                                 continue
                             }
+                            // A simple `case Some(r)`/`case Ok(r)` whose payload the ENUM TABLE types as the
+                            // erased T (a prelude generic), but whose SCRUTINEE is a concrete generic container
+                            // (`self.rects.get(id)` : Option<Rect>): recover the concrete payload struct from the
+                            // scrutinee (the self-hosted stand-in for stage-0's checker-stamped binding_struct).
+                            // A VALUE struct is unboxed into an em_s so `r.w` is a value-struct field read; a
+                            // boxed struct falls through as a Value binding with its sid tracked. OFI-218 keystone.
+                            var resolved_boxed = 0 - 1
+                            var declared_payload_sid = 0 - 1
+                            if self.en.has_payload_field(cases[ci].pattern.variant, bi) {
+                                declared_payload_sid = self.st.sid_of_ty(self.en.payload_ty(cases[ci].pattern.variant, bi))
+                            }
+                            if declared_payload_sid < 0 {
+                                let csid = self.match_payload_sid(value.value)
+                                if csid >= 0 {
+                                    if self.st.is_value(csid) {
+                                        let fc = self.st.field_count(csid)
+                                        let bv = self.fresh_var()
+                                        println("{self.ind()}em_s{csid} v{bv}; em_unbox_struct(&g_em, {csid}, em_enum_field(&g_em, v{sv}, {bi}), (Value*)&v{bv}, {fc});")
+                                        self.push(cases[ci].pattern.bindings[bi], "v{bv}", 0 - 1, false, false, false, 0 - 1)
+                                        self.set_last_struct(csid)
+                                        bi = bi + 1
+                                        continue
+                                    }
+                                    resolved_boxed = csid
+                                }
+                            }
                             let bv = self.fresh_var()
                             println("{self.ind()}Value v{bv} = em_enum_field(&g_em, v{sv}, {bi});")
                             let pa = self.en.payload_array(cases[ci].pattern.variant, bi)
@@ -5813,6 +6014,9 @@ struct CgcGen {
                                 pek = self.en.payload_elem(cases[ci].pattern.variant, bi)
                             }
                             self.push(cases[ci].pattern.bindings[bi], "v{bv}", 0 - 1, false, false, pa, pek)   // a borrowed payload field (array-aware)
+                            if resolved_boxed >= 0 {
+                                self.set_last_struct(resolved_boxed)   // a BOXED-struct container payload (rc struct) → `r.field` resolves
+                            }
                             if self.en.payload_refc(cases[ci].pattern.variant, bi) || self.subject_is_gopt(value.value) {
                                 self.set_last_refc(true)      // a refcounted (string/enum) payload, OR an erased generic-Option<T> payload (OFI-205) → own_into_slot on consume
                             }
@@ -6459,8 +6663,8 @@ fn enum_payload_generic(ty: ps.Ty, generics: [ps.GenericParam]) -> bool {
 }
 
 
-fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_ret_kind: [int], fn_ret_render: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab, lambda_start: int, fn_ret_det_arg: [int], fn_ret_det_elem: [bool], fn_ret_lam_arg: [int], fn_ret_lam_in: [int], fn_hof_srcs: [int], fn_param_gen_mask: [int], lam_pstr: [bool], lam_pkind: [int], extern_names: [string], extern_ret_kind: [int], extern_ret_str: [bool]) -> [int] {
-    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_is_array: [], sc_elem_elem_kind: [], sc_elem_struct: [], sc_refc: [], sc_tyvar: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_render: fn_ret_render, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, fn_param_gen_mask: fn_param_gen_mask, lam_recs: [], extern_names: extern_names, extern_ret_kind: extern_ret_kind, extern_ret_str: extern_ret_str }
+fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_ret_kind: [int], fn_ret_render: [int], fn_ret_opt_param: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab, lambda_start: int, fn_ret_det_arg: [int], fn_ret_det_elem: [bool], fn_ret_lam_arg: [int], fn_ret_lam_in: [int], fn_hof_srcs: [int], fn_param_gen_mask: [int], lam_pstr: [bool], lam_pkind: [int], extern_names: [string], extern_ret_kind: [int], extern_ret_str: [bool]) -> [int] {
+    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_is_array: [], sc_elem_elem_kind: [], sc_elem_struct: [], sc_refc: [], sc_tyvar: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_render: fn_ret_render, fn_ret_opt_param: fn_ret_opt_param, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, fn_param_gen_mask: fn_param_gen_mask, lam_recs: [], extern_names: extern_names, extern_ret_kind: extern_ret_kind, extern_ret_str: extern_ret_str }
     // For a lifted lambda, lam_pstr/lam_pkind type its OWN params (the trailing params after the captures) so
     // the body dispatches `.len()`/concat/arithmetic like stage-0 (the C signature stays all-`Value`). Captures
     // lead and stay untyped. caps = (non-self param count) − (own params typed) — OFI-206 follow-on.
@@ -7333,6 +7537,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
     let fn_names = build_fn_names(decls)
     let fn_ret_kind = build_fn_ret_kinds(decls)
     let fn_ret_render = build_fn_ret_render(decls)
+    let fn_ret_opt_param = build_ret_opt_param(decls)   // per-method Option/Result generic-payload param index
     let fn_ret_str = build_fn_ret_str(decls)
     let fn_ret_array = build_fn_ret_array(decls)
     let fn_ret_elem_kind = build_fn_ret_elem_kinds(decls)
@@ -7470,7 +7675,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
         match decls[k] {
             case DFn(f) {
                 if f.has_body {
-                    let recs = emit_fn_body(f, b, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_render, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, eb, ei, extern_names, extern_ret_kind, extern_ret_str)
+                    let recs = emit_fn_body(f, b, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_render, fn_ret_opt_param, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, eb, ei, extern_names, extern_ret_kind, extern_ret_str)
                     var ri = 0
                     loop {
                         if ri >= recs.len() {
@@ -7494,7 +7699,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
                         break
                     }
                     if methods[mi].has_body {
-                        let recs = emit_fn_body(methods[mi], b, true, owner, stab, etab, fn_names, fn_ret_kind, fn_ret_render, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, eb, ei, extern_names, extern_ret_kind, extern_ret_str)
+                        let recs = emit_fn_body(methods[mi], b, true, owner, stab, etab, fn_names, fn_ret_kind, fn_ret_render, fn_ret_opt_param, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, eb, ei, extern_names, extern_ret_kind, extern_ret_str)
                         var ri = 0
                         loop {
                             if ri >= recs.len() {
@@ -7548,7 +7753,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
             }
             pos = pos + 2 + np * 2
         }
-        let _drop = emit_fn_body(lc.lams[lb], total + lb, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_render, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, 0, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, ps, pk, extern_names, extern_ret_kind, extern_ret_str)
+        let _drop = emit_fn_body(lc.lams[lb], total + lb, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_render, fn_ret_opt_param, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, 0, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, ps, pk, extern_names, extern_ret_kind, extern_ret_str)
         b = b + 1
         if b < grand {
             println("")
