@@ -3719,6 +3719,21 @@ struct CgcGen {
             case _ {
             }
         }
+        // A VALUE-STRUCT value flowing into a boxed-Value field SLOT — an ERASED type-param field
+        // (`Cell<V>.slot` under Cell<Rect>{ slot: Rect{…} }): the field is a `Value` in the erased base
+        // layout, so the em_s must be BOXED (em_box_struct) before it goes into em_struct's Value slot;
+        // a raw em_s would blow the varargs ABI (a 32-byte struct where a 16-byte Value is read → SEGV).
+        // An INLINE value-struct field (f_struct is a value struct) keeps its em_s. The compiler's own code
+        // has no value-struct-into-generic-field, so this is dead in the reproduction gate. OFI-218 (erased).
+        let vsid = self.struct_sid_of(value)
+        if vsid >= 0 {
+            let flat = self.st.field_flat(sid, fname)
+            let inline = flat >= 0 && self.st.f_struct[flat] >= 0 && self.st.is_value(self.st.f_struct[flat])
+            if inline == false {
+                let bv = self.fresh_var()
+                return "(\{ em_s{vsid} v{bv} = {self.emit_expr(value)}; em_box_struct(&g_em, {vsid}, (Value*)&v{bv}, {self.st.field_count(vsid)}); \})"
+            }
+        }
         return self.emit_consume_arg(value)
     }
 
