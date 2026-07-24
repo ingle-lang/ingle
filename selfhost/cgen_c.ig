@@ -6402,6 +6402,27 @@ struct CgcGen {
                             self.push(index_var, "v{iv}", 0 - 1, false, false, false, 0 - 1)
                         }
                         self.push(vname, "v{xv}", 0 - 1, false, false, false, 0 - 1)
+                        // Type the loop variable by the iterable's ELEMENT struct so `t.field` resolves — a
+                        // `for t in turns` over a `[Turn]` binds each `t` as a Turn (binding/param via
+                        // lookup_elem_struct, field via field_elem_struct, else an array-returning call).
+                        var lv_esid = 0 - 1
+                        match iter.value {
+                            case EIdent(aname) {
+                                lv_esid = self.lookup_elem_struct(aname)
+                            }
+                            case EGet(gobj, gname) {
+                                let osid = self.struct_sid_any(gobj.value)
+                                if osid >= 0 {
+                                    lv_esid = self.st.field_elem_struct(osid, gname)
+                                }
+                            }
+                            case _ {
+                                lv_esid = self.value_elem_struct(iter.value)
+                            }
+                        }
+                        if lv_esid >= 0 {
+                            self.set_last_struct(lv_esid)
+                        }
                         self.emit_block_raw(body)
                         self.emit_drops(mark)
                         self.truncate_scope(mark)
