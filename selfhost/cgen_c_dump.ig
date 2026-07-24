@@ -216,10 +216,25 @@ fn declares_fn(decls: [ps.Decl], n: string) -> bool {
 }
 
 
-fn load_modules(entry: string) -> [ps.Decl] {
+// Loaded is load_modules' result: the merged decls, each decl's SOURCE-MODULE path (parallel to `decls`), and
+// the global import alias->resolved-module-path map (imp_alias[k] -> imp_path[k]). The module info lets the
+// C-emit resolve a QUALIFIED call to a free fn whose bare name collides across modules (`json.get` vs
+// `http.get`, `ui.new` vs `flare.new`) — pick the same-named fn defined in the aliased module. (OFI-218)
+struct Loaded {
+    decls: [ps.Decl]
+    decl_mods: [string]
+    imp_alias: [string]
+    imp_path: [string]
+}
+
+
+fn load_modules(entry: string) -> Loaded {
     var seen: [string] = []
     var queue: [string] = []
     var combined: [ps.Decl] = []
+    var decl_mods: [string] = []
+    var imp_alias: [string] = []
+    var imp_path: [string] = []
     var sources: [string] = []
     seen.append(entry)
     queue.append(entry)
@@ -237,6 +252,7 @@ fn load_modules(entry: string) -> [ps.Decl] {
                 break
             }
             combined.append(decls[di])
+            decl_mods.append(queue[qi])
             di = di + 1
         }
         var ii = 0
@@ -247,6 +263,8 @@ fn load_modules(entry: string) -> [ps.Decl] {
             match decls[ii] {
                 case DImport(ipath, alias) {
                     let rpath = resolve_import(queue[qi], ipath)
+                    imp_alias.append(alias)
+                    imp_path.append(rpath)
                     if seen_has(seen, rpath) == false {
                         seen.append(rpath)
                         queue.append(rpath)
@@ -272,6 +290,7 @@ fn load_modules(entry: string) -> [ps.Decl] {
             case DFn(f) {
                 if name_used(used, f.name) && declares_fn(combined, f.name) == false {
                     combined.append(pdecls[pi])
+                    decl_mods.append("<prelude>")
                 }
             }
             case _ {
@@ -279,7 +298,7 @@ fn load_modules(entry: string) -> [ps.Decl] {
         }
         pi = pi + 1
     }
-    return combined
+    return Loaded { decls: combined, decl_mods: decl_mods, imp_alias: imp_alias, imp_path: imp_path }
 }
 
 
@@ -289,6 +308,7 @@ fn main() -> int {
         println("usage: inglec --emit=run selfhost/cgen_c_dump.ig <file.ig>")
         return 1
     }
-    cc.emit_program(load_modules(argv[0]), argv[0])
+    let ld = load_modules(argv[0])
+    cc.emit_program(ld.decls, ld.decl_mods, ld.imp_alias, ld.imp_path, argv[0])
     return 0
 }

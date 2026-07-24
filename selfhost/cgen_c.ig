@@ -85,6 +85,54 @@ fn build_fn_param_counts(decls: [ps.Decl]) -> [int] {
 }
 
 
+// build_fn_modules is parallel to build_fn_names (same em_fn order): each entry is the fn's SOURCE-MODULE path
+// (`decl_mods` is the merged decls' per-decl module, from the driver's load_modules). Backs module-aware
+// resolution of a qualified call whose bare name collides across modules. A method's module is its struct's.
+fn build_fn_modules(decls: [ps.Decl], decl_mods: [string]) -> [string] {
+    var out: [string] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.has_body {
+                    out.append(decl_mods[i])
+                }
+            }
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        out.append(decl_mods[i])
+                    }
+                    mi = mi + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
+// FnResolve bundles the per-em_fn resolution side-tables (param counts + source modules) and the import
+// alias->module map, so emit_fn_body takes ONE struct rather than four params (which would push its arity past
+// the compiler's ~32-parameter ceiling). Drives colliding-free-fn-name disambiguation (arity + module).
+struct FnResolve {
+    param_counts: [int]        // per-em_fn declared value-param count
+    modules: [string]          // per-em_fn source-module path
+    imp_alias: [string]        // import alias -> module path (parallel to imp_path)
+    imp_path: [string]
+}
+
+
 // cgc_internal_error mirrors stage-0's internal_error (exit 70): an emitter coverage hole must FAIL
 // LOUDLY, never lower to a silent `INT_VAL(0)` placeholder that miscompiles (the OFI-173/202/206
 // silent-stub class, closed as OFI-218 Phase 0). The unreachable trailing return satisfies the
@@ -3098,7 +3146,7 @@ struct CgcGen {
     st: StructTab              // the declared-struct table (value/boxed classification + field resolution)
     en: EnumTab                // the declared-enum table (variant -> enum id / tag / payload arity)
     fn_names: [string]         // every body-bearing fn in em_fn_N order (free fns + `Struct.method`)
-    fn_param_counts: [int]     // ...its declared value-param count (to arity-disambiguate a colliding qualified call)
+    res: FnResolve             // per-em_fn param-counts + source-modules + the import alias->module map (colliding-name resolution)
     fn_ret_kind: [int]         // ...each fn's return width-kind (for a `let x = f()` scalar binding)
     fn_ret_render: [int]       // ...each fn's return-type interp render-kind (so `{r.ok()}` renders bool, not int)
     fn_ret_opt_param: [int]    // ...for a method returning Option/Result of an owner generic param: that param's
@@ -3581,13 +3629,54 @@ struct CgcGen {
                 if first < 0 {
                     first = i
                 }
-                if i < self.fn_param_counts.len() && self.fn_param_counts[i] == argc {
+                if i < self.res.param_counts.len() && self.res.param_counts[i] == argc {
                     return i
                 }
             }
             i = i + 1
         }
         return first
+    }
+
+
+    // alias_module returns the resolved module path an import alias points at (`json` -> `std/json.ig`), or "".
+    fn alias_module(self, alias: string) -> string {
+        var i = 0
+        loop {
+            if i >= self.res.imp_alias.len() {
+                break
+            }
+            if self.res.imp_alias[i] == alias {
+                return self.res.imp_path[i]
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+
+    // fn_index_module resolves `name` to the em_fn slot DEFINED in module `modpath` — disambiguating a bare name
+    // shared across modules by the qualifier's module (`json.get` picks get/2 in std/json.ig, not http.get, and
+    // `ui.new` picks Ui's new, not Flare's). Prefers a param-count match within the module; else the first
+    // same-name fn in the module; -1 if the name is not defined there (caller falls back to arity resolution).
+    fn fn_index_module(self, name: string, modpath: string, argc: int) -> int {
+        var inmod = 0 - 1
+        var i = 0
+        loop {
+            if i >= self.fn_names.len() {
+                break
+            }
+            if self.fn_names[i] == name && i < self.res.modules.len() && self.res.modules[i] == modpath {
+                if inmod < 0 {
+                    inmod = i
+                }
+                if i < self.res.param_counts.len() && self.res.param_counts[i] == argc {
+                    return i
+                }
+            }
+            i = i + 1
+        }
+        return inmod
     }
 
 
@@ -5536,6 +5625,16 @@ struct CgcGen {
         match obj {
             case EIdent(recv) {
                 if self.lookup_cname(recv) == "" && self.lookup_struct(recv) < 0 {
+                    // MODULE-aware first: the qualifier `recv` names an import alias, so pick `mname` defined in
+                    // THAT module (resolves a same-arity collision — `ui.new` vs `flare.new`, `json.get` vs
+                    // `http.get`). Fall back to arity disambiguation when the alias/module has no such fn.
+                    let modpath = self.alias_module(recv)
+                    if modpath != "" {
+                        let mi = self.fn_index_module(mname, modpath, argc)
+                        if mi >= 0 {
+                            return mi
+                        }
+                    }
                     return self.fn_index_argc(mname, argc)   // arity-disambiguate a name shared across merged modules
                 }
             }
@@ -7692,8 +7791,8 @@ fn enum_payload_generic(ty: ps.Ty, generics: [ps.GenericParam]) -> bool {
 }
 
 
-fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_param_counts: [int], fn_ret_kind: [int], fn_ret_render: [int], fn_ret_opt_param: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab, lambda_start: int, fn_ret_det_arg: [int], fn_ret_det_elem: [bool], fn_ret_lam_arg: [int], fn_ret_lam_in: [int], fn_hof_srcs: [int], fn_param_gen_mask: [int], lam_pstr: [bool], lam_pkind: [int], extern_names: [string], extern_ret_kind: [int], extern_ret_str: [bool]) -> [int] {
-    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_is_array: [], sc_elem_elem_kind: [], sc_elem_struct: [], sc_refc: [], sc_tyvar: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_param_counts: fn_param_counts, fn_ret_kind: fn_ret_kind, fn_ret_render: fn_ret_render, fn_ret_opt_param: fn_ret_opt_param, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_owner: owner_sid, cur_tp_pname: [], cur_tp_tname: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, fn_param_gen_mask: fn_param_gen_mask, lam_recs: [], extern_names: extern_names, extern_ret_kind: extern_ret_kind, extern_ret_str: extern_ret_str }
+fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fnres: FnResolve, fn_ret_kind: [int], fn_ret_render: [int], fn_ret_opt_param: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab, lambda_start: int, fn_ret_det_arg: [int], fn_ret_det_elem: [bool], fn_ret_lam_arg: [int], fn_ret_lam_in: [int], fn_hof_srcs: [int], fn_param_gen_mask: [int], lam_pstr: [bool], lam_pkind: [int], extern_names: [string], extern_ret_kind: [int], extern_ret_str: [bool]) -> [int] {
+    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_is_array: [], sc_elem_elem_kind: [], sc_elem_struct: [], sc_refc: [], sc_tyvar: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, res: fnres, fn_ret_kind: fn_ret_kind, fn_ret_render: fn_ret_render, fn_ret_opt_param: fn_ret_opt_param, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_owner: owner_sid, cur_tp_pname: [], cur_tp_tname: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, fn_param_gen_mask: fn_param_gen_mask, lam_recs: [], extern_names: extern_names, extern_ret_kind: extern_ret_kind, extern_ret_str: extern_ret_str }
     // For a lifted lambda, lam_pstr/lam_pkind type its OWN params (the trailing params after the captures) so
     // the body dispatches `.len()`/concat/arithmetic like stage-0 (the C signature stays all-`Value`). Captures
     // lead and stay untyped. caps = (non-self param count) − (own params typed) — OFI-206 follow-on.
@@ -8568,10 +8667,12 @@ fn count_lambdas_expr(e: ps.Expr) -> int {
 
 // emit_program writes the whole C translation unit for the merged module declarations, byte-identical to
 // stage-0 `inglec --emit=c`. It iterates `decls` once per section, keeping a shared em_fn_N counter.
-fn emit_program(decls: [ps.Decl], filename: string) {
+fn emit_program(decls: [ps.Decl], decl_mods: [string], imp_alias: [string], imp_path: [string], filename: string) {
     let total = fn_count(decls)
     let fn_names = build_fn_names(decls)
     let fn_param_counts = build_fn_param_counts(decls)   // per-em_fn declared param count (colliding-name arity disambiguation)
+    let fn_modules = build_fn_modules(decls, decl_mods)  // per-em_fn source module (module-aware qualified resolution)
+    let fnres = FnResolve { param_counts: fn_param_counts, modules: fn_modules, imp_alias: imp_alias, imp_path: imp_path }
     let fn_ret_kind = build_fn_ret_kinds(decls)
     let fn_ret_render = build_fn_ret_render(decls)
     let fn_ret_opt_param = build_ret_opt_param(decls)   // per-method Option/Result generic-payload param index
@@ -8712,7 +8813,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
         match decls[k] {
             case DFn(f) {
                 if f.has_body {
-                    let recs = emit_fn_body(f, b, false, 0 - 1, stab, etab, fn_names, fn_param_counts, fn_ret_kind, fn_ret_render, fn_ret_opt_param, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, eb, ei, extern_names, extern_ret_kind, extern_ret_str)
+                    let recs = emit_fn_body(f, b, false, 0 - 1, stab, etab, fn_names, fnres, fn_ret_kind, fn_ret_render, fn_ret_opt_param, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, eb, ei, extern_names, extern_ret_kind, extern_ret_str)
                     var ri = 0
                     loop {
                         if ri >= recs.len() {
@@ -8736,7 +8837,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
                         break
                     }
                     if methods[mi].has_body {
-                        let recs = emit_fn_body(methods[mi], b, true, owner, stab, etab, fn_names, fn_param_counts, fn_ret_kind, fn_ret_render, fn_ret_opt_param, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, eb, ei, extern_names, extern_ret_kind, extern_ret_str)
+                        let recs = emit_fn_body(methods[mi], b, true, owner, stab, etab, fn_names, fnres, fn_ret_kind, fn_ret_render, fn_ret_opt_param, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, eb, ei, extern_names, extern_ret_kind, extern_ret_str)
                         var ri = 0
                         loop {
                             if ri >= recs.len() {
@@ -8790,7 +8891,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
             }
             pos = pos + 2 + np * 2
         }
-        let _drop = emit_fn_body(lc.lams[lb], total + lb, false, 0 - 1, stab, etab, fn_names, fn_param_counts, fn_ret_kind, fn_ret_render, fn_ret_opt_param, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, 0, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, ps, pk, extern_names, extern_ret_kind, extern_ret_str)
+        let _drop = emit_fn_body(lc.lams[lb], total + lb, false, 0 - 1, stab, etab, fn_names, fnres, fn_ret_kind, fn_ret_render, fn_ret_opt_param, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, 0, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, ps, pk, extern_names, extern_ret_kind, extern_ret_str)
         b = b + 1
         if b < grand {
             println("")
