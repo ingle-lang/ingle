@@ -7631,6 +7631,31 @@ struct CgcGen {
                             let o = self.emit_expr(object.value)
                             let val = self.emit_field_consume(bsid, name, value.value)   // the field CONSUMES the value (`[]` at the field's kind)
                             println("{self.ind()}em_set_field(&g_em, {o}, {fidx}, {val});")
+                        } else {
+                            // A NESTED VALUE-STRUCT field write `parent.vfield.name = X` (`self.ui.style.text_size = …`):
+                            // vfield is an INLINE value struct of a boxed parent, so its bytes can't be mutated in
+                            // place through a materialised copy. Read the boxed inline field, unbox to an em_s, set
+                            // .name on the aggregate, then re-box + em_set_field it BACK into the parent. Was silently
+                            // DROPPED (bsid<0 fell through the old `if`), losing every `self.ui.style.*` write. (OFI-218)
+                            let vsid = self.struct_sid_of(object.value)
+                            match object.value {
+                                case EGet(parent, vfield) {
+                                    let psid = self.struct_sid_any(parent.value)
+                                    if vsid >= 0 && psid >= 0 {
+                                        let pfidx = self.st.field_index(psid, vfield)
+                                        let fidx = self.st.field_index(vsid, name)
+                                        let fc = self.st.field_count(vsid)
+                                        let pv = self.fresh_var()
+                                        let bv = self.fresh_var()
+                                        let sv = self.fresh_var()
+                                        let po = self.emit_expr(parent.value)
+                                        let val = self.emit_consume_arg(value.value)
+                                        println("{self.ind()}\{ Value v{pv} = {po}; Value v{bv} = em_enum_field(&g_em, v{pv}, {pfidx}); em_s{vsid} v{sv}; em_unbox_struct(&g_em, {vsid}, v{bv}, (Value*)&v{sv}, {fc}); drop_value(&g_em, v{bv}); v{sv}.f{fidx} = {val}; em_set_field(&g_em, v{pv}, {pfidx}, em_box_struct(&g_em, {vsid}, (Value*)&v{sv}, {fc})); \}")
+                                    }
+                                }
+                                case _ {
+                                }
+                            }
                         }
                     }
                     case _ {
