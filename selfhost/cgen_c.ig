@@ -317,6 +317,12 @@ fn ty_scalar_kind(t: ps.Ty) -> int {
             if name == "int" || name == "i64" {
                 return 0
             }
+            if name == "float" || name == "f64" {
+                return 9                       // f64 (C double) — the language's default float
+            }
+            if name == "f32" {
+                return 8
+            }
             return 0 - 1
         }
         case _ {
@@ -4175,6 +4181,9 @@ struct CgcGen {
                     }
                 }
                 if self.lookup_unboxed(name) {
+                    if self.lookup_kind(name) == 8 || self.lookup_kind(name) == 9 {
+                        return "FLOAT_VAL((double){cn})"   // an unboxed FLOAT local boxes back via FLOAT_VAL
+                    }
                     return "INT_VAL((int64_t){cn})"      // an unboxed scalar `let` boxes back to a Value
                 }
                 return cn                                // a param / Value binding is read as-is
@@ -4330,7 +4339,11 @@ struct CgcGen {
                     }
                     let cn = self.lookup_cname(caps[ci])
                     if self.lookup_unboxed(caps[ci]) {
-                        s = s + ", INT_VAL((int64_t){cn})"
+                        if self.lookup_kind(caps[ci]) == 8 || self.lookup_kind(caps[ci]) == 9 {
+                            s = s + ", FLOAT_VAL((double){cn})"
+                        } else {
+                            s = s + ", INT_VAL((int64_t){cn})"
+                        }
                     } else {
                         s = s + ", {cn}"
                     }
@@ -5035,7 +5048,10 @@ struct CgcGen {
         }
         s = s + opl + ", " + opr
         if binop_has_nk(bid) {
-            s = s + ", 0"                                // num_kind 0 (i64) for the int subset
+            // The op's runtime num_kind: f64/f32 when an operand is a float (so em_add/em_sub/em_mul/em_lt do
+            // FLOAT math, not integer math on the float bit pattern), else i64. Shifts stay integer (their
+            // operands are ints, so binop_float_kind returns 0).
+            s = s + ", {self.binop_float_kind(l, r)}"
         }
         return s + ")"
     }
@@ -6092,24 +6108,53 @@ struct CgcGen {
     }
 
 
+    // binop_float_kind is the numeric result kind of an arithmetic op on `l`/`r`: f64 (9) if either operand
+    // is an f64, f32 (8) if either is an f32, else i64 (0). Drives both the binding's C scalar type and the
+    // op's runtime num_kind (a float op mis-tagged num_kind 0 does INTEGER math on the bit pattern — garbage).
+    fn binop_float_kind(self, l: ps.Expr, r: ps.Expr) -> int {
+        let lk = self.scalar_kind_of(l)
+        let rk = self.scalar_kind_of(r)
+        if lk == 9 || rk == 9 {
+            return 9
+        }
+        if lk == 8 || rk == 8 {
+            return 8
+        }
+        return 0
+    }
+
+
+    // scalar_extract is the Value->C-scalar accessor macro for a scalar `kind`: AS_FLOAT for f32/f64, else AS_INT.
+    fn scalar_extract(self, kind: int) -> string {
+        if kind == 8 || kind == 9 {
+            return "AS_FLOAT"
+        }
+        return "AS_INT"
+    }
+
+
     fn scalar_kind_of(self, e: ps.Expr) -> int {
         match e {
             case EInt(v, kind) {
                 return kind
             }
+            case EFloat(v) {
+                return 9                        // a float literal is f64 (C double)
+            }
             case EBinary(op, l, r) {
                 let bid = ps.binop_id(op)
-                // `+` is STRING concat (not a scalar) when either operand is a string, else int addition.
+                // `+` is STRING concat (not a scalar) when either operand is a string, else numeric addition.
                 if bid == 1 {
                     if self.is_string_expr(l.value) || self.is_string_expr(r.value) {
                         return 0 - 1
                     }
-                    return 0
+                    return self.binop_float_kind(l.value, r.value)   // f64/f32 if a float operand, else i64
                 }
-                // other arithmetic / bitwise / shift produce a numeric value; compares/logic produce a bool
+                // other arithmetic (- * / %): the result is float when either operand is a float, else int.
                 if bid >= 2 && bid <= 5 {
-                    return 0
+                    return self.binop_float_kind(l.value, r.value)
                 }
+                // bitwise / shift are integer-only.
                 if bid >= 14 && bid <= 18 {
                     return 0
                 }
@@ -7045,7 +7090,7 @@ struct CgcGen {
                     self.set_last_struct(ssid)
                 } else if kind >= 0 {
                     let ct = scalar_ctype(kind)
-                    println("{self.ind()}{ct} v{id} = ({ct})AS_INT({self.emit_expr(value.value)});")
+                    println("{self.ind()}{ct} v{id} = ({ct}){self.scalar_extract(kind)}({self.emit_expr(value.value)});")
                     self.push(name, "v{id}", kind, true, false, false, 0 - 1)        // unboxed C scalar storage
                 } else {
                     let arr = self.is_array_expr(value.value)
@@ -7553,7 +7598,7 @@ struct CgcGen {
                         let cn = self.lookup_cname(name)
                         if self.lookup_unboxed(name) {
                             let ct = scalar_ctype(k)
-                            println("{self.ind()}{cn} = ({ct})AS_INT({self.emit_expr(value.value)});")
+                            println("{self.ind()}{cn} = ({ct}){self.scalar_extract(k)}({self.emit_expr(value.value)});")
                         } else if self.lookup_drop(name) {
                             let t = self.fresh_var()
                             println("{self.ind()}\{ Value v{t} = {self.emit_assign_value(value.value)};")
@@ -8027,7 +8072,7 @@ fn numeric_typename_kind(name: string) -> int {
     if name == "f32" {
         return 8
     }
-    if name == "f64" {
+    if name == "f64" || name == "float" {
         return 9
     }
     return 0 - 1
