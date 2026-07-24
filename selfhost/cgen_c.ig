@@ -5134,7 +5134,24 @@ struct CgcGen {
                 desc = "{n}(…)"
             }
             case EGet(o, m) {
-                desc = ".{m}(…)"
+                var od = "?"
+                match o.value {
+                    case EIdent(n) {
+                        od = n
+                    }
+                    case EGet(o2, f) {
+                        od = "_.{f}"
+                    }
+                    case EIndex(a, ix) {
+                        od = "_[i]"
+                    }
+                    case ECall(c, cargs) {
+                        od = "call()"
+                    }
+                    case _ {
+                    }
+                }
+                desc = "{od}.{m}(…)"
             }
             case _ {
             }
@@ -7186,7 +7203,7 @@ fn is_em_native_id(nid: int) -> bool {
 // native_ret_kind classifies a native builtin's OWNED return: -3 a string, -2 an array, -1 scalar/unit
 // (not droppable), -4 = not a builtin. Drives owned-binding tracking for `let x = byte_slice(…)`.
 fn native_ret_kind(name: string) -> int {
-    if name == "read_line" || name == "read_file" || name == "env" || name == "from_char_code" || name == "byte_slice" || name == "concat" || name == "from_bytes" || name == "list_dir" {
+    if name == "read_line" || name == "read_file" || name == "env" || name == "from_char_code" || name == "byte_slice" || name == "concat" || name == "from_bytes" || name == "list_dir" || name == "clipboard_get" {
         return 0 - 3
     }
     if name == "args" {
