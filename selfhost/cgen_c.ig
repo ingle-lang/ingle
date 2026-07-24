@@ -6763,7 +6763,7 @@ fn main_index(decls: [ps.Decl]) -> int {
 // (2) per-struct packed-layout metadata arrays `em_sN_off/knd/fst[]` for EVERY struct (offsets are a running
 // sum of size_of_aek — no alignment padding); (3) the `em_structs[]` StructType table the runtime reads for
 // boxing/field-access/drop. Nothing is emitted when there are no declared structs.
-fn emit_struct_preamble(tab: StructTab) {
+fn emit_struct_preamble(tab: StructTab, fn_names: [string]) {
     let n = tab.names.len()
     if n == 0 {
         return
@@ -6857,7 +6857,24 @@ fn emit_struct_preamble(tab: StructTab) {
         if kind == 2 {
             is_res = 1
         }
-        println("    \{ .field_count = {fc}, .total_size = {total}, .is_rc = {is_rc}, .is_resource = {is_res}, .drop_fn = -1, .offset = em_s{s3}_off, .kind = em_s{s3}_knd, .field_struct = em_s{s3}_fst \},")
+        // drop_fn = the em_fn index of this struct's `drop` method (a resource/rc struct's RAII hook), or -1.
+        // A method is named "Struct.drop" in fn_names, whose position IS its em_fn index — so a Run/Db handle
+        // runs proc_free/sqlite_close on scope exit (was hardcoded -1 → the drop never ran). Uses the BASE name
+        // (a generic instance inherits its base's drop). Mirrors check.c's si->drop_fn.
+        var drop_fn = 0 - 1
+        let dname = "{tab.names[tab.base_of(s3)]}.drop"
+        var di = 0
+        loop {
+            if di >= fn_names.len() {
+                break
+            }
+            if fn_names[di] == dname {
+                drop_fn = di
+                break
+            }
+            di = di + 1
+        }
+        println("    \{ .field_count = {fc}, .total_size = {total}, .is_rc = {is_rc}, .is_resource = {is_res}, .drop_fn = {drop_fn}, .offset = em_s{s3}_off, .kind = em_s{s3}_knd, .field_struct = em_s{s3}_fst \},")
         s3 = s3 + 1
     }
     println("\};")
@@ -7340,7 +7357,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
     println("// The bytecode VM is the reference semantics; tests/native diffs the two.")
     println("#include \"ember_rt.h\"")
     println("")
-    emit_struct_preamble(stab)                 // struct typedefs + runtime metadata (nothing if no structs)
+    emit_struct_preamble(stab, fn_names)       // struct typedefs + runtime metadata (nothing if no structs)
     println("static EmberRt g_em;")
     println("")
     // forward declarations, in em_fn_N order
