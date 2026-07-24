@@ -314,6 +314,13 @@ fn is_compound_assign(k: Tk) -> bool {
 }
 
 
+// plus_token returns the `+` operator kind. A Tk variant can only be CONSTRUCTED in its own module, so
+// the parser calls this to synthesize the `hi + 1` it desugars an inclusive range `lo..=hi` into.
+fn plus_token() -> Tk {
+    return TPlus
+}
+
+
 // binop_of_compound maps a compound-assignment token to the binary operator it desugars to (the same
 // Tk the precedence parser stores for the infix form). TEof for a non-compound token — never used.
 fn binop_of_compound(k: Tk) -> Tk {

@@ -1943,8 +1943,18 @@ struct Parser {
         let e = self.parse_binary(1)
         if self.at(TAG_DOTDOT) {
             let _ = self.advance()
+            // `lo..=hi` is an INCLUSIVE range (it includes `hi`). It lexes as `..` (DOTDOT) then `=` (ASSIGN)
+            // — no new token needed — so a trailing `=` here marks the inclusive form. Desugar it to the
+            // exclusive `lo..(hi + 1)`, so every downstream consumer (for-range loops, slices) is unchanged.
+            let inclusive = self.at(TAG_ASSIGN)
+            if inclusive {
+                let _ = self.advance()
+            }
             let hstart = self.peek().line
-            let hi = self.parse_binary(1)
+            var hi = self.parse_binary(1)
+            if inclusive {
+                hi = EBinary(lx.plus_token(), Box<Expr>{ value: hi, line: hstart }, Box<Expr>{ value: EInt(1, 0), line: hstart })
+            }
             return ERange(Box<Expr>{ value: e, line: estart }, Box<Expr>{ value: hi, line: hstart })
         }
         return e

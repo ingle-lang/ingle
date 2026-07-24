@@ -1307,8 +1307,30 @@ static Expr *parse_expression(Parser *p) {
     if (check(p, TOK_DOTDOT)) {
         Expr *range = new_expr(p, EXPR_RANGE);
         adv(p);
+        // `lo..=hi` is an INCLUSIVE range (it includes `hi`). `..=` lexes as DOTDOT then ASSIGN — no new
+        // token — so a trailing `=` here marks the inclusive form. Desugar it to the exclusive
+        // `lo..(hi + 1)`, so every downstream consumer (for-range loops, slices) is unchanged. Mirrors
+        // selfhost parser.ig; the synthetic `+ 1` nodes take `hi`'s line so the bytecode line-map matches.
+        int inclusive = check(p, TOK_ASSIGN);
+        if (inclusive) {
+            adv(p);
+        }
         range->as.range.lo = e;
-        range->as.range.hi = parse_binary(p, 1);
+        Expr *hi = parse_binary(p, 1);
+        if (inclusive) {
+            Expr *one = new_expr(p, EXPR_INT);
+            one->as.int_lit = 1;
+            one->line = hi->line;
+            one->col  = hi->col;
+            Expr *plus = new_expr(p, EXPR_BINARY);
+            plus->line = hi->line;
+            plus->col  = hi->col;
+            plus->as.binary.op    = TOK_PLUS;
+            plus->as.binary.left  = hi;
+            plus->as.binary.right = one;
+            hi = plus;
+        }
+        range->as.range.hi = hi;
         return range;
     }
     return e;
