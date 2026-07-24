@@ -47,6 +47,44 @@ fn build_fn_names(decls: [ps.Decl]) -> [string] {
 }
 
 
+// build_fn_param_counts is parallel to build_fn_names (same em_fn order): each entry is the fn's declared
+// value-parameter count (a method's leading `self` is NOT a declared param — it is passed separately at the
+// call site). Used to DISAMBIGUATE a module-qualified free call whose bare name collides across merged modules
+// (`http.close(h)` vs draw's `close()`): pick the same-named fn whose param count matches the call's argc.
+fn build_fn_param_counts(decls: [ps.Decl]) -> [int] {
+    var out: [int] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.has_body {
+                    out.append(f.params.len())
+                }
+            }
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        out.append(methods[mi].params.len())
+                    }
+                    mi = mi + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
 // cgc_internal_error mirrors stage-0's internal_error (exit 70): an emitter coverage hole must FAIL
 // LOUDLY, never lower to a silent `INT_VAL(0)` placeholder that miscompiles (the OFI-173/202/206
 // silent-stub class, closed as OFI-218 Phase 0). The unreachable trailing return satisfies the
@@ -3060,6 +3098,7 @@ struct CgcGen {
     st: StructTab              // the declared-struct table (value/boxed classification + field resolution)
     en: EnumTab                // the declared-enum table (variant -> enum id / tag / payload arity)
     fn_names: [string]         // every body-bearing fn in em_fn_N order (free fns + `Struct.method`)
+    fn_param_counts: [int]     // ...its declared value-param count (to arity-disambiguate a colliding qualified call)
     fn_ret_kind: [int]         // ...each fn's return width-kind (for a `let x = f()` scalar binding)
     fn_ret_render: [int]       // ...each fn's return-type interp render-kind (so `{r.ok()}` renders bool, not int)
     fn_ret_opt_param: [int]    // ...for a method returning Option/Result of an owner generic param: that param's
@@ -3524,6 +3563,31 @@ struct CgcGen {
             i = i + 1
         }
         return 0 - 1
+    }
+
+
+    // fn_index_argc resolves a name to the em_fn slot whose declared param count matches `argc` — disambiguating
+    // a bare name shared by free fns across merged modules (`http.close(h)` = close/1, not draw's close/0). Falls
+    // back to the FIRST name-match when no arity matches (a non-colliding name is unaffected), preserving the
+    // old single-match behaviour everywhere else.
+    fn fn_index_argc(self, name: string, argc: int) -> int {
+        var first = 0 - 1
+        var i = 0
+        loop {
+            if i >= self.fn_names.len() {
+                break
+            }
+            if self.fn_names[i] == name {
+                if first < 0 {
+                    first = i
+                }
+                if i < self.fn_param_counts.len() && self.fn_param_counts[i] == argc {
+                    return i
+                }
+            }
+            i = i + 1
+        }
+        return first
     }
 
 
@@ -4033,7 +4097,7 @@ struct CgcGen {
                         // the receiver is an import alias, not a struct binding, so resolve `run` in the merged
                         // fn table and read its return struct sid, so `let r = proc.run(cmd)` tracks `r` as a Run
                         // and `r.code()` dispatches. Mirrors emit_call's qual_free_fi path.
-                        let qfi = self.qual_free_fi(object.value, mname)
+                        let qfi = self.qual_free_fi(object.value, mname, args.len())
                         if qfi >= 0 {
                             return self.fn_ret_struct[qfi]
                         }
@@ -4418,7 +4482,7 @@ struct CgcGen {
                                 return self.fn_ret_enum[fi]
                             }
                         }
-                        let qfi = self.qual_free_fi(object.value, mname)   // a module-qualified enum-returning call
+                        let qfi = self.qual_free_fi(object.value, mname, args.len())   // a module-qualified enum-returning call
                         if qfi >= 0 {
                             return self.fn_ret_enum[qfi]
                         }
@@ -4570,7 +4634,7 @@ struct CgcGen {
                                 return self.fn_ret_render[fi]
                             }
                         }
-                        let qfi = self.qual_free_fi(object.value, mname)
+                        let qfi = self.qual_free_fi(object.value, mname, args.len())
                         if qfi >= 0 {
                             return self.fn_ret_render[qfi]
                         }
@@ -5082,7 +5146,7 @@ struct CgcGen {
                 if self.fn_index(name) < 0 && cgc_cextern_index(name) >= 0 {
                     return self.emit_ffi_call(name, args)
                 }
-                let fi = self.fn_index(name)
+                let fi = self.fn_index_argc(name, args.len())   // arity-disambiguate a free-fn name shared across merged modules (`tab_labels/1` vs `/2`)
                 if fi >= 0 {
                     return self.emit_free_call(fi, args)
                 }
@@ -5105,7 +5169,7 @@ struct CgcGen {
                 // in-scope binding (no cname, not a struct binding). The self-hosted path has no checker to
                 // stamp `resolved_fn`, so we resolve `fn` in the merged declaration-order fn table ourselves
                 // (the flattened em_fn_<index> numbering). (cgen_c.c takes the direct-call path off resolved_fn.)
-                let mfi = self.qual_free_fi(object.value, mname)
+                let mfi = self.qual_free_fi(object.value, mname, args.len())
                 if mfi >= 0 {
                     return self.emit_free_call(mfi, args)
                 }
@@ -5468,11 +5532,11 @@ struct CgcGen {
     // receiver `obj` is a module import alias iff it is a bare EIdent that is NOT an in-scope binding (no
     // cname) and NOT a struct binding — the only non-binding EIdent receiver. Used by emit_call and the
     // is_string/array/enum return-type predicates so `lx.kind_name(op)` resolves like a bare free call.
-    fn qual_free_fi(self, obj: ps.Expr, mname: string) -> int {
+    fn qual_free_fi(self, obj: ps.Expr, mname: string, argc: int) -> int {
         match obj {
             case EIdent(recv) {
                 if self.lookup_cname(recv) == "" && self.lookup_struct(recv) < 0 {
-                    return self.fn_index(mname)
+                    return self.fn_index_argc(mname, argc)   // arity-disambiguate a name shared across merged modules
                 }
             }
             case _ {
@@ -5580,7 +5644,7 @@ struct CgcGen {
                         fi = self.fn_index(name)
                     }
                     case EGet(obj, mname) {
-                        fi = self.qual_free_fi(obj.value, mname)
+                        fi = self.qual_free_fi(obj.value, mname, args.len())
                     }
                     case _ {
                     }
@@ -5742,7 +5806,7 @@ struct CgcGen {
                                 return self.fn_ret_kind[fi]
                             }
                         }
-                        let qfi = self.qual_free_fi(object.value, mname)   // a module-qualified scalar-returning call `ps.binop_class(op)`
+                        let qfi = self.qual_free_fi(object.value, mname, args.len())   // a module-qualified scalar-returning call `ps.binop_class(op)`
                         if qfi >= 0 {
                             return self.gret_scalar_kind(qfi, args)
                         }
@@ -5832,7 +5896,7 @@ struct CgcGen {
                                 return self.fn_ret_elem_struct[fi]
                             }
                         }
-                        let qfi = self.qual_free_fi(object.value, mname)
+                        let qfi = self.qual_free_fi(object.value, mname, args.len())
                         if qfi >= 0 {
                             return self.fn_ret_elem_struct[qfi]
                         }
@@ -5890,7 +5954,7 @@ struct CgcGen {
                         if self.is_string_expr(obj.value) && (mname == "split" || mname == "chars") {
                             return 0
                         }
-                        fi = self.qual_free_fi(obj.value, mname)
+                        fi = self.qual_free_fi(obj.value, mname, args.len())
                     }
                     case _ {
                     }
@@ -5960,7 +6024,7 @@ struct CgcGen {
                         if sid >= 0 {
                             fi = self.fn_index("{self.st.names[sid]}.{mname}")
                         } else {
-                            fi = self.qual_free_fi(object.value, mname)   // a module-qualified array-returning call
+                            fi = self.qual_free_fi(object.value, mname, args.len())   // a module-qualified array-returning call
                         }
                     }
                     case _ {
@@ -6159,7 +6223,7 @@ struct CgcGen {
                                 return self.fn_ret_str[fi]
                             }
                         }
-                        let qfi = self.qual_free_fi(object.value, mname)   // a module-qualified free call `lx.kind_name(op)`
+                        let qfi = self.qual_free_fi(object.value, mname, args.len())   // a module-qualified free call `lx.kind_name(op)`
                         if qfi >= 0 {
                             return self.fn_ret_str[qfi] || self.gret_is_string(qfi, args)
                         }
@@ -6238,7 +6302,7 @@ struct CgcGen {
                                 return self.fn_ret_array[fi]
                             }
                         }
-                        let qfi = self.qual_free_fi(object.value, mname)   // a module-qualified array-returning call `lx.lex(src)`
+                        let qfi = self.qual_free_fi(object.value, mname, args.len())   // a module-qualified array-returning call `lx.lex(src)`
                         if qfi >= 0 {
                             return self.fn_ret_array[qfi]
                         }
@@ -7628,8 +7692,8 @@ fn enum_payload_generic(ty: ps.Ty, generics: [ps.GenericParam]) -> bool {
 }
 
 
-fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_ret_kind: [int], fn_ret_render: [int], fn_ret_opt_param: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab, lambda_start: int, fn_ret_det_arg: [int], fn_ret_det_elem: [bool], fn_ret_lam_arg: [int], fn_ret_lam_in: [int], fn_hof_srcs: [int], fn_param_gen_mask: [int], lam_pstr: [bool], lam_pkind: [int], extern_names: [string], extern_ret_kind: [int], extern_ret_str: [bool]) -> [int] {
-    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_is_array: [], sc_elem_elem_kind: [], sc_elem_struct: [], sc_refc: [], sc_tyvar: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_render: fn_ret_render, fn_ret_opt_param: fn_ret_opt_param, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_owner: owner_sid, cur_tp_pname: [], cur_tp_tname: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, fn_param_gen_mask: fn_param_gen_mask, lam_recs: [], extern_names: extern_names, extern_ret_kind: extern_ret_kind, extern_ret_str: extern_ret_str }
+fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_param_counts: [int], fn_ret_kind: [int], fn_ret_render: [int], fn_ret_opt_param: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab, lambda_start: int, fn_ret_det_arg: [int], fn_ret_det_elem: [bool], fn_ret_lam_arg: [int], fn_ret_lam_in: [int], fn_hof_srcs: [int], fn_param_gen_mask: [int], lam_pstr: [bool], lam_pkind: [int], extern_names: [string], extern_ret_kind: [int], extern_ret_str: [bool]) -> [int] {
+    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_is_array: [], sc_elem_elem_kind: [], sc_elem_struct: [], sc_refc: [], sc_tyvar: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_param_counts: fn_param_counts, fn_ret_kind: fn_ret_kind, fn_ret_render: fn_ret_render, fn_ret_opt_param: fn_ret_opt_param, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_owner: owner_sid, cur_tp_pname: [], cur_tp_tname: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, fn_param_gen_mask: fn_param_gen_mask, lam_recs: [], extern_names: extern_names, extern_ret_kind: extern_ret_kind, extern_ret_str: extern_ret_str }
     // For a lifted lambda, lam_pstr/lam_pkind type its OWN params (the trailing params after the captures) so
     // the body dispatches `.len()`/concat/arithmetic like stage-0 (the C signature stays all-`Value`). Captures
     // lead and stay untyped. caps = (non-self param count) − (own params typed) — OFI-206 follow-on.
@@ -8507,6 +8571,7 @@ fn count_lambdas_expr(e: ps.Expr) -> int {
 fn emit_program(decls: [ps.Decl], filename: string) {
     let total = fn_count(decls)
     let fn_names = build_fn_names(decls)
+    let fn_param_counts = build_fn_param_counts(decls)   // per-em_fn declared param count (colliding-name arity disambiguation)
     let fn_ret_kind = build_fn_ret_kinds(decls)
     let fn_ret_render = build_fn_ret_render(decls)
     let fn_ret_opt_param = build_ret_opt_param(decls)   // per-method Option/Result generic-payload param index
@@ -8647,7 +8712,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
         match decls[k] {
             case DFn(f) {
                 if f.has_body {
-                    let recs = emit_fn_body(f, b, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_render, fn_ret_opt_param, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, eb, ei, extern_names, extern_ret_kind, extern_ret_str)
+                    let recs = emit_fn_body(f, b, false, 0 - 1, stab, etab, fn_names, fn_param_counts, fn_ret_kind, fn_ret_render, fn_ret_opt_param, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, eb, ei, extern_names, extern_ret_kind, extern_ret_str)
                     var ri = 0
                     loop {
                         if ri >= recs.len() {
@@ -8671,7 +8736,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
                         break
                     }
                     if methods[mi].has_body {
-                        let recs = emit_fn_body(methods[mi], b, true, owner, stab, etab, fn_names, fn_ret_kind, fn_ret_render, fn_ret_opt_param, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, eb, ei, extern_names, extern_ret_kind, extern_ret_str)
+                        let recs = emit_fn_body(methods[mi], b, true, owner, stab, etab, fn_names, fn_param_counts, fn_ret_kind, fn_ret_render, fn_ret_opt_param, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, eb, ei, extern_names, extern_ret_kind, extern_ret_str)
                         var ri = 0
                         loop {
                             if ri >= recs.len() {
@@ -8725,7 +8790,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
             }
             pos = pos + 2 + np * 2
         }
-        let _drop = emit_fn_body(lc.lams[lb], total + lb, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_render, fn_ret_opt_param, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, 0, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, ps, pk, extern_names, extern_ret_kind, extern_ret_str)
+        let _drop = emit_fn_body(lc.lams[lb], total + lb, false, 0 - 1, stab, etab, fn_names, fn_param_counts, fn_ret_kind, fn_ret_render, fn_ret_opt_param, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, 0, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, ps, pk, extern_names, extern_ret_kind, extern_ret_str)
         b = b + 1
         if b < grand {
             println("")
