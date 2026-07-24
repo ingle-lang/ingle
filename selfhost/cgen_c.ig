@@ -7210,7 +7210,14 @@ struct CgcGen {
                                 // An empty array of INLINE-PACKABLE structs is em_struct_array(&g_em, <sid>, 0)
                                 // (packed layout); a non-inline struct element (boxed pointers) or any other
                                 // empty array is em_array(&g_em, 0, <kind>) — matching the checker's elem_struct_id.
-                                let esid = ty_struct_sid(elem_ty_of(ty[0]), self.st.names)
+                                // An ENUM element type wins over a same-named STRUCT: `[Span]` where Span is a
+                                // markdown.Span ENUM (but highlight.Span is also a STRUCT) is an em_array of enum
+                                // values, NOT an em_struct_array of packed structs — else the enum tags corrupt
+                                // through the packed layout (inline code lost its Mono span). Type-name collision. (OFI-218)
+                                var esid = ty_struct_sid(elem_ty_of(ty[0]), self.st.names)
+                                if enum_id_of_ty(self.en, elem_ty_of(ty[0])) >= 0 {
+                                    esid = 0 - 1
+                                }
                                 if esid >= 0 && self.st.is_inline_packable(esid) {
                                     println("{self.ind()}Value v{id} = em_struct_array(&g_em, 0, {esid});")   // em_struct_array(&g_em, count, sid)
                                 } else {
