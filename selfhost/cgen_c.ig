@@ -6453,11 +6453,27 @@ struct CgcGen {
                     // Evaluate the value into a temp, drop the function's owned locals/params, then return it.
                     // The value goes through emit_concat_operand (own a moved binding / retain a borrow).
                     let r = self.fresh_var()
-                    var rv = "INT_VAL(0)"
+                    var vsid = 0 - 1
                     if value.len() > 0 {
-                        rv = self.emit_concat_operand(value[0].value, true)
+                        vsid = self.struct_sid_of(value[0].value)
                     }
-                    println("{self.ind()}\{ Value v{r} = {rv};")
+                    if vsid >= 0 {
+                        // A VALUE-struct return: the temp is the C `em_s` aggregate (not a Value), so the fn's
+                        // em_s return type matches. A value struct read from an erased slot is unboxed first. (OFI-218)
+                        if self.object_is_value_read(value[0].value) {
+                            let fc = self.st.field_count(vsid)
+                            let ov = self.fresh_var()
+                            println("{self.ind()}\{ Value v{ov} = {self.emit_expr(value[0].value)}; em_s{vsid} v{r}; em_unbox_struct(&g_em, {vsid}, v{ov}, (Value*)&v{r}, {fc}); drop_value(&g_em, v{ov});")
+                        } else {
+                            println("{self.ind()}\{ em_s{vsid} v{r} = {self.emit_expr(value[0].value)};")
+                        }
+                    } else {
+                        var rv = "INT_VAL(0)"
+                        if value.len() > 0 {
+                            rv = self.emit_concat_operand(value[0].value, true)
+                        }
+                        println("{self.ind()}\{ Value v{r} = {rv};")
+                    }
                     self.indent = self.indent + 1
                     self.emit_drops(0)
                     println("{self.ind()}return v{r};")
