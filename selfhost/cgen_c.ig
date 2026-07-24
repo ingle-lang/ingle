@@ -85,6 +85,60 @@ fn build_fn_param_counts(decls: [ps.Decl]) -> [int] {
 }
 
 
+// param_quals_of returns the qualifier (0 none, 1 mut, 2 move) of each NON-self declared parameter, in order.
+fn param_quals_of(params: [ps.Param]) -> [int] {
+    var q: [int] = []
+    var i = 0
+    loop {
+        if i >= params.len() {
+            break
+        }
+        if params[i].is_self == false {
+            q.append(params[i].qual)
+        }
+        i = i + 1
+    }
+    return q
+}
+
+
+// build_fn_param_quals is parallel to build_fn_names (same em_fn order): each entry is the fn's DECLARED
+// param qualifiers (self excluded), so a `move` param is HONOURED at the call site — the owned argument is
+// MOVED in (its slot nil'd), not passed as a borrow the caller then drops a second time (a double-free). (OFI-218)
+fn build_fn_param_quals(decls: [ps.Decl]) -> [[int]] {
+    var out: [[int]] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.has_body {
+                    out.append(param_quals_of(f.params))
+                }
+            }
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        out.append(param_quals_of(methods[mi].params))
+                    }
+                    mi = mi + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
 // build_fn_modules is parallel to build_fn_names (same em_fn order): each entry is the fn's SOURCE-MODULE path
 // (`decl_mods` is the merged decls' per-decl module, from the driver's load_modules). Backs module-aware
 // resolution of a qualified call whose bare name collides across modules. A method's module is its struct's.
@@ -290,6 +344,7 @@ struct FnResolve {
     param_counts: [int]        // per-em_fn declared value-param count
     modules: [string]          // per-em_fn source-module path
     ret_gopt: [bool]           // per-em_fn: does it return a generic Option/Result? (erased-payload own_into_slot)
+    param_quals: [[int]]       // per-em_fn declared param qualifiers (0 none / 1 mut / 2 move), self excluded
     imp_alias: [string]        // import alias -> module path (parallel to imp_path)
     imp_path: [string]
 }
@@ -5372,6 +5427,19 @@ struct CgcGen {
     }
 
 
+    // param_is_move reports whether the `pidx`-th declared parameter of em_fn `fi` is a `move` param (qual 2) —
+    // the callee TAKES ownership, so an owned argument binding must be moved (slot nil'd), not passed as a borrow.
+    fn param_is_move(self, fi: int, pidx: int) -> bool {
+        if fi < 0 || fi >= self.res.param_quals.len() {
+            return false
+        }
+        if pidx < 0 || pidx >= self.res.param_quals[fi].len() {
+            return false
+        }
+        return self.res.param_quals[fi][pidx] == 2
+    }
+
+
     // emit_call_arg_gen is emit_call_arg with a value-struct BOX for an erased generic-param destination: a
     // value struct passed to a `val: V` generic param (`m.set(k, Rect{…})`) is boxed into the Value slot (a raw
     // em_s would blow the varargs/param ABI), like emit_field_consume does for a generic FIELD. OFI-218.
@@ -5392,6 +5460,23 @@ struct CgcGen {
                 let ov = self.fresh_var()
                 let rv = self.fresh_var()
                 return "(\{ Value v{ov} = {self.emit_expr(e)}; em_s{uvsid} v{rv}; em_unbox_struct(&g_em, {uvsid}, v{ov}, (Value*)&v{rv}, {fc}); drop_value(&g_em, v{ov}); v{rv}; \})"
+            }
+        }
+        // A `move` parameter TAKES ownership: an owned binding argument (a boxed struct / array / drop local) is
+        // MOVED in — move_binding nils the caller's slot (a boxed struct/array) or own_into_slots a string/enum —
+        // so the caller does NOT also drop it. Passing it as a borrow made `x = f(move x)` double-free x, since f
+        // returns the same object x and the caller then drops it (the Ollama tool-accumulator crash). (OFI-218)
+        if self.param_is_move(fi, pidx) {
+            match e {
+                case EIdent(name) {
+                    let sid = self.lookup_struct(name)
+                    let owned_boxed = sid >= 0 && self.st.is_value(sid) == false
+                    if self.lookup_drop(name) || self.lookup_array(name) || owned_boxed {
+                        return self.move_binding(name)
+                    }
+                }
+                case _ {
+                }
             }
         }
         return self.emit_call_arg(e)
@@ -9234,7 +9319,8 @@ fn emit_program(decls: [ps.Decl], decl_mods: [string], imp_alias: [string], imp_
     let fn_param_counts = build_fn_param_counts(decls)   // per-em_fn declared param count (colliding-name arity disambiguation)
     let fn_modules = build_fn_modules(decls, decl_mods)  // per-em_fn source module (module-aware qualified resolution)
     let fn_ret_gopt = build_fn_ret_gopt(decls)           // per-em_fn: returns a generic Option/Result (erased-payload own_into_slot)
-    let fnres = FnResolve { param_counts: fn_param_counts, modules: fn_modules, ret_gopt: fn_ret_gopt, imp_alias: imp_alias, imp_path: imp_path }
+    let fn_param_quals = build_fn_param_quals(decls)     // per-em_fn declared param qualifiers (honour `move` at call sites)
+    let fnres = FnResolve { param_counts: fn_param_counts, modules: fn_modules, ret_gopt: fn_ret_gopt, param_quals: fn_param_quals, imp_alias: imp_alias, imp_path: imp_path }
     let fn_ret_kind = build_fn_ret_kinds(decls)
     let fn_ret_render = build_fn_ret_render(decls)
     let fn_ret_opt_param = build_ret_opt_param(decls)   // per-method Option/Result generic-payload param index
