@@ -1052,7 +1052,7 @@ fn build_hof_srcs(decls: [ps.Decl]) -> [int] {
 // ERASED generic type-param passed by BORROW (`x: T`, not `move T`). Stage-0's drop_mask masks a fresh owning
 // temp at such a param (it is NOT refcounted under erasure, so the callee borrows it and the CALLER drops) —
 // unlike a concrete refcounted param (moved/adopted, no caller drop). check.c:3196 `!is_refcounted(param)`.
-fn gen_param_mask_of(f: ps.FnDecl) -> int {
+fn gen_param_mask_of(f: ps.FnDecl, owner_generics: [ps.GenericParam]) -> int {
     var mask = 0
     var i = 0
     var vidx = 0
@@ -1061,7 +1061,9 @@ fn gen_param_mask_of(f: ps.FnDecl) -> int {
             break
         }
         if f.params[i].is_self == false {
-            if f.params[i].qual != 2 && f.params[i].ty.len() > 0 && ty_is_generic_param(f.params[i].ty[0], f.generics) {
+            // A param is erased (a Value slot) if its type names a type-param of the METHOD or the OWNER struct
+            // (`val: V` in a Map<K,V> method) — both are erased in the C-emit's representation.
+            if f.params[i].qual != 2 && f.params[i].ty.len() > 0 && (ty_is_generic_param(f.params[i].ty[0], f.generics) || ty_is_generic_param(f.params[i].ty[0], owner_generics)) {
                 mask = mask | (1 << vidx)
             }
             vidx = vidx + 1
@@ -1084,7 +1086,7 @@ fn build_fn_param_gen_mask(decls: [ps.Decl]) -> [int] {
         match decls[i] {
             case DFn(f) {
                 if f.has_body {
-                    out.append(gen_param_mask_of(f))
+                    out.append(gen_param_mask_of(f, []))
                 }
             }
             case DStruct(name, generics, impls, fields, methods, kind) {
@@ -1094,7 +1096,7 @@ fn build_fn_param_gen_mask(decls: [ps.Decl]) -> [int] {
                         break
                     }
                     if methods[mi].has_body {
-                        out.append(gen_param_mask_of(methods[mi]))
+                        out.append(gen_param_mask_of(methods[mi], generics))
                     }
                     mi = mi + 1
                 }
@@ -4673,6 +4675,21 @@ struct CgcGen {
     }
 
 
+    // emit_call_arg_gen is emit_call_arg with a value-struct BOX for an erased generic-param destination: a
+    // value struct passed to a `val: V` generic param (`m.set(k, Rect{…})`) is boxed into the Value slot (a raw
+    // em_s would blow the varargs/param ABI), like emit_field_consume does for a generic FIELD. OFI-218.
+    fn emit_call_arg_gen(mut self, e: ps.Expr, fi: int, pidx: int) -> string {
+        if self.param_is_gen_borrow(fi, pidx) {
+            let vsid = self.struct_sid_of(e)
+            if vsid >= 0 {
+                let bv = self.fresh_var()
+                return "(\{ em_s{vsid} v{bv} = {self.emit_expr(e)}; em_box_struct(&g_em, {vsid}, (Value*)&v{bv}, {self.st.field_count(vsid)}); \})"
+            }
+        }
+        return self.emit_call_arg(e)
+    }
+
+
     // arg_owning_temp_p is the PARAM-AWARE owning-temp test used at a resolved call: a param-independent owning
     // temp (array / boxed-struct literal or call — arg_is_owning_temp), OR a fresh STRING temp passed to an
     // erased generic-T BORROW param (which is not refcounted, so the caller drops it — check.c:3196 drop_mask,
@@ -4902,7 +4919,7 @@ struct CgcGen {
                                     if ai >= args.len() {
                                         break
                                     }
-                                    h = h + ", " + self.emit_call_arg(args[ai])
+                                    h = h + ", " + self.emit_call_arg_gen(args[ai], fi, ai)
                                     ai = ai + 1
                                 }
                                 h = h + "); "
@@ -4938,7 +4955,7 @@ struct CgcGen {
                                 }
                                 let aid = self.fresh_var()
                                 argids.append(aid)
-                                s = s + "Value c{aid} = {self.emit_call_arg(args[i])}; "
+                                s = s + "Value c{aid} = {self.emit_call_arg_gen(args[i], fi, i)}; "
                                 i = i + 1
                             }
                             s = s + "Value c{rid} = em_fn_{fi}(" + self.emit_expr(object.value)   // self inline
@@ -4969,7 +4986,7 @@ struct CgcGen {
                             if i >= args.len() {
                                 break
                             }
-                            s = s + ", " + self.emit_call_arg(args[i])
+                            s = s + ", " + self.emit_call_arg_gen(args[i], fi, i)
                             i = i + 1
                         }
                         return s + ")"
@@ -5053,7 +5070,7 @@ struct CgcGen {
                 }
                 let aid = self.fresh_var()
                 argids.append(aid)
-                s = s + "Value c{aid} = {self.emit_call_arg(args[i])}; "
+                s = s + "Value c{aid} = {self.emit_call_arg_gen(args[i], fi, i)}; "
                 i = i + 1
             }
             s = s + "Value c{rid} = em_fn_{fi}("
@@ -5090,7 +5107,7 @@ struct CgcGen {
             if i > 0 {
                 s = s + ", "
             }
-            s = s + self.emit_call_arg(args[i])
+            s = s + self.emit_call_arg_gen(args[i], fi, i)
             i = i + 1
         }
         return s + ")"
