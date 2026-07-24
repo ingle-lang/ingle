@@ -5311,6 +5311,23 @@ struct CgcGen {
                         return "em_array_len({self.emit_expr(object.value)})"
                     }
                     if mname == "append" {
+                        match object.value {
+                            case EIndex(arr, ix) {
+                                // Appending to an INDEXED array element (`self.tabs[i].append(x)`, a `[[T]]`
+                                // element) — em_index reads the element as a transient COPY, so the grown array
+                                // must be written BACK with em_set_index or the append is LOST (and leaves a stale
+                                // element). Read-modify-write-back in source order, mirroring stage-0 (OFI-166).
+                                let fv = self.fresh_var()
+                                let av = self.emit_expr(arr.value)
+                                let iv = self.fresh_var()
+                                let ixe = self.emit_expr(ix.value)
+                                let ev = self.fresh_var()
+                                let el = self.emit_consume_arg(args[0])
+                                return "(\{ Value v{fv} = {av}; Value v{iv} = {ixe}; Value v{ev} = em_index(&g_em, v{fv}, v{iv}); em_array_append(&g_em, v{ev}, {el}); em_set_index(&g_em, v{fv}, v{iv}, v{ev}); INT_VAL(0); \})"
+                            }
+                            case _ {
+                            }
+                        }
                         let recv = self.emit_expr(object.value)
                         let el = self.emit_consume_arg(args[0])   // the array CONSUMES the element (owned ones moved in); source order (OFI-166)
                         return "em_array_append(&g_em, {recv}, {el})"
