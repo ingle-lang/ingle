@@ -5505,6 +5505,11 @@ struct CgcGen {
                         fi = self.fn_index(name)
                     }
                     case EGet(obj, mname) {
+                        // a built-in string method returning a `[string]` array (`s.split(sep)` / `s.chars()`)
+                        // → STRING elements (aek 0), so a `parts[i].len()` resolves as a string method.
+                        if self.is_string_expr(obj.value) && (mname == "split" || mname == "chars") {
+                            return 0
+                        }
                         fi = self.qual_free_fi(obj.value, mname)
                     }
                     case _ {
