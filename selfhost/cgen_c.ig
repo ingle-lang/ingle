@@ -2763,7 +2763,9 @@ struct EnumTab {
 // `INT_VAL(<value>LL)` in emit_expr — matching stage-0's inlined constant. ------------------------------
 struct ConstTab {
     names: [string]            // const name
-    vals: [int]                // ...its int literal value
+    vals: [int]                // ...its int literal value (when kinds[i] == 0)
+    kinds: [int]               // 0 = int constant, 1 = string constant
+    svals: [string]            // ...its string literal value (when kinds[i] == 1)
 
 
     // lookup_idx returns the table index of const `name`, or -1 (not a known folded constant).
@@ -2783,12 +2785,15 @@ struct ConstTab {
 }
 
 
-// build_const_tab collects module-level `let NAME: int = <int literal>` declarations across all merged
-// modules — the folded compile-time constants (the parser's TAG_* token tags). Non-int-literal lets are
-// skipped (the corpus has none; extend if a global string/expr constant appears).
+// build_const_tab collects module-level `let NAME = <literal>` declarations across all merged modules —
+// the folded compile-time constants. Two kinds are folded: int literals (the parser's TAG_* token tags,
+// `kinds[i] == 0`) and single-run string literals (`let MODEL_OPUS = "claude-opus-4-8"`, `kinds[i] == 1` —
+// emitted as an interned cached-str at each use site). Other non-literal lets are skipped.
 fn build_const_tab(decls: [ps.Decl]) -> ConstTab {
     var names: [string] = []
     var vals: [int] = []
+    var kinds: [int] = []
+    var svals: [string] = []
     var i = 0
     loop {
         if i >= decls.len() {
@@ -2800,6 +2805,16 @@ fn build_const_tab(decls: [ps.Decl]) -> ConstTab {
                     case EInt(v, _) {
                         names.append(name)
                         vals.append(v)
+                        kinds.append(0)
+                        svals.append("")
+                    }
+                    case EStr(parts) {
+                        if parts.len() == 1 && parts[0].hole.len() == 0 {
+                            names.append(name)
+                            vals.append(0)
+                            kinds.append(1)
+                            svals.append(parts[0].text)
+                        }
                     }
                     case _ {
                     }
@@ -2810,7 +2825,7 @@ fn build_const_tab(decls: [ps.Decl]) -> ConstTab {
         }
         i = i + 1
     }
-    return ConstTab { names: names, vals: vals }
+    return ConstTab { names: names, vals: vals, kinds: kinds, svals: svals }
 }
 
 
@@ -3712,6 +3727,9 @@ struct CgcGen {
                 if self.lookup_cname(name) == "" {
                     let ci = self.consts.lookup_idx(name)   // a module-level folded constant `TAG_IDENT` → its literal
                     if ci >= 0 {
+                        if self.consts.kinds[ci] == 1 {
+                            return self.emit_cached_str(self.consts.svals[ci])   // a module-level string constant → its interned literal
+                        }
                         return "INT_VAL({self.consts.vals[ci]}LL)"
                     }
                 }
@@ -3819,6 +3837,9 @@ struct CgcGen {
                         if self.lookup_cname(recv) == "" && self.lookup_struct(recv) < 0 {
                             let ci = self.consts.lookup_idx(name)
                             if ci >= 0 {
+                                if self.consts.kinds[ci] == 1 {
+                                    return self.emit_cached_str(self.consts.svals[ci])   // a module-qualified string constant `api.MODEL_OPUS`
+                                }
                                 return "INT_VAL({self.consts.vals[ci]}LL)"
                             }
                         }
@@ -4276,11 +4297,48 @@ struct CgcGen {
     }
 
 
+    // string_const_idx returns the ConstTab index if `e` reads a module-level STRING constant — bare
+    // (`MODEL_OPUS`) or module-qualified (`api.MODEL_OPUS`) — else -1. A string const folds to its interned
+    // cached-str literal at each use, so like a string literal it is a fresh OWNING-TEMP (not a borrow).
+    fn string_const_idx(self, e: ps.Expr) -> int {
+        match e {
+            case EIdent(name) {
+                if self.lookup_cname(name) == "" {
+                    let ci = self.consts.lookup_idx(name)
+                    if ci >= 0 && self.consts.kinds[ci] == 1 {
+                        return ci
+                    }
+                }
+            }
+            case EGet(object, name) {
+                match object.value {
+                    case EIdent(recv) {
+                        if self.lookup_cname(recv) == "" && self.lookup_struct(recv) < 0 {
+                            let ci = self.consts.lookup_idx(name)
+                            if ci >= 0 && self.consts.kinds[ci] == 1 {
+                                return ci
+                            }
+                        }
+                    }
+                    case _ {
+                    }
+                }
+            }
+            case _ {
+            }
+        }
+        return 0 - 1
+    }
+
+
     // hole_is_string_temp reports whether an interpolation hole is ALREADY a fresh OWNING-TEMP string (a
-    // string-returning call, a string concat, or a nested interpolation) — such a hole is concatenated
-    // DIRECTLY (em_add consumes the temp), skipping em_to_string. A string BINDING / param / field read (a
-    // borrow) and any non-string value go through em_to_string.
+    // string-returning call, a string concat, a nested interpolation, or a folded string constant) — such a
+    // hole is concatenated DIRECTLY (em_add consumes the temp), skipping em_to_string. A string BINDING /
+    // param / field read (a borrow) and any non-string value go through em_to_string.
     fn hole_is_string_temp(self, e: ps.Expr) -> bool {
+        if self.string_const_idx(e) >= 0 {
+            return true                          // a folded string const inlines to a cached-str owning temp
+        }
         if self.is_string_expr(e) == false {
             return false
         }
