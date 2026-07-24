@@ -2782,8 +2782,9 @@ struct EnumTab {
 struct ConstTab {
     names: [string]            // const name
     vals: [int]                // ...its int literal value (when kinds[i] == 0)
-    kinds: [int]               // 0 = int constant, 1 = string constant
+    kinds: [int]               // 0 = int constant, 1 = string constant, 2 = float constant
     svals: [string]            // ...its string literal value (when kinds[i] == 1)
+    fvals: [float]             // ...its float literal value (when kinds[i] == 2)
 
 
     // lookup_idx returns the table index of const `name`, or -1 (not a known folded constant).
@@ -2812,6 +2813,7 @@ fn build_const_tab(decls: [ps.Decl]) -> ConstTab {
     var vals: [int] = []
     var kinds: [int] = []
     var svals: [string] = []
+    var fvals: [float] = []
     var i = 0
     loop {
         if i >= decls.len() {
@@ -2825,6 +2827,14 @@ fn build_const_tab(decls: [ps.Decl]) -> ConstTab {
                         vals.append(v)
                         kinds.append(0)
                         svals.append("")
+                        fvals.append(0.0)
+                    }
+                    case EFloat(fv) {
+                        names.append(name)
+                        vals.append(0)
+                        kinds.append(2)
+                        svals.append("")
+                        fvals.append(fv)
                     }
                     case EStr(parts) {
                         if parts.len() == 1 && parts[0].hole.len() == 0 {
@@ -2832,6 +2842,7 @@ fn build_const_tab(decls: [ps.Decl]) -> ConstTab {
                             vals.append(0)
                             kinds.append(1)
                             svals.append(parts[0].text)
+                            fvals.append(0.0)
                         }
                     }
                     case _ {
@@ -2843,7 +2854,7 @@ fn build_const_tab(decls: [ps.Decl]) -> ConstTab {
         }
         i = i + 1
     }
-    return ConstTab { names: names, vals: vals, kinds: kinds, svals: svals }
+    return ConstTab { names: names, vals: vals, kinds: kinds, svals: svals, fvals: fvals }
 }
 
 
@@ -3770,6 +3781,9 @@ struct CgcGen {
                         if self.consts.kinds[ci] == 1 {
                             return self.emit_cached_str(self.consts.svals[ci])   // a module-level string constant → its interned literal
                         }
+                        if self.consts.kinds[ci] == 2 {
+                            return "FLOAT_VAL({self.consts.fvals[ci]})"          // a module-level float constant → its literal (like an EFloat)
+                        }
                         return "INT_VAL({self.consts.vals[ci]}LL)"
                     }
                 }
@@ -3909,6 +3923,9 @@ struct CgcGen {
                             if ci >= 0 {
                                 if self.consts.kinds[ci] == 1 {
                                     return self.emit_cached_str(self.consts.svals[ci])   // a module-qualified string constant `api.MODEL_OPUS`
+                                }
+                                if self.consts.kinds[ci] == 2 {
+                                    return "FLOAT_VAL({self.consts.fvals[ci]})"          // a module-qualified float constant `flare.SPRING_DT`
                                 }
                                 return "INT_VAL({self.consts.vals[ci]}LL)"
                             }
