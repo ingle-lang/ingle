@@ -4913,6 +4913,17 @@ struct CgcGen {
                 let bv = self.fresh_var()
                 return "(\{ em_s{vsid} v{bv} = {self.emit_expr(e)}; em_box_struct(&g_em, {vsid}, (Value*)&v{bv}, {self.st.field_count(vsid)}); \})"
             }
+        } else {
+            // A value struct read from an ERASED slot (a boxed-struct FIELD / ARRAY element — a boxed Value)
+            // passed to a NON-generic param must be going to a value-struct `em_s` param (a concrete non-em_s
+            // param could not receive a value struct), so UNBOX into the em_s the callee expects. (OFI-218)
+            let uvsid = self.struct_sid_of(e)
+            if uvsid >= 0 && self.object_is_value_read(e) {
+                let fc = self.st.field_count(uvsid)
+                let ov = self.fresh_var()
+                let rv = self.fresh_var()
+                return "(\{ Value v{ov} = {self.emit_expr(e)}; em_s{uvsid} v{rv}; em_unbox_struct(&g_em, {uvsid}, v{ov}, (Value*)&v{rv}, {fc}); drop_value(&g_em, v{ov}); v{rv}; \})"
+            }
         }
         return self.emit_call_arg(e)
     }
