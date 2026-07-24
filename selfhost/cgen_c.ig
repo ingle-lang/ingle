@@ -2845,6 +2845,24 @@ fn build_const_tab(decls: [ps.Decl]) -> ConstTab {
                             fvals.append(0.0)
                         }
                     }
+                    case EUnary(op, operand) {
+                        // a NEGATED int literal `let NONE = -1` parses as EUnary(-, EInt), not a signed literal —
+                        // fold it too (else the reference emits an empty string). (A negated FLOAT const does not
+                        // occur in the corpus; folding it here would need `0.0 - fv`, whose emit is deferred.)
+                        if ps.unop_id(op) == 1 {
+                            match operand.value {
+                                case EInt(v, _) {
+                                    names.append(name)
+                                    vals.append(0 - v)
+                                    kinds.append(0)
+                                    svals.append("")
+                                    fvals.append(0.0)
+                                }
+                                case _ {
+                                }
+                            }
+                        }
+                    }
                     case _ {
                     }
                 }
