@@ -308,6 +308,20 @@ fn cgc_internal_error(what: string) -> string {
 
 // ty_scalar_kind maps a numeric type annotation to its C width-kind (0 i64 … 9 f64), or -1 for any
 // non-scalar (string/struct/array/etc). M5a handles the i64 (`int`/`i64`) subset; sized/float follow.
+// enum_id_of_ty resolves a declared type to its enum id (-1 if not a known enum) — the enum NAME regardless of
+// an import qualifier, so a bare-variant construction can be scoped to the field/return enum. (OFI-218)
+fn enum_id_of_ty(en: EnumTab, ty: ps.Ty) -> int {
+    match ty {
+        case TyName(qual, name) {
+            return en.enum_id(name)
+        }
+        case _ {
+            return 0 - 1
+        }
+    }
+}
+
+
 fn ty_scalar_kind(t: ps.Ty) -> int {
     match t {
         case TyName(qual, name) {
@@ -2939,6 +2953,61 @@ struct EnumTab {
     }
 
 
+    // variant_sole_enum returns the enum id that OWNS variant `name` IFF exactly one enum declares it; -1 when
+    // the name is unknown OR shared across 2+ enums (e.g. `Str` in json.Json AND highlight.Kind). An unambiguous
+    // arm of a match thus pins the scrutinee's enum, so a COLLIDING arm resolves to the right one. (OFI-218)
+    fn variant_sole_enum(self, name: string) -> int {
+        var found = 0 - 1
+        var i = 0
+        loop {
+            if i >= self.v_name.len() {
+                break
+            }
+            if self.v_name[i] == name {
+                if found >= 0 && found != self.v_owner[i] {
+                    return 0 - 1
+                }
+                found = self.v_owner[i]
+            }
+            i = i + 1
+        }
+        return found
+    }
+
+
+    // enum_id resolves an enum NAME to its id (-1 if unknown) — for scoping a construction by a declared type.
+    fn enum_id(self, name: string) -> int {
+        var i = 0
+        loop {
+            if i >= self.names.len() {
+                break
+            }
+            if self.names[i] == name {
+                return i
+            }
+            i = i + 1
+        }
+        return 0 - 1
+    }
+
+
+    // case_tag_in returns variant `name`'s tag WITHIN enum `eid`, or -1 if that enum has no such variant — so a
+    // match on a known enum resolves each arm against ITS enum, not the first same-named variant anywhere.
+    fn case_tag_in(self, eid: int, name: string) -> int {
+        var i = 0
+        loop {
+            if i >= self.v_name.len() {
+                break
+            }
+            if self.v_name[i] == name && self.v_owner[i] == eid {
+                return self.v_tag[i]
+            }
+            i = i + 1
+        }
+        return 0 - 1
+    }
+
+
     fn is_variant(self, name: string) -> bool {
         return self.variant_flat(name) >= 0
     }
@@ -4742,6 +4811,21 @@ struct CgcGen {
                         return "em_struct_array(&g_em, 0, {fes})"
                     }
                     return "em_array(&g_em, 0, {self.st.field_elem_aek(sid, fname)})"
+                }
+            }
+            case EIdent(vn) {
+                // A BARE enum-variant field value (`Span { kind: Str }`) whose field is typed as an ENUM:
+                // resolve the variant WITHIN that enum, not by the first same-named variant globally — else a
+                // colliding name (highlight.Kind.Str vs json.Json.Str) picks a wrong tag by merge order,
+                // mis-tagging the constructed value (a syntax-highlight Str drawn as a Number). (OFI-218)
+                if self.en.is_case_variant(vn) && self.lookup_cname(vn) == "" {
+                    let feid = enum_id_of_ty(self.en, self.st.field_ty(sid, fname))
+                    if feid >= 0 {
+                        let t = self.en.case_tag_in(feid, vn)
+                        if t >= 0 {
+                            return "em_enum(&g_em, {feid}, {t}, 0)"
+                        }
+                    }
                 }
             }
             case _ {
@@ -7366,6 +7450,24 @@ struct CgcGen {
                     mv = self.fresh_var()
                     println("{self.ind()}int v{mv} = 0;")
                 }
+                // The scrutinee's enum, pinned by the FIRST arm whose variant belongs to exactly one enum — so a
+                // colliding arm (`case Str` when both json.Json and highlight.Kind declare Str) resolves to the
+                // scrutinee's enum, not the first same-named variant globally. -1 = leave arms on global lookup.
+                var match_eid = 0 - 1
+                var pi = 0
+                loop {
+                    if pi >= cases.len() {
+                        break
+                    }
+                    if cases[pi].pattern.wildcard == false && cases[pi].pattern.variant != "" {
+                        let se = self.en.variant_sole_enum(cases[pi].pattern.variant)
+                        if se >= 0 {
+                            match_eid = se
+                            break
+                        }
+                    }
+                    pi = pi + 1
+                }
                 var ci = 0
                 var first = true
                 loop {
@@ -7386,7 +7488,13 @@ struct CgcGen {
                             let cond = self.emit_or_cond(cases[ci].pattern.alts, sv, tv)
                             println("{self.ind()}if (v{mv} == 0 && {cond}) \{")
                         } else {
-                            let tag = self.en.case_tag(cases[ci].pattern.variant)
+                            var tag = self.en.case_tag(cases[ci].pattern.variant)
+                            if match_eid >= 0 {
+                                let t2 = self.en.case_tag_in(match_eid, cases[ci].pattern.variant)
+                                if t2 >= 0 {
+                                    tag = t2
+                                }
+                            }
                             let inner = self.emit_enum_inner_and(cases[ci].pattern, sv)
                             println("{self.ind()}if (v{mv} == 0 && v{tv} == {tag}{inner}) \{")
                         }
@@ -7413,7 +7521,13 @@ struct CgcGen {
                                 println("{self.ind()}\} else if ({cond}) \{")
                             }
                         } else {
-                            let tag = self.en.case_tag(cases[ci].pattern.variant)
+                            var tag = self.en.case_tag(cases[ci].pattern.variant)
+                            if match_eid >= 0 {
+                                let t2 = self.en.case_tag_in(match_eid, cases[ci].pattern.variant)
+                                if t2 >= 0 {
+                                    tag = t2
+                                }
+                            }
                             let inner = self.emit_enum_inner_and(cases[ci].pattern, sv)
                             if first {
                                 println("{self.ind()}if (v{tv} == {tag}{inner}) \{")
