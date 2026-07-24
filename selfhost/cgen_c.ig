@@ -6283,9 +6283,11 @@ struct CgcGen {
                     case EGet(gobj, gname) {
                         // `self.parts[0]` — an element of a struct's string-array FIELD (a boxed AEK-0, non-struct
                         // element) is a string receiver, so `self.parts[0].len()`/`.split()` resolve directly —
-                        // no bind-to-local needed (OFI-173 indexed-field-element method call, un-dodged).
+                        // no bind-to-local needed (OFI-173 indexed-field-element method call, un-dodged). But a
+                        // `[[T]]` FIELD's element (`self.dk_tabs[i]`) is itself an ARRAY, not a string (both are
+                        // boxed AEK-0) — exclude it so `self.dk_tabs[i].len()` is em_array_len, not em_str_len (OFI-219).
                         let sid = self.struct_sid_any(gobj.value)
-                        return sid >= 0 && self.st.field_elem_aek(sid, gname) == 0 && self.st.field_elem_struct(sid, gname) < 0
+                        return sid >= 0 && self.st.field_elem_aek(sid, gname) == 0 && self.st.field_elem_struct(sid, gname) < 0 && is_array_ty(elem_ty_of(self.st.field_ty(sid, gname))) == false
                     }
                     case _ {
                     }
