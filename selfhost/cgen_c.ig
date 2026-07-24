@@ -122,12 +122,174 @@ fn build_fn_modules(decls: [ps.Decl], decl_mods: [string]) -> [string] {
 }
 
 
-// FnResolve bundles the per-em_fn resolution side-tables (param counts + source modules) and the import
-// alias->module map, so emit_fn_body takes ONE struct rather than four params (which would push its arity past
-// the compiler's ~32-parameter ceiling). Drives colliding-free-fn-name disambiguation (arity + module).
+// ret_ty_is_gopt reports whether a return type is a GENERIC Option/Result instance (`Result<Json, E>`,
+// `Option<T>`). The self-hosted C-emit does not monomorphise, so a `case Ok(root)` payload bound from such
+// a return is treated as an ERASED, possibly-refcounted borrow (like a generic Option/Result PARAM payload):
+// consuming it needs own_into_slot (a runtime IS_OBJ retain), matching stage-0's concrete-type resolution.
+fn ret_ty_is_gopt(ty: ps.Ty) -> bool {
+    match ty {
+        case TyGeneric(q, n, args) {
+            return n == "Option" || n == "Result"
+        }
+        case _ {
+            return false
+        }
+    }
+}
+
+
+// build_fn_ret_gopt is parallel to build_fn_names (same em_fn order): each entry reports whether the fn returns
+// a generic Option/Result (its Ok/Some payload is an erased borrow). Backs subject_is_gopt_call — a match on a
+// gopt-returning CALL (`match json.parse(src) { case Ok(root) }`) marks the payload refcounted, so passing it
+// to a consuming call own_into_slots it. Mirrors subject_is_gopt's over-approximation for gopt PARAMS. (OFI-218)
+fn build_fn_ret_gopt(decls: [ps.Decl]) -> [bool] {
+    var out: [bool] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.has_body {
+                    out.append(f.ret.len() > 0 && ret_ty_is_gopt(f.ret[0]))
+                }
+            }
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        out.append(methods[mi].ret.len() > 0 && ret_ty_is_gopt(methods[mi].ret[0]))
+                    }
+                    mi = mi + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
+// block_concurrent / stmt_concurrent report whether a statement (tree) uses `spawn`/`nursery` — the M4 M:N
+// parallelism primitives. A concurrent program needs `_Thread_local EmberRt g_em` (a per-worker heap +
+// lock-free allocator), not a single `static` one. Mirrors stage-0's program_is_concurrent (src/cgen_c.c).
+fn block_concurrent(body: [ps.Stmt]) -> bool {
+    var i = 0
+    loop {
+        if i >= body.len() {
+            break
+        }
+        if stmt_concurrent(body[i]) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+
+fn stmt_concurrent(s: ps.Stmt) -> bool {
+    match s {
+        case SSpawn(call) {
+            return true
+        }
+        case SNursery(body, line) {
+            return true
+        }
+        case SIf(cond, then_blk, els) {
+            return block_concurrent(then_blk) || block_concurrent(els)
+        }
+        case SFor(vname, index_var, iter, body) {
+            return block_concurrent(body)
+        }
+        case SLoop(body) {
+            return block_concurrent(body)
+        }
+        case SBlock(body) {
+            return block_concurrent(body)
+        }
+        case SMatch(value, cases) {
+            var i = 0
+            loop {
+                if i >= cases.len() {
+                    break
+                }
+                if block_concurrent(cases[i].body) {
+                    return true
+                }
+                i = i + 1
+            }
+            return false
+        }
+        case _ {
+            return false
+        }
+    }
+}
+
+
+// pop_int returns `xs` without its last element (the nursery-id stack pop). Empty in → empty out.
+fn pop_int(xs: [int]) -> [int] {
+    var out: [int] = []
+    var i = 0
+    loop {
+        if i >= xs.len() - 1 {
+            break
+        }
+        out.append(xs[i])
+        i = i + 1
+    }
+    return out
+}
+
+
+// program_concurrent reports whether ANY function/method body uses spawn/nursery (drives the thread-local g_em).
+fn program_concurrent(decls: [ps.Decl]) -> bool {
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.has_body && block_concurrent(f.body) {
+                    return true
+                }
+            }
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body && block_concurrent(methods[mi].body) {
+                        return true
+                    }
+                    mi = mi + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+
+// FnResolve bundles the per-em_fn resolution side-tables (param counts + source modules + gopt-return flags) and
+// the import alias->module map, so emit_fn_body takes ONE struct rather than five params (which would push its
+// arity past the compiler's ~32-parameter ceiling). Drives colliding-free-fn-name disambiguation (arity + module).
 struct FnResolve {
     param_counts: [int]        // per-em_fn declared value-param count
     modules: [string]          // per-em_fn source-module path
+    ret_gopt: [bool]           // per-em_fn: does it return a generic Option/Result? (erased-payload own_into_slot)
     imp_alias: [string]        // import alias -> module path (parallel to imp_path)
     imp_path: [string]
 }
@@ -3186,6 +3348,7 @@ struct CgcGen {
                                // has no body for them); an FFI call resolves its return type through this (P6 FFI)
     extern_ret_kind: [int]     // ...each extern's return width-kind (so `let s = sin(x)` binds an unboxed double)
     extern_ret_str: [bool]     // ...does each extern return a `string` (so `let o = proc_stdout(h)` owns + `.len()`s)?
+    nursery_ids: [int]         // stack of enclosing `nursery { }` emit ids (a `spawn` inside appends to the innermost)
 
 
     fn fresh_var(mut self) -> int {
@@ -3297,6 +3460,49 @@ struct CgcGen {
                     i = i + 1
                 }
                 return false
+            }
+            case _ {
+                return false
+            }
+        }
+    }
+
+
+    // subject_is_gopt_call reports whether a match scrutinee is a CALL returning a generic Option/Result
+    // (`match json.parse(src) { case Ok(root) }`) — the payload binds an erased, possibly-refcounted borrow the
+    // self-hosted emit does not monomorphise. Consuming it needs own_into_slot, exactly as for a gopt PARAM
+    // (subject_is_gopt). Resolves the callee's em_fn index (free / method / module-qualified / UFCS), mirroring
+    // is_enum_expr, then reads FnResolve.ret_gopt. (OFI-218 — closes the json->dock deserialise double-free.)
+    fn subject_is_gopt_call(self, e: ps.Expr) -> bool {
+        match e {
+            case ECall(callee, args) {
+                match callee.value {
+                    case EIdent(name) {
+                        let fi = self.fn_index(name)
+                        return fi >= 0 && fi < self.res.ret_gopt.len() && self.res.ret_gopt[fi]
+                    }
+                    case EGet(object, mname) {
+                        let sid = self.struct_sid_any(object.value)
+                        if sid >= 0 {
+                            let fi = self.fn_index("{self.st.names[sid]}.{mname}")
+                            if fi >= 0 {
+                                return fi < self.res.ret_gopt.len() && self.res.ret_gopt[fi]
+                            }
+                        }
+                        let qfi = self.qual_free_fi(object.value, mname, args.len())
+                        if qfi >= 0 {
+                            return qfi < self.res.ret_gopt.len() && self.res.ret_gopt[qfi]
+                        }
+                        if sid < 0 {
+                            let ufi = self.fn_index(mname)
+                            return ufi >= 0 && ufi < self.res.ret_gopt.len() && self.res.ret_gopt[ufi]
+                        }
+                        return false
+                    }
+                    case _ {
+                        return false
+                    }
+                }
             }
             case _ {
                 return false
@@ -4883,6 +5089,13 @@ struct CgcGen {
                 if consuming && self.lookup_refc(name) {
                     // a REFCOUNTED BORROW (a string/enum enum-payload binding) owned INTO the consuming op —
                     // own_into_slot retains it (moves_local==2); the enum keeps its own reference.
+                    return "own_into_slot(&g_em, {self.lookup_cname(name)})"
+                }
+                if consuming && self.lookup_array(name) {
+                    // a BORROWED array read aliased into an OWNED slot (`var out = blocks` where `blocks: [T]` is
+                    // a borrowed param): CLONE it via own_into_slot. An array is a UNIQUE-OWNER (no refcount), so
+                    // the retain_dance below is a no-op ALIAS — the new owner and the caller then both free the
+                    // one array (a use-after-free). own_into_slot deep-copies it, matching stage-0's moves_local.
                     return "own_into_slot(&g_em, {self.lookup_cname(name)})"
                 }
                 return self.retain_dance(e)
@@ -6501,6 +6714,103 @@ struct CgcGen {
     }
 
 
+    // emit_nursery lowers `nursery { … }`: an EmNurseryRun opened on this block's stack, each inner `spawn`
+    // launching its task's OS thread NOW (spawn-at-spawn-time, so a `spawn worker(ch); loop { try_recv(ch) }`
+    // transport works), then em_nursery_join seals + joins at the close. The body's owned locals drop BEFORE
+    // the join, exactly like stage-0's emit_nursery (src/cgen_c.c). The nursery id is pushed so an inner spawn
+    // finds its enclosing run. (OFI-218 — M:N parallelism codegen for the self-hosted C-emit.)
+    fn emit_nursery(mut self, body: [ps.Stmt]) {
+        let id = self.fresh_var()
+        println("{self.ind()}\{")
+        self.indent = self.indent + 1
+        println("{self.ind()}EmNurseryRun _nr{id}; em_nursery_open(&_nr{id}, em_task_main);")
+        self.nursery_ids.append(id)
+        self.emit_block_stmts(body)
+        self.nursery_ids = pop_int(self.nursery_ids)
+        println("{self.ind()}em_nursery_join(&_nr{id});")
+        self.indent = self.indent - 1
+        println("{self.ind()}\}")
+    }
+
+
+    // emit_spawn lowers `spawn f(args)` inside a nursery: an owned Value array of the arguments (each moved in
+    // via emit_consume_arg — the task OWNS its args, a value struct is boxed, a shared channel passed as-is),
+    // then em_nursery_spawn records + starts the task on the enclosing run. The callee resolves to its em_fn
+    // slot (free / method / module-qualified / UFCS), the same index em_invoke dispatches on. Mirrors stage-0's
+    // emit_spawn; a witnessed (bounded-generic) spawn is a loud coverage hole, not a silent miscompile.
+    fn emit_spawn(mut self, call: ps.Expr) {
+        if self.nursery_ids.len() <= 0 {
+            cgc_internal_error("native backend: spawn outside a nursery")
+        }
+        let id = self.nursery_ids[self.nursery_ids.len() - 1]
+        match call {
+            case ECall(callee, args) {
+                var fi = 0 - 1
+                match callee.value {
+                    case EIdent(name) {
+                        fi = self.fn_index(name)
+                    }
+                    case EGet(object, mname) {
+                        let sid = self.struct_sid_any(object.value)
+                        if sid >= 0 {
+                            fi = self.fn_index("{self.st.names[sid]}.{mname}")
+                        }
+                        if fi < 0 {
+                            fi = self.qual_free_fi(object.value, mname, args.len())
+                        }
+                        if fi < 0 {
+                            fi = self.fn_index(mname)
+                        }
+                    }
+                    case _ {
+                    }
+                }
+                if fi < 0 {
+                    cgc_internal_error("native backend (M4): spawn of an unresolved callable")
+                }
+                let argc = args.len()
+                var alloc = argc
+                if alloc < 1 {
+                    alloc = 1
+                }
+                println("{self.ind()}\{")
+                self.indent = self.indent + 1
+                println("{self.ind()}Value *_a = malloc({alloc} * sizeof(Value));")
+                var i = 0
+                loop {
+                    if i >= argc {
+                        break
+                    }
+                    println("{self.ind()}_a[{i}] = {self.emit_spawn_arg(args[i])};")
+                    i = i + 1
+                }
+                println("{self.ind()}em_nursery_spawn(&_nr{id}, {fi}, _a, {argc});")
+                self.indent = self.indent - 1
+                println("{self.ind()}\}")
+            }
+            case _ {
+                cgc_internal_error("native backend (M4): spawn of a non-call expression")
+            }
+        }
+    }
+
+
+    // emit_spawn_arg renders one `spawn f(args)` argument: the task takes OWNERSHIP of every arg, so a value
+    // struct is BOXED into the erased Value slot, and everything else is own_into_slot'd — which at runtime
+    // RETAINS a shareable (a string / enum / CHANNEL the caller keeps: a channel handed to several spawns +
+    // the main loop stays balanced), CLONES a unique-owner (array / plain struct → the task's own copy), and
+    // passes a scalar by value. Mirrors stage-0's emit_value_arg feeding an owned task-arg slot.
+    fn emit_spawn_arg(mut self, e: ps.Expr) -> string {
+        let cvsid = self.struct_sid_of(e)
+        if cvsid >= 0 {
+            let fc = self.st.field_count(cvsid)
+            let tmp = self.fresh_var()
+            return "(\{ em_s{cvsid} v{tmp} = {self.emit_expr(e)}; em_box_struct(&g_em, {cvsid}, (Value*)&v{tmp}, {fc}); \})"
+        }
+        return "own_into_slot(&g_em, {self.emit_expr(e)})"
+    }
+
+
     // emit_if renders `if (em_truthy(<cond>)) { … }` with an optional `else { … }` / `else if …` chain.
     // `leading` is the prefix before `if` — the indent for a top-level if, "" when chained after `} else `.
     fn emit_if(mut self, cond: ps.Expr, then_blk: [ps.Stmt], els: [ps.Stmt], leading: string) {
@@ -7158,8 +7468,8 @@ struct CgcGen {
                             if resolved_boxed >= 0 {
                                 self.set_last_struct(resolved_boxed)   // a BOXED-struct container payload (rc struct) → `r.field` resolves
                             }
-                            if self.en.payload_refc(cases[ci].pattern.variant, bi) || self.subject_is_gopt(value.value) {
-                                self.set_last_refc(true)      // a refcounted (string/enum) payload, OR an erased generic-Option<T> payload (OFI-205) → own_into_slot on consume
+                            if self.en.payload_refc(cases[ci].pattern.variant, bi) || self.subject_is_gopt(value.value) || self.subject_is_gopt_call(value.value) {
+                                self.set_last_refc(true)      // a refcounted (string/enum) payload, an erased generic-Option<T> PARAM payload (OFI-205), OR an erased gopt-returning-CALL payload (OFI-218) → own_into_slot on consume
                             }
                             if pa {
                                 // a `[Struct]` / `[Box<T>]` payload: resolve the element struct sid via sid_of_ty
@@ -7309,6 +7619,12 @@ struct CgcGen {
                     case _ {
                     }
                 }
+            }
+            case SNursery(body, line) {
+                self.emit_nursery(body)
+            }
+            case SSpawn(call) {
+                self.emit_spawn(call.value)
             }
             case _ {
             }
@@ -7656,7 +7972,7 @@ fn is_em_native_id(nid: int) -> bool {
 // native_ret_kind classifies a native builtin's OWNED return: -3 a string, -2 an array, -1 scalar/unit
 // (not droppable), -4 = not a builtin. Drives owned-binding tracking for `let x = byte_slice(…)`.
 fn native_ret_kind(name: string) -> int {
-    if name == "read_line" || name == "read_file" || name == "env" || name == "from_char_code" || name == "byte_slice" || name == "concat" || name == "from_bytes" || name == "list_dir" || name == "clipboard_get" {
+    if name == "read_line" || name == "read_file" || name == "env" || name == "from_char_code" || name == "byte_slice" || name == "concat" || name == "from_bytes" || name == "list_dir" || name == "clipboard_get" || name == "dropped_files" {
         return 0 - 3
     }
     if name == "args" {
@@ -7811,7 +8127,7 @@ fn enum_payload_generic(ty: ps.Ty, generics: [ps.GenericParam]) -> bool {
 
 
 fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fnres: FnResolve, fn_ret_kind: [int], fn_ret_render: [int], fn_ret_opt_param: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab, lambda_start: int, fn_ret_det_arg: [int], fn_ret_det_elem: [bool], fn_ret_lam_arg: [int], fn_ret_lam_in: [int], fn_hof_srcs: [int], fn_param_gen_mask: [int], lam_pstr: [bool], lam_pkind: [int], extern_names: [string], extern_ret_kind: [int], extern_ret_str: [bool]) -> [int] {
-    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_is_array: [], sc_elem_elem_kind: [], sc_elem_struct: [], sc_refc: [], sc_tyvar: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, res: fnres, fn_ret_kind: fn_ret_kind, fn_ret_render: fn_ret_render, fn_ret_opt_param: fn_ret_opt_param, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_owner: owner_sid, cur_tp_pname: [], cur_tp_tname: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, fn_param_gen_mask: fn_param_gen_mask, lam_recs: [], extern_names: extern_names, extern_ret_kind: extern_ret_kind, extern_ret_str: extern_ret_str }
+    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_is_array: [], sc_elem_elem_kind: [], sc_elem_struct: [], sc_refc: [], sc_tyvar: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, res: fnres, fn_ret_kind: fn_ret_kind, fn_ret_render: fn_ret_render, fn_ret_opt_param: fn_ret_opt_param, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_owner: owner_sid, cur_tp_pname: [], cur_tp_tname: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, fn_param_gen_mask: fn_param_gen_mask, lam_recs: [], extern_names: extern_names, extern_ret_kind: extern_ret_kind, extern_ret_str: extern_ret_str, nursery_ids: [] }
     // For a lifted lambda, lam_pstr/lam_pkind type its OWN params (the trailing params after the captures) so
     // the body dispatches `.len()`/concat/arithmetic like stage-0 (the C signature stays all-`Value`). Captures
     // lead and stay untyped. caps = (non-self param count) − (own params typed) — OFI-206 follow-on.
@@ -8691,7 +9007,8 @@ fn emit_program(decls: [ps.Decl], decl_mods: [string], imp_alias: [string], imp_
     let fn_names = build_fn_names(decls)
     let fn_param_counts = build_fn_param_counts(decls)   // per-em_fn declared param count (colliding-name arity disambiguation)
     let fn_modules = build_fn_modules(decls, decl_mods)  // per-em_fn source module (module-aware qualified resolution)
-    let fnres = FnResolve { param_counts: fn_param_counts, modules: fn_modules, imp_alias: imp_alias, imp_path: imp_path }
+    let fn_ret_gopt = build_fn_ret_gopt(decls)           // per-em_fn: returns a generic Option/Result (erased-payload own_into_slot)
+    let fnres = FnResolve { param_counts: fn_param_counts, modules: fn_modules, ret_gopt: fn_ret_gopt, imp_alias: imp_alias, imp_path: imp_path }
     let fn_ret_kind = build_fn_ret_kinds(decls)
     let fn_ret_render = build_fn_ret_render(decls)
     let fn_ret_opt_param = build_ret_opt_param(decls)   // per-method Option/Result generic-payload param index
@@ -8720,7 +9037,13 @@ fn emit_program(decls: [ps.Decl], decl_mods: [string], imp_alias: [string], imp_
     println("#include \"ember_rt.h\"")
     println("")
     emit_struct_preamble(stab, fn_names)       // struct typedefs + runtime metadata (nothing if no structs)
-    println("static EmberRt g_em;")
+    // A concurrent program (spawn/nursery) gets a PER-WORKER heap: `g_em` is thread-local so each spawned
+    // task's OS thread bump-allocates into its own arena (lock-free), not a shared one. Mirrors stage-0.
+    if program_concurrent(decls) {
+        println("_Thread_local EmberRt g_em;")
+    } else {
+        println("static EmberRt g_em;")
+    }
     println("")
     // forward declarations, in em_fn_N order
     var fwd = 0
@@ -8816,6 +9139,25 @@ fn emit_program(decls: [ps.Decl], decl_mods: [string], imp_alias: [string], imp_
     println("    return INT_VAL(0);")
     println("\}")
     println("")
+    // A concurrent program's spawn trampoline: each task's OS thread enters here, wires up its THREAD-LOCAL
+    // g_em (its own struct table + invoke hook + the enclosing nursery/slot), runs the task via em_invoke, then
+    // em_merge folds its arena back at the join. Emitted only when the program uses spawn/nursery. Mirrors stage-0.
+    if program_concurrent(decls) {
+        println("static void *em_task_main(void *p) \{")
+        println("    EmTask *t = (EmTask *)p;")
+        if stab.names.len() > 0 {
+            println("    g_em.structs = em_structs;")
+            println("    g_em.struct_count = {stab.struct_count()};")
+        }
+        println("    g_em.invoke = em_invoke;")
+        println("    em_cur_nursery = t->nursery;")
+        println("    em_cur_slot = t->slot;")
+        println("    (void)em_invoke(&g_em, t->fn_index, t->args);")
+        println("    em_merge(&g_em);")
+        println("    return NULL;")
+        println("\}")
+        println("")
+    }
     // the function bodies. Each declared body returns the param typings of any lambda it lifts (discovered at
     // its HOF call sites); we accumulate them, then route each into the matching lifted body below (OFI-206).
     var b = 0
