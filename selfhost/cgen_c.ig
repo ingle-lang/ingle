@@ -4945,6 +4945,13 @@ struct CgcGen {
                         let ix = self.emit_expr(args[0])
                         return "em_array_remove_at(&g_em, {recv}, {ix})"
                     }
+                    if mname == "slice" {
+                        // arr.slice(lo, hi) → a fresh OWNED copy of the [lo, hi) range. Receiver + bounds borrows.
+                        let recv = self.emit_expr(object.value)
+                        let lo = self.emit_expr(args[0])
+                        let hi = self.emit_expr(args[1])
+                        return "em_array_slice(&g_em, {recv}, {lo}, {hi})"
+                    }
                     if mname == "clone" {
                         // arr.clone() → a DEEP copy. An index read of an aggregate element (`m[i]` of a `[[T]]`)
                         // is ALREADY an owned clone (em_index materialises) → emit as-is; a fresh owned temp is
@@ -5940,6 +5947,10 @@ struct CgcGen {
                         // a string→array method `s.bytes()` / `s.chars()` / `s.split(sep)` (an owned array).
                         if self.is_string_expr(object.value) {
                             return mname == "bytes" || mname == "chars" || mname == "split"
+                        }
+                        // an array→array method: `arr.slice(lo, hi)` / `arr.clone()` return arrays.
+                        if self.is_array_expr(object.value) {
+                            return mname == "slice" || mname == "clone"
                         }
                         let sid = self.struct_sid_any(object.value)   // an array-returning struct METHOD `self.parse_params()`
                         if sid >= 0 {
