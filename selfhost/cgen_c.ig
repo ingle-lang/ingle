@@ -2112,6 +2112,24 @@ struct StructTab {
     }
 
 
+    // struct_has_inline_value_field reports whether any DECLARED field of `sid` is a nested inline value struct
+    // (AEK_INLINE_STRUCT) — such a struct must be built with em_struct_empty + em_struct_put_inline, not varargs.
+    fn struct_has_inline_value_field(self, sid: int) -> bool {
+        let declared = self.struct_declared_field_count(sid)
+        var f = 0
+        loop {
+            if f >= declared {
+                break
+            }
+            if self.fst_of(self.flat_index(sid, f)) >= 0 {
+                return true
+            }
+            f = f + 1
+        }
+        return false
+    }
+
+
     // field_size / total_size compute the PACKED byte size of a field and of a whole struct: a nested value-
     // struct field occupies its struct's total_size (packed inline), a scalar its size_of_aek.
     fn field_size(self, flat: int) -> int {
@@ -3681,6 +3699,28 @@ struct CgcGen {
     // (boxed) struct array (em_index materialises an owned COPY), or a CALL returning a refcounted (boxed)
     // struct. Consuming such a field read in a `+` owns it (own_into_slot) WITHOUT the borrow retain-dance
     // (emit_concat_operand's `!drop_object` gate).
+    // object_is_value_read reports whether an expression that PRODUCES a value struct renders to a raw boxed
+    // Value (rather than a direct em_s C place) — so a `.fN` member access on it must first UNBOX into an em_s
+    // aggregate (a `Value` has no `.fN`). The boxed-read cases: a value-struct field of a BOXED struct
+    // (`s.vsf` → em_enum_field materialises it) and an ARRAY element (`arr[i]` → em_index materialises it) —
+    // both an OWNED copy, dropped after the copy-out. NOT a boxed read: a nested value-struct field of a
+    // VALUE struct (`v.inner` → a direct nested `.f` member, an em_s in place), a local/param, a struct
+    // literal, or a value-struct-returning call — those read `.fN` straight.
+    fn object_is_value_read(self, e: ps.Expr) -> bool {
+        match e {
+            case EGet(object, name) {
+                return self.struct_sid_of(object.value) < 0   // object is a BOXED struct → its field is em_enum_field'd out as a Value
+            }
+            case EIndex(object, index) {
+                return true                                    // em_index materialises the element as a boxed Value
+            }
+            case _ {
+                return false
+            }
+        }
+    }
+
+
     fn object_is_owning_temp(self, e: ps.Expr) -> bool {
         match e {
             case EIndex(object, index) {
@@ -3819,6 +3859,16 @@ struct CgcGen {
                 if vsid >= 0 {
                     let fidx = self.st.field_index(vsid, name)
                     if fidx >= 0 {
+                        if self.object_is_value_read(object.value) {
+                            // A value struct read from an ERASED slot — a boxed-struct FIELD (`s.vsf.x`, via
+                            // em_enum_field) or an ARRAY element (`arr[i].x`, via em_index) — renders to a raw
+                            // Value, so it is UNBOXED into an em_s aggregate first (a `Value` has no `.fN`). The
+                            // read materialised an OWNED copy, dropped after the copy-out. Mirrors stage-0. (OFI-218)
+                            let fc = self.st.field_count(vsid)
+                            let ov = self.fresh_var()
+                            let rv = self.fresh_var()
+                            return "(\{ Value v{ov} = {self.emit_expr(object.value)}; em_s{vsid} v{rv}; em_unbox_struct(&g_em, {vsid}, v{ov}, (Value*)&v{rv}, {fc}); drop_value(&g_em, v{ov}); v{rv}; \}).f{fidx}"
+                        }
                         return "{self.emit_expr(object.value)}.f{fidx}"
                     }
                 }
@@ -4103,12 +4153,41 @@ struct CgcGen {
             }
             return s + " \})"
         }
+        let declared = self.st.struct_declared_field_count(sid)
+        // A boxed struct with a NESTED INLINE value-struct field cannot be built by varargs em_struct — an
+        // inline field is packed bytes, not one Value (runtime.c). Build-then-place: em_struct_empty, then
+        // em_struct_put_inline (a BOXED em_s, unpacked into the inline slot) / em_struct_put_field per field.
+        // Mirrors stage-0. Bounded generics carry no inline value fields, so they keep the varargs path. OFI-218.
+        if self.st.struct_is_bounded(sid) == false && self.st.struct_has_inline_value_field(sid) {
+            let bv = self.fresh_var()
+            var s = "(\{ Value v{bv} = em_struct_empty(&g_em, {sid}); "
+            var f = 0
+            loop {
+                if f >= declared {
+                    break
+                }
+                let flat = self.st.flat_index(sid, f)
+                let fname = self.st.f_name[flat]
+                let fpos = self.slit_index(fields, fname)
+                if fpos >= 0 {
+                    let ist = self.st.fst_of(flat)
+                    if ist >= 0 {
+                        let ifc = self.st.field_count(ist)
+                        let iv = self.fresh_var()
+                        s = s + "em_struct_put_inline(&g_em, v{bv}, {f}, (\{ em_s{ist} v{iv} = {self.emit_expr(fields[fpos].value)}; em_box_struct(&g_em, {ist}, (Value*)&v{iv}, {ifc}); \})); "
+                    } else {
+                        s = s + "em_struct_put_field(&g_em, v{bv}, {f}, {self.emit_field_consume(sid, fname, fields[fpos].value)}); "
+                    }
+                }
+                f = f + 1
+            }
+            return s + "v{bv}; \})"
+        }
         // BOXED struct → em_struct(&g_em, <sid>, <fcount>, f0, f1, …) — a heap ObjStruct whose fields are
         // dropped by drop_value. DECLARED fields in order (a field value is CONSUMED — an owned binding MOVED
         // in, a scalar / fresh temp as-is); then, for a BOUNDED generic, the hidden witness records are
         // appended (fcount already counts them, via field_count). OFI-174.
         var s = "em_struct(&g_em, {sid}, {fc}"
-        let declared = self.st.struct_declared_field_count(sid)
         var f = 0
         loop {
             if f >= declared {
@@ -4155,7 +4234,17 @@ struct CgcGen {
             if i >= args.len() {
                 break
             }
-            s = s + ", " + self.emit_consume_arg(args[i])   // em_enum CONSUMES its payloads (an owned one is moved in)
+            let vsid = self.struct_sid_of(args[i])
+            if vsid >= 0 {
+                // An enum payload slot is an erased boxed Value (em_enum stores each field AEK_BOXED), so a
+                // VALUE-struct payload must be PACKED into a heap ObjStruct — a raw em_s aggregate would be read
+                // back as one 16-byte Value. `case V(p)` unboxes it symmetrically. Mirrors stage-0. (OFI-218)
+                let fc = self.st.field_count(vsid)
+                let tmp = self.fresh_var()
+                s = s + ", (\{ em_s{vsid} v{tmp} = {self.emit_expr(args[i])}; em_box_struct(&g_em, {vsid}, (Value*)&v{tmp}, {fc}); \})"
+            } else {
+                s = s + ", " + self.emit_consume_arg(args[i])   // em_enum CONSUMES its payloads (an owned one is moved in)
+            }
             i = i + 1
         }
         return s + ")"
@@ -6751,6 +6840,20 @@ struct CgcGen {
                                     }
                                     resolved_boxed = csid
                                 }
+                            }
+                            if declared_payload_sid >= 0 && self.st.is_value(declared_payload_sid) {
+                                // A CONCRETE value-struct payload (`case Dot(p)` where `p: Point`): the payload is
+                                // BOXED in the enum, so it must be UNBOXED into a real `em_s` aggregate before any
+                                // `p.field` read — otherwise `p.x` lowers to `<Value>.f0`, which is not valid C.
+                                // Mirrors the erased-generic recovery path (just above) for the declared-sid case;
+                                // stage-0 reaches the same shape by monomorphising the payload. (OFI-218)
+                                let fc = self.st.field_count(declared_payload_sid)
+                                let bv = self.fresh_var()
+                                println("{self.ind()}em_s{declared_payload_sid} v{bv}; em_unbox_struct(&g_em, {declared_payload_sid}, em_enum_field(&g_em, v{sv}, {bi}), (Value*)&v{bv}, {fc});")
+                                self.push(cases[ci].pattern.bindings[bi], "v{bv}", 0 - 1, false, false, false, 0 - 1)
+                                self.set_last_struct(declared_payload_sid)
+                                bi = bi + 1
+                                continue
                             }
                             let bv = self.fresh_var()
                             println("{self.ind()}Value v{bv} = em_enum_field(&g_em, v{sv}, {bi});")
