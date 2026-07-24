@@ -284,6 +284,83 @@ fn build_extern_ret_kinds(decls: [ps.Decl]) -> [int] {
 }
 
 
+// build_extern_ret_str marks each declared extern that returns a `string` (parallel to build_extern_names),
+// so `let o = proc_stdout(h)` / `let body = http_get(url)` binds an OWNED string (dropped at scope exit) and
+// `o.len()` resolves to em_str_len. The registry copies+owns such returns (g_sigs' returns-owned flag).
+fn build_extern_ret_str(decls: [ps.Decl]) -> [bool] {
+    var out: [bool] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DExtern(abi, fns) {
+                var e = 0
+                loop {
+                    if e >= fns.len() {
+                        break
+                    }
+                    out.append(fns[e].ret.len() > 0 && is_string_ty(fns[e].ret[0]))
+                    e = e + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
+// build_fn_ret_render is each body-bearing fn's return-type INTERPOLATION render-kind (parallel to
+// build_fn_names): 0 int · 8 f32 · 9 float · 10 bool · 1..7 sized. So a hole over a call `{r.ok()}` renders
+// its bool as "true"/"false" (tag 10), not "1"/"0" — the checker stamps this per hole; the self-hosted
+// C-emit recovers it from the callee's declared return type. Distinct from fn_ret_kind (a numeric WIDTH).
+fn build_fn_ret_render(decls: [ps.Decl]) -> [int] {
+    var out: [int] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DFn(f) {
+                if f.has_body {
+                    out.append(fn_ret_render_kind(f))
+                }
+            }
+            case DStruct(name, generics, impls, fields, methods, kind) {
+                var mi = 0
+                loop {
+                    if mi >= methods.len() {
+                        break
+                    }
+                    if methods[mi].has_body {
+                        out.append(fn_ret_render_kind(methods[mi]))
+                    }
+                    mi = mi + 1
+                }
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
+// fn_ret_render_kind is a fn's return-type render-kind (0 for a unit/non-numeric return).
+fn fn_ret_render_kind(f: ps.FnDecl) -> int {
+    if f.ret.len() == 0 {
+        return 0
+    }
+    return render_kind_of_ty(f.ret[0])
+}
+
+
 // ---- generic return-type resolution (OFI-206 follow-on) — the C-emit mirror of the VM's gret machinery -
 // A generic fn returning a bare type-param T or `[T]` (`reduce<T,U>(…, init:U, …)->U`, `sort<T>(xs:[T],…)->[T]`)
 // has an unknown static return kind (ty_scalar_kind(T) = -1). We resolve T at a call site from the value
@@ -2556,6 +2633,7 @@ struct CgcGen {
     en: EnumTab                // the declared-enum table (variant -> enum id / tag / payload arity)
     fn_names: [string]         // every body-bearing fn in em_fn_N order (free fns + `Struct.method`)
     fn_ret_kind: [int]         // ...each fn's return width-kind (for a `let x = f()` scalar binding)
+    fn_ret_render: [int]       // ...each fn's return-type interp render-kind (so `{r.ok()}` renders bool, not int)
     fn_ret_str: [bool]         // ...does each fn return a string (a `let x = f()` owned binding)?
     fn_ret_array: [bool]       // ...does each fn return an array (a `let x = f()` owned array binding)?
     fn_ret_elem_kind: [int]    // ...for an array-returning fn: its element scalar kind (so `f()[i]` is a scalar), else -1
@@ -2586,6 +2664,7 @@ struct CgcGen {
     extern_names: [string]     // every DECLARED `extern "c"` fn name (no em_fn slot — a side table, since cgen_c
                                // has no body for them); an FFI call resolves its return type through this (P6 FFI)
     extern_ret_kind: [int]     // ...each extern's return width-kind (so `let s = sin(x)` binds an unboxed double)
+    extern_ret_str: [bool]     // ...does each extern return a `string` (so `let o = proc_stdout(h)` owns + `.len()`s)?
 
 
     fn fresh_var(mut self) -> int {
@@ -3258,6 +3337,14 @@ struct CgcGen {
                                 return self.fn_ret_struct[fi]
                             }
                         }
+                        // A MODULE-QUALIFIED free call `proc.run(…)` whose return is a (boxed/resource) struct —
+                        // the receiver is an import alias, not a struct binding, so resolve `run` in the merged
+                        // fn table and read its return struct sid, so `let r = proc.run(cmd)` tracks `r` as a Run
+                        // and `r.code()` dispatches. Mirrors emit_call's qual_free_fi path.
+                        let qfi = self.qual_free_fi(object.value, mname)
+                        if qfi >= 0 {
+                            return self.fn_ret_struct[qfi]
+                        }
                     }
                     case _ {
                     }
@@ -3584,6 +3671,34 @@ struct CgcGen {
             case EIndex(object, index) {
                 // a float/bool/sized ARRAY element hole (`{chunk.const_float[i]}`) renders at its element kind.
                 return aek_to_render_kind(self.index_elem_aek(object.value))
+            }
+            case ECall(callee, args) {
+                // a hole over a CALL `{r.ok()}` / `{is_ready()}` renders at the callee's return-type kind, so a
+                // bool method prints "true"/"false" not "1"/"0". Resolve free / method / module-qualified calls.
+                match callee.value {
+                    case EIdent(name) {
+                        let fi = self.fn_index(name)
+                        if fi >= 0 {
+                            return self.fn_ret_render[fi]
+                        }
+                    }
+                    case EGet(object, mname) {
+                        let rsid = self.struct_sid_any(object.value)
+                        if rsid >= 0 {
+                            let fi = self.fn_index("{self.st.names[rsid]}.{mname}")
+                            if fi >= 0 {
+                                return self.fn_ret_render[fi]
+                            }
+                        }
+                        let qfi = self.qual_free_fi(object.value, mname)
+                        if qfi >= 0 {
+                            return self.fn_ret_render[qfi]
+                        }
+                    }
+                    case _ {
+                    }
+                }
+                return 0
             }
             case _ {
                 return 0
@@ -4065,6 +4180,9 @@ struct CgcGen {
                 if self.is_string_expr(object.value) {
                     if mname == "len" {
                         return "em_str_len({self.emit_expr(object.value)})"
+                    }
+                    if mname == "char_count" {
+                        return "em_str_char_count({self.emit_expr(object.value)})"   // code-point count (borrow recv)
                     }
                     if mname == "bytes" {
                         return "em_str_bytes(&g_em, {self.emit_expr(object.value)})"
@@ -4949,6 +5067,10 @@ struct CgcGen {
                         }
                         if native_ret_kind(name) == 0 - 3 {
                             return true                  // a string-returning native builtin (byte_slice, read_file, …)
+                        }
+                        let ei = self.extern_index(name)
+                        if ei >= 0 {
+                            return self.extern_ret_str[ei]   // a string-returning extern (proc_stdout / http_get / …)
                         }
                     }
                     case EGet(object, mname) {
@@ -6337,8 +6459,8 @@ fn enum_payload_generic(ty: ps.Ty, generics: [ps.GenericParam]) -> bool {
 }
 
 
-fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_ret_kind: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab, lambda_start: int, fn_ret_det_arg: [int], fn_ret_det_elem: [bool], fn_ret_lam_arg: [int], fn_ret_lam_in: [int], fn_hof_srcs: [int], fn_param_gen_mask: [int], lam_pstr: [bool], lam_pkind: [int], extern_names: [string], extern_ret_kind: [int]) -> [int] {
-    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_is_array: [], sc_elem_elem_kind: [], sc_elem_struct: [], sc_refc: [], sc_tyvar: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, fn_param_gen_mask: fn_param_gen_mask, lam_recs: [], extern_names: extern_names, extern_ret_kind: extern_ret_kind }
+fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_ret_kind: [int], fn_ret_render: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab, lambda_start: int, fn_ret_det_arg: [int], fn_ret_det_elem: [bool], fn_ret_lam_arg: [int], fn_ret_lam_in: [int], fn_hof_srcs: [int], fn_param_gen_mask: [int], lam_pstr: [bool], lam_pkind: [int], extern_names: [string], extern_ret_kind: [int], extern_ret_str: [bool]) -> [int] {
+    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_is_array: [], sc_elem_elem_kind: [], sc_elem_struct: [], sc_refc: [], sc_tyvar: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_render: fn_ret_render, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, fn_param_gen_mask: fn_param_gen_mask, lam_recs: [], extern_names: extern_names, extern_ret_kind: extern_ret_kind, extern_ret_str: extern_ret_str }
     // For a lifted lambda, lam_pstr/lam_pkind type its OWN params (the trailing params after the captures) so
     // the body dispatches `.len()`/concat/arithmetic like stage-0 (the C signature stays all-`Value`). Captures
     // lead and stay untyped. caps = (non-self param count) − (own params typed) — OFI-206 follow-on.
@@ -7193,6 +7315,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
     let total = fn_count(decls)
     let fn_names = build_fn_names(decls)
     let fn_ret_kind = build_fn_ret_kinds(decls)
+    let fn_ret_render = build_fn_ret_render(decls)
     let fn_ret_str = build_fn_ret_str(decls)
     let fn_ret_array = build_fn_ret_array(decls)
     let fn_ret_elem_kind = build_fn_ret_elem_kinds(decls)
@@ -7210,6 +7333,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
     let fn_param_gen_mask = build_fn_param_gen_mask(decls)   // per-fn generic-borrow-param bitmask (OFI-176, F1)
     let extern_names = build_extern_names(decls)             // declared `extern "c"` fns (side table — P6 FFI)
     let extern_ret_kind = build_extern_ret_kinds(decls)      // ...and their declared return width-kinds
+    let extern_ret_str = build_extern_ret_str(decls)         // ...and which return an owned string
     let lc = build_lam_coll(decls)             // lifted lambdas, numbered `total + k` (OFI-206)
     let grand = total + lc.lams.len()                // total em_fn slots (declared + lambdas)
     println("// Generated by `inglec --emit=c` from {filename}. Do not edit.")
@@ -7329,7 +7453,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
         match decls[k] {
             case DFn(f) {
                 if f.has_body {
-                    let recs = emit_fn_body(f, b, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, eb, ei, extern_names, extern_ret_kind)
+                    let recs = emit_fn_body(f, b, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_render, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, eb, ei, extern_names, extern_ret_kind, extern_ret_str)
                     var ri = 0
                     loop {
                         if ri >= recs.len() {
@@ -7353,7 +7477,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
                         break
                     }
                     if methods[mi].has_body {
-                        let recs = emit_fn_body(methods[mi], b, true, owner, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, eb, ei, extern_names, extern_ret_kind)
+                        let recs = emit_fn_body(methods[mi], b, true, owner, stab, etab, fn_names, fn_ret_kind, fn_ret_render, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, lam_next, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, eb, ei, extern_names, extern_ret_kind, extern_ret_str)
                         var ri = 0
                         loop {
                             if ri >= recs.len() {
@@ -7407,7 +7531,7 @@ fn emit_program(decls: [ps.Decl], filename: string) {
             }
             pos = pos + 2 + np * 2
         }
-        let _drop = emit_fn_body(lc.lams[lb], total + lb, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, 0, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, ps, pk, extern_names, extern_ret_kind)
+        let _drop = emit_fn_body(lc.lams[lb], total + lb, false, 0 - 1, stab, etab, fn_names, fn_ret_kind, fn_ret_render, fn_ret_str, fn_ret_array, fn_ret_elem_kind, fn_ret_elem_struct, fn_ret_struct, fn_ret_enum, ctab, 0, fn_ret_det_arg, fn_ret_det_elem, fn_ret_lam_arg, fn_ret_lam_in, fn_hof_srcs, fn_param_gen_mask, ps, pk, extern_names, extern_ret_kind, extern_ret_str)
         b = b + 1
         if b < grand {
             println("")

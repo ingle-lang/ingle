@@ -130,15 +130,20 @@ fn is_builtin(name: string) -> bool {
 }
 
 
-// ffi_registry_names is the DEFAULT-profile hosted FFI registry — the extern "c" functions with a bytecode-VM
-// binding (src/cextern.c g_sigs, the entries NOT behind #if EMBER_GFX_HEADLESS/NET/SQLITE). An extern NOT in
-// this set is a DIRECT extern: native-only (no VM binding), and its params/return must be scalar or Ptr.
+// ffi_registry_names is the hosted FFI registry — the extern "c" functions with a runtime em_ffi binding
+// (src/cextern.c g_sigs). An extern NOT in this set is a DIRECT extern: native-only, and its params/return
+// must be scalar or Ptr (OFI-167). Stage-0's check.c is PROFILE-ADAPTIVE (it consults the #if-compiled
+// g_sigs), but the self-hosted compiler is ONE profile-agnostic binary, so it assumes the SUPERSET: the
+// default band (0-41, in every build) PLUS the net band http_* (EMBER_NET). Accepting a net extern the link
+// profile lacks fails loudly at LINK time (undefined symbol), never a silent miscompile. sqlite_*/web_* bands
+// follow when the self-hosted compiler targets those profiles.
 fn ffi_registry_names() -> [string] {
     return ["sin", "cos", "tan", "asin", "acos", "atan", "atan2", "exp", "log", "log2", "log10", "sinh", "cosh",
         "tanh", "cbrt", "trunc", "hypot", "fmod", "cvec2_len", "cvec2_dot", "cvec2_add", "cvec2_scale",
         "strlen", "strncmp", "fopen", "fread", "fwrite", "fclose", "proc_run", "proc_exit", "proc_stdout",
         "proc_stderr", "proc_free", "em_now_unix", "em_mkdir", "em_remove", "em_tcp_listen", "em_tcp_accept",
-        "em_tcp_connect", "em_recv", "em_send", "em_close"]
+        "em_tcp_connect", "em_recv", "em_send", "em_close",
+        "http_post", "http_get", "http_open", "http_next", "http_status", "http_close"]
 }
 
 

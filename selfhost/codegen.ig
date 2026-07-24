@@ -1278,6 +1278,71 @@ fn cextern_index(name: string) -> int {
     if name == "fclose" {
         return 27
     }
+    // proc band (std/proc — default build): child processes
+    if name == "proc_run" {
+        return 28
+    }
+    if name == "proc_exit" {
+        return 29
+    }
+    if name == "proc_stdout" {
+        return 30
+    }
+    if name == "proc_stderr" {
+        return 31
+    }
+    if name == "proc_free" {
+        return 32
+    }
+    // clock + filesystem (default build)
+    if name == "em_now_unix" {
+        return 33
+    }
+    if name == "em_mkdir" {
+        return 34
+    }
+    if name == "em_remove" {
+        return 35
+    }
+    // raw TCP band (default build)
+    if name == "em_tcp_listen" {
+        return 36
+    }
+    if name == "em_tcp_accept" {
+        return 37
+    }
+    if name == "em_tcp_connect" {
+        return 38
+    }
+    if name == "em_recv" {
+        return 39
+    }
+    if name == "em_send" {
+        return 40
+    }
+    if name == "em_close" {
+        return 41
+    }
+    // net band http_* (EMBER_NET, NO GFX_HEADLESS — the raylib/native profile). The GFX_HEADLESS web build
+    // inserts a web_* band BEFORE http_*, shifting these +5; matching that target-profile is future work.
+    if name == "http_post" {
+        return 42
+    }
+    if name == "http_get" {
+        return 43
+    }
+    if name == "http_open" {
+        return 44
+    }
+    if name == "http_next" {
+        return 45
+    }
+    if name == "http_status" {
+        return 46
+    }
+    if name == "http_close" {
+        return 47
+    }
     return 0 - 1
 }
 
