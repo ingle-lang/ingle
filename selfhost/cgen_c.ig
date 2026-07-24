@@ -7653,6 +7653,23 @@ struct CgcGen {
                                         println("{self.ind()}\{ Value v{pv} = {po}; Value v{bv} = em_enum_field(&g_em, v{pv}, {pfidx}); em_s{vsid} v{sv}; em_unbox_struct(&g_em, {vsid}, v{bv}, (Value*)&v{sv}, {fc}); drop_value(&g_em, v{bv}); v{sv}.f{fidx} = {val}; em_set_field(&g_em, v{pv}, {pfidx}, em_box_struct(&g_em, {vsid}, (Value*)&v{sv}, {fc})); \}")
                                     }
                                 }
+                                case EIndex(arr, idx) {
+                                    // A VALUE-STRUCT ARRAY-ELEMENT field write `arr[i].name = X` (the flex layout's
+                                    // `self.nodes[i].rw = w`): em_index materialises the packed element into a boxed
+                                    // copy, em_set_field mutates it, em_set_index writes it BACK into the packed array.
+                                    // Was silently DROPPED (object is an EIndex, not an EGet) — so EVERY solved rect
+                                    // stayed 0 and the whole widget layout collapsed to 0×0. Mirrors stage-0. (OFI-218)
+                                    if vsid >= 0 {
+                                        let fidx = self.st.field_index(vsid, name)
+                                        let av = self.fresh_var()
+                                        let iv = self.fresh_var()
+                                        let ev = self.fresh_var()
+                                        let ae = self.emit_expr(arr.value)
+                                        let ie = self.emit_expr(idx.value)
+                                        let val = self.emit_field_consume(vsid, name, value.value)
+                                        println("{self.ind()}\{ Value v{av} = {ae}; Value v{iv} = {ie}; Value v{ev} = em_index(&g_em, v{av}, v{iv}); em_set_field(&g_em, v{ev}, {fidx}, {val}); em_set_index(&g_em, v{av}, v{iv}, v{ev}); \}")
+                                    }
+                                }
                                 case _ {
                                 }
                             }
