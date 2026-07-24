@@ -5535,6 +5535,32 @@ struct CgcGen {
     // value_elem_struct resolves the ELEMENT struct sid of an array-valued initialiser that is a CALL
     // returning `[Struct]` (a free fn / struct method / module-qualified call), or -1. Lets `let xs = f()`
     // track `xs[i]` as a boxed struct (a borrow), matching the `[T]`-annotated path.
+    // array_elem_struct_of returns the ELEMENT struct sid of an array EXPRESSION: a binding/param array
+    // (lookup_elem_struct), a struct field array (field_elem_struct), or an array-returning call
+    // (value_elem_struct). -1 for a scalar/string-element or non-array. So `xs.clone()[i]` / `for x in xs`
+    // resolve x's fields.
+    fn array_elem_struct_of(self, e: ps.Expr) -> int {
+        match e {
+            case EIdent(aname) {
+                return self.lookup_elem_struct(aname)
+            }
+            case EGet(gobj, gname) {
+                let osid = self.struct_sid_any(gobj.value)
+                if osid >= 0 {
+                    return self.st.field_elem_struct(osid, gname)
+                }
+                return 0 - 1
+            }
+            case ECall(callee, args) {
+                return self.value_elem_struct(e)
+            }
+            case _ {
+            }
+        }
+        return 0 - 1
+    }
+
+
     fn value_elem_struct(self, value: ps.Expr) -> int {
         match value {
             case ECall(callee, args) {
@@ -5546,6 +5572,10 @@ struct CgcGen {
                         }
                     }
                     case EGet(object, mname) {
+                        // arr.clone() / arr.slice() → the SAME element struct as the receiver array.
+                        if (mname == "clone" || mname == "slice") && self.is_array_expr(object.value) {
+                            return self.array_elem_struct_of(object.value)
+                        }
                         let sid = self.struct_sid_any(object.value)
                         if sid >= 0 {
                             let fi = self.fn_index("{self.st.names[sid]}.{mname}")
@@ -6403,23 +6433,8 @@ struct CgcGen {
                         }
                         self.push(vname, "v{xv}", 0 - 1, false, false, false, 0 - 1)
                         // Type the loop variable by the iterable's ELEMENT struct so `t.field` resolves — a
-                        // `for t in turns` over a `[Turn]` binds each `t` as a Turn (binding/param via
-                        // lookup_elem_struct, field via field_elem_struct, else an array-returning call).
-                        var lv_esid = 0 - 1
-                        match iter.value {
-                            case EIdent(aname) {
-                                lv_esid = self.lookup_elem_struct(aname)
-                            }
-                            case EGet(gobj, gname) {
-                                let osid = self.struct_sid_any(gobj.value)
-                                if osid >= 0 {
-                                    lv_esid = self.st.field_elem_struct(osid, gname)
-                                }
-                            }
-                            case _ {
-                                lv_esid = self.value_elem_struct(iter.value)
-                            }
-                        }
+                        // `for t in turns` over a `[Turn]` binds each `t` as a Turn.
+                        let lv_esid = self.array_elem_struct_of(iter.value)
                         if lv_esid >= 0 {
                             self.set_last_struct(lv_esid)
                         }
