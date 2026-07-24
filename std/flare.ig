@@ -233,6 +233,15 @@ fn _code_scroll_geom(w: int, h: int, gutw: int, content_h: int, content_w: int, 
     if maxh < 0 {
         maxh = 0
     }
+    // A degenerate box (a not-yet-laid-out or hidden editor with box <= 0) has NO visible track, so it gets no
+    // scrollbar — otherwise `content > boxw` is spuriously true (any content beats a negative width) and the
+    // thumb math divides by a zero content extent. Guarding here keeps every caller's thumb division safe.
+    if boxh <= 0 {
+        vbar = false
+    }
+    if boxw <= 0 {
+        hbar = false
+    }
     return CodeScroll { vbar: vbar, hbar: hbar, boxh: boxh, boxw: boxw, maxv: maxv, maxh: maxh, vbw: vbw, hbh: hbh }
 }
 
