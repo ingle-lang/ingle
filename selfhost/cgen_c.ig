@@ -1741,6 +1741,11 @@ struct StructTab {
     f_elem_aek: [int]          // ...for an array field: its ELEMENT ArrayElemKind (so `s.field = []` builds em_array(0, aek)), else -1
     f_ty: [ps.Ty]              // flat field -> its DECLARED type node (WITH generic args, e.g. `Map<string, Rect>`) — the
                                // only place the value type of a generic-container field survives, for typing `s.field.get(k)`
+    f_tpname: [string]         // flat field -> its bare type-param NAME (`key: K` -> "K"), else "" — so a bounded-method call
+                               // on a type-param FIELD receiver (`e.key.eq(x)`) dispatches through the witness (OFI-174)
+    sg_owner: [int]            // struct-generics table: owning struct sid (one row per type-param of a generic struct)
+    sg_tparam: [string]        // ...that type-param's name
+    sg_bound: [string]         // ...its bounds joined by "+" ("" if unbounded; Copy already excluded) — bounded iff != ""
     inst_keys: [string]        // generic-struct INSTANCE keys (`Box<Ty>`, …); instance sid = names.len() + index
 
 
@@ -1787,6 +1792,21 @@ struct StructTab {
     }
 
 
+    // base_sid_of_ty resolves a TYPE to its DECLARED base struct sid: a generic `Map<K,V>` → the Map base sid
+    // (ignoring the args), a plain name via sid_of. -1 for a non-struct. Used for an ERASED construction whose
+    // instance sid is a bounded base or an uncollected type-param instantiation (`MapEntry<K,V>{…}`).
+    fn base_sid_of_ty(self, ty: ps.Ty) -> int {
+        match ty {
+            case TyGeneric(qual, name, args) {
+                return self.sid_of(name)
+            }
+            case _ {
+                return self.sid_of_ty(ty)
+            }
+        }
+    }
+
+
     // sid_of_ty resolves a TYPE to its runtime struct sid — a declared struct name, or a generic instance
     // `Box<Ty>` (via its collected instance key), or -1.
     fn sid_of_ty(self, ty: ps.Ty) -> int {
@@ -1795,9 +1815,9 @@ struct StructTab {
                 return self.sid_of(name)   // a module qualifier (`lx.Token`) resolves to the merged bare-name struct
             }
             case TyGeneric(qual, name, args) {
-                if qual != "" {
-                    return 0 - 1
-                }
+                // The qualifier is a MODULE ALIAS (`map.Map<…>`); the merged instance table keys by bare name
+                // (ty_key drops the qualifier), so ignore it — a qualified generic instance still resolves. A
+                // generic ENUM (Option<int>) isn't in inst_keys, so it stays -1 regardless.
                 return self.inst_sid_of(ty_key(ty))
             }
             case _ {
@@ -1914,6 +1934,71 @@ struct StructTab {
             return ps.TyName("", "")
         }
         return self.f_ty[flat]
+    }
+
+
+    // struct_is_bounded reports whether struct `sid` (resolved through its generic base) has any BOUNDED
+    // type-param — so it carries hidden $wit witness fields. Mirrors codegen.ig's struct_is_bounded (OFI-174).
+    fn struct_is_bounded(self, sid0: int) -> bool {
+        let sid = self.base_of(sid0)
+        var i = 0
+        loop {
+            if i >= self.sg_owner.len() {
+                break
+            }
+            if self.sg_owner[i] == sid && self.sg_bound[i] != "" {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+
+    // struct_declared_field_count is a struct's DECLARED field count EXCLUDING the hidden $wit witness fields —
+    // the flat index at which the witness fields begin (the base for a witness field index).
+    fn struct_declared_field_count(self, sid0: int) -> int {
+        let sid = self.base_of(sid0)
+        var n = 0
+        var i = 0
+        loop {
+            if i >= self.f_owner.len() {
+                break
+            }
+            if self.f_owner[i] == sid && self.f_name[i] != "$wit" {
+                n = n + 1
+            }
+            i = i + 1
+        }
+        return n
+    }
+
+
+    // field_tpname_of returns struct `sid`'s field `fname` bare type-param name (`e.key` on MapEntry<K,V> →
+    // "K"), or "". Drives witness dispatch on a type-param FIELD receiver.
+    fn field_tpname_of(self, sid0: int, fname: string) -> string {
+        let flat = self.field_flat(sid0, fname)
+        if flat < 0 {
+            return ""
+        }
+        return self.f_tpname[flat]
+    }
+
+
+    // struct_bound_of returns the "+"-joined bounds of struct `sid`'s type-param `tpname` ("Hash+Eq"), or "".
+    fn struct_bound_of(self, sid0: int, tpname: string) -> string {
+        let sid = self.base_of(sid0)
+        var i = 0
+        loop {
+            if i >= self.sg_owner.len() {
+                break
+            }
+            if self.sg_owner[i] == sid && self.sg_tparam[i] == tpname {
+                return self.sg_bound[i]
+            }
+            i = i + 1
+        }
+        return ""
     }
 
 
@@ -2281,6 +2366,10 @@ fn build_struct_tab(decls: [ps.Decl]) -> StructTab {
     var fes: [int] = []
     var fea: [int] = []
     var fty_arr: [ps.Ty] = []
+    var ftpn: [string] = []
+    var sgo: [int] = []
+    var sgt: [string] = []
+    var sgb: [string] = []
     var sid = 0
     var j = 0
     loop {
@@ -2298,6 +2387,7 @@ fn build_struct_tab(decls: [ps.Decl]) -> StructTab {
                     fo.append(sid)
                     fnm.append(fields[fi].name)
                     fty_arr.append(fty)                 // keep the declared field type (with generic args) for later
+                    ftpn.append(field_tpname_ty(fty, generics))   // "K" for a bare type-param field, else "" (witness dispatch)
                     fsd.append(field_struct_sid_g(fty, names))   // generic-aware: a Map<K,V> field → base Map sid (method dispatch)
                     let aek = array_elem_kind_ty(fty)   // 0 for string/array/struct (boxed), 1..11 for a scalar
                     fa.append(aek)
@@ -2315,6 +2405,38 @@ fn build_struct_tab(decls: [ps.Decl]) -> StructTab {
                     }
                     fi = fi + 1
                 }
+                // A BOUNDED generic struct carries one HIDDEN WITNESS FIELD per (type-param, bound), appended
+                // AFTER the declared fields (so declared indices are unchanged) — the method-dictionary for the
+                // concrete type-arg that a `k.hash()`/`k.eq(..)` call dispatches through. Copy is already split
+                // out (parser is_copy), so bounds holds only real interfaces. Mirrors codegen.ig:620-653 (OFI-174).
+                var gwi = 0
+                loop {
+                    if gwi >= generics.len() {
+                        break
+                    }
+                    sgo.append(sid)
+                    sgt.append(generics[gwi].name)
+                    sgb.append(join_plus(generics[gwi].bounds))
+                    var bwi = 0
+                    loop {
+                        if bwi >= generics[gwi].bounds.len() {
+                            break
+                        }
+                        fo.append(sid)
+                        fnm.append("$wit")
+                        fty_arr.append(ps.TyName("", ""))
+                        ftpn.append("")
+                        fsd.append(0 - 1)
+                        fa.append(0)                    // a boxed enum record (16-byte Value slot)
+                        fsc.append(false)
+                        far.append(false)
+                        fel.append(0 - 1)
+                        fes.append(0 - 1)
+                        fea.append(0 - 1)
+                        bwi = bwi + 1
+                    }
+                    gwi = gwi + 1
+                }
                 sid = sid + 1
             }
             case _ {
@@ -2323,7 +2445,133 @@ fn build_struct_tab(decls: [ps.Decl]) -> StructTab {
         j = j + 1
     }
     let insts = build_struct_instances(decls, names)
-    return StructTab { names: names, kinds: kinds, f_owner: fo, f_name: fnm, f_aek: fa, f_scalar: fsc, f_struct: fsd, f_array: far, f_elem: fel, f_elem_struct: fes, f_elem_aek: fea, f_ty: fty_arr, inst_keys: insts }
+    return StructTab { names: names, kinds: kinds, f_owner: fo, f_name: fnm, f_aek: fa, f_scalar: fsc, f_struct: fsd, f_array: far, f_elem: fel, f_elem_struct: fes, f_elem_aek: fea, f_ty: fty_arr, f_tpname: ftpn, sg_owner: sgo, sg_tparam: sgt, sg_bound: sgb, inst_keys: insts }
+}
+
+
+// owner_tparam_name returns the bare type-param NAME of `ty` if it names one of struct `owner_sid`'s type
+// params (`key: K` in a Map<K,V> method → "K"), else "". Detects a param typed as an OWNER type-param (whose
+// bounded methods dispatch through self's witness), distinct from the method's own generics.
+fn owner_tparam_name(ty: ps.Ty, st: StructTab, owner_sid: int) -> string {
+    if owner_sid < 0 {
+        return ""
+    }
+    match ty {
+        case TyName(qual, name) {
+            if qual == "" && st.struct_bound_of(owner_sid, name) != "" {
+                return name
+            }
+        }
+        case _ {
+        }
+    }
+    return ""
+}
+
+
+// field_tpname_ty returns a field's bare type-param NAME if its type is exactly one of the struct's generics
+// (`key: K` in `struct MapEntry<K, V>` -> "K"), else "". Enables witness dispatch on a type-param field
+// receiver (`e.key.eq(x)`). Mirrors codegen.ig's field_tpname.
+fn field_tpname_ty(fty: ps.Ty, generics: [ps.GenericParam]) -> string {
+    match fty {
+        case TyName(qual, name) {
+            if qual == "" && generic_named(generics, name) {
+                return name
+            }
+        }
+        case _ {
+        }
+    }
+    return ""
+}
+
+
+// join_plus joins interface bounds with "+" (["Hash", "Eq"] -> "Hash+Eq", [] -> ""), the sg_bound encoding.
+fn join_plus(bounds: [string]) -> string {
+    var s = ""
+    var i = 0
+    loop {
+        if i >= bounds.len() {
+            break
+        }
+        if i > 0 {
+            s = s + "+"
+        }
+        s = s + bounds[i]
+        i = i + 1
+    }
+    return s
+}
+
+
+// split_plus_list splits a "Hash+Eq" bound string back into ["Hash", "Eq"].
+fn split_plus_list(s: string) -> [string] {
+    var out: [string] = []
+    let bs = s.bytes()
+    var cur = ""
+    var i = 0
+    loop {
+        if i >= bs.len() {
+            break
+        }
+        if int(bs[i]) == 43 {              // '+'
+            out.append(cur)
+            cur = ""
+        } else {
+            cur = cur + from_char_code(int(bs[i]))
+        }
+        i = i + 1
+    }
+    if cur.len() > 0 {
+        out.append(cur)
+    }
+    return out
+}
+
+
+// ty_head_name returns a type's base NAME: `string`/`Rect` (TyName) or `Map` (TyGeneric base), else "".
+fn ty_head_name(ty: ps.Ty) -> string {
+    match ty {
+        case TyName(qual, name) {
+            return name
+        }
+        case TyGeneric(qual, name, args) {
+            return name
+        }
+        case _ {
+            return ""
+        }
+    }
+}
+
+
+// nth_targ_head returns the base NAME of a generic type's k-th type-argument (`Map<string,int>`, k=1 -> "int"),
+// or "" if `ty` is not generic or k is out of range. Avoids returning a borrowed [Ty] out of the match.
+fn nth_targ_head(ty: ps.Ty, k: int) -> string {
+    match ty {
+        case TyGeneric(qual, name, args) {
+            if k >= 0 && k < args.len() {
+                return ty_head_name(args[k])
+            }
+        }
+        case _ {
+        }
+    }
+    return ""
+}
+
+
+// iface_methods returns a built-in bound interface's method names, in declaration order (the witness record's
+// field order AND the CALL_INDIRECT method index): Hash -> ["hash"], Eq -> ["eq"]. A USER interface's methods
+// would come from its DInterface decl — deferred (the stdlib's bounded structs use only Hash/Eq). OFI-174.
+fn iface_methods(iface: string) -> [string] {
+    if iface == "Hash" {
+        return ["hash"]
+    }
+    if iface == "Eq" {
+        return ["eq"]
+    }
+    return []
 }
 
 
@@ -2762,6 +3010,10 @@ struct CgcGen {
     cur_gopt: [string]         // param names whose type is a GENERIC Option/Result (Some/Ok payload is an erased
                                // type param T) — so a `case Some(v)` payload binds as a refcounted borrow
                                // (own_into_slot on return), matching stage-0's erased-generic ownership (OFI-205)
+    cur_owner: int             // the current method's OWNER struct sid (-1 for a free fn) — the witness fields live
+                               // on `self` of this struct, so a bounded-method call reads em_enum_field(self, idx)
+    cur_tp_pname: [string]     // param names typed as one of the owner's TYPE-PARAMS (`key: K`) — a bounded-method
+    cur_tp_tname: [string]     // ...call on such a param dispatches through a witness; parallel tparam name ("K")
     cur_lambda: int            // the em_fn index of the NEXT lambda this body lifts (fn_count + prior lambdas),
                                // incremented at each `em_closure` site so a lambda VALUE gets its lifted slot (OFI-206)
     fn_ret_det_arg: [int]      // ...per em_fn: the value-arg index determining a bare-`T`/`[T]` return (else -1),
@@ -3278,10 +3530,132 @@ struct CgcGen {
                     }
                 }
             }
+            case EIndex(arr, idx) {
+                // An ARRAY-element scrutinee `self.buckets[i]` of a `[Option<MapEntry>]` field: the Some payload
+                // is the array's element Option/Result payload (MapEntry). Resolve the field's declared element
+                // type and extract the enum payload. (Map.get matches self.buckets[i].)
+                match arr.value {
+                    case EGet(obj, fname) {
+                        let osid = self.struct_sid_any(obj.value)
+                        if osid >= 0 {
+                            return self.option_payload_base_sid(elem_ty_of(self.st.field_ty(osid, fname)))
+                        }
+                    }
+                    case EIdent(aname) {
+                        // a local array binding whose element enum-payload struct was tracked at the binding
+                        return self.lookup_elem_struct(aname)
+                    }
+                    case _ {
+                    }
+                }
+            }
             case _ {
             }
         }
         return 0 - 1
+    }
+
+
+    // option_payload_base_sid returns the DECLARED base struct sid of an `Option<X>` / `Result<X, _>` type's
+    // payload X (`Option<MapEntry<K,V>>` -> MapEntry base sid), or -1 if not an Option/Result of a struct.
+    fn option_payload_base_sid(self, ty: ps.Ty) -> int {
+        match ty {
+            case TyGeneric(q, n, args) {
+                if (n == "Option" || n == "Result") && args.len() >= 1 {
+                    return self.st.base_sid_of_ty(args[0])
+                }
+            }
+            case _ {
+            }
+        }
+        return 0 - 1
+    }
+
+
+    // lookup_tp_tname returns the OWNER type-param name a param-name is typed as (`key` → "K"), or "".
+    fn lookup_tp_tname(self, name: string) -> string {
+        var i = 0
+        loop {
+            if i >= self.cur_tp_pname.len() {
+                break
+            }
+            if self.cur_tp_pname[i] == name {
+                return self.cur_tp_tname[i]
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+
+    // bound_for_method returns which of owner type-param `tpname`'s bounds declares method `mname` (hash→Hash,
+    // eq→Eq), or "".
+    fn bound_for_method(self, owner: int, tpname: string, mname: string) -> string {
+        let bounds = split_plus_list(self.st.struct_bound_of(owner, tpname))
+        var bi = 0
+        loop {
+            if bi >= bounds.len() {
+                break
+            }
+            if index_of_str(iface_methods(bounds[bi]), mname) >= 0 {
+                return bounds[bi]
+            }
+            bi = bi + 1
+        }
+        return ""
+    }
+
+
+    // witness_field_index returns the flat field index of owner `owner`'s (tparam, bound) witness — the base
+    // (declared field count) plus the running position of (tparam, bound) in $wit layout order.
+    fn witness_field_index(self, owner: int, tpname: string, bound: string) -> int {
+        let base = self.st.struct_declared_field_count(owner)
+        let obase = self.st.base_of(owner)
+        var pos = 0
+        var row = 0
+        loop {
+            if row >= self.st.sg_owner.len() {
+                break
+            }
+            if self.st.sg_owner[row] == obase && self.st.sg_bound[row] != "" {
+                let bounds = split_plus_list(self.st.sg_bound[row])
+                var bi = 0
+                loop {
+                    if bi >= bounds.len() {
+                        break
+                    }
+                    if self.st.sg_tparam[row] == tpname && bounds[bi] == bound {
+                        return base + pos
+                    }
+                    pos = pos + 1
+                    bi = bi + 1
+                }
+            }
+            row = row + 1
+        }
+        return 0 - 1
+    }
+
+
+    // emit_witness_call lowers a bounded-method call on a type-param receiver (`key.hash()`, `e.key.eq(k)`) to a
+    // witness dispatch: read self's witness field, extract the method-ref at the interface method index, and
+    // rt_call_indirect it. Receiver + args are BORROWS (no retain/release), matching the VM. OFI-174.
+    fn emit_witness_call(mut self, recv: ps.Expr, tpname: string, mname: string, args: [ps.Expr]) -> string {
+        let bound = self.bound_for_method(self.cur_owner, tpname, mname)
+        let widx = self.witness_field_index(self.cur_owner, tpname, bound)
+        let midx = index_of_str(iface_methods(bound), mname)
+        let selfc = self.lookup_cname("self")
+        var s = "rt_call_indirect(&g_em, AS_INT(em_enum_field(&g_em, em_enum_field(&g_em, {selfc}, {widx}), {midx})), {1 + args.len()}, (Value[])\{ "
+        s = s + self.emit_expr(recv)
+        var i = 0
+        loop {
+            if i >= args.len() {
+                break
+            }
+            s = s + ", " + self.emit_expr(args[i])
+            i = i + 1
+        }
+        return s + " \}, em_invoke)"
     }
 
 
@@ -3558,7 +3932,8 @@ struct CgcGen {
     fn boxed_sid_of(self, e: ps.Expr) -> int {
         let s = self.struct_sid_any(e)
         if s >= 0 && self.st.is_value(s) == false {
-            return s
+            return self.st.base_of(s)   // a generic INSTANCE binding tracks its BASE (declared) sid, so method/
+                                        // field resolution (`names[sid]`) works — the erased layout is the base's
         }
         return 0 - 1
     }
@@ -3584,8 +3959,88 @@ struct CgcGen {
     // emit_struct_lit renders a struct construction. A VALUE struct is a C compound literal
     // `((em_s<sid>){ f0, f1, … })` in DECLARED field order (fields emitted left-to-right — OFI-166).
     // A boxed struct (em_struct) is a later increment (M5e.2).
+    // witness_method_ref resolves a (concrete type, interface method) to the fn-id baked into a witness
+    // record: a USER type's custom impl (`{Type}.{method}` in fn_names), else a native sentinel —
+    // WITNESS_NATIVE_BASE(1000000)+NATIVE_HASH_ANY(20)=1000020 for hash, +NATIVE_VALUE_EQ(21)=1000021 for eq.
+    fn witness_method_ref(self, concrete: string, mname: string) -> int {
+        let fi = self.fn_index("{concrete}.{mname}")
+        if fi >= 0 {
+            return fi
+        }
+        if mname == "hash" {
+            return 1000020
+        }
+        if mname == "eq" {
+            return 1000021
+        }
+        return 0
+    }
+
+
+    // emit_witness renders ONE bound's witness record for a concrete type-arg: em_enum(&g_em, 0, 0, <method
+    // count>, INT_VAL(id0), …) — a generic record enum (id 0 / tag 0, NOT Some, so it can't collide with an
+    // Option enum id). One INT_VAL per interface method, in declaration order.
+    fn emit_witness(self, bound: string, concrete: string) -> string {
+        let methods = iface_methods(bound)
+        var s = "em_enum(&g_em, 0, 0, {methods.len()}"
+        var i = 0
+        loop {
+            if i >= methods.len() {
+                break
+            }
+            s = s + ", INT_VAL({self.witness_method_ref(concrete, methods[i])})"
+            i = i + 1
+        }
+        return s + ")"
+    }
+
+
+    // emit_struct_witnesses renders the trailing witness field values for a BOUNDED struct construction, in
+    // (type-param, then split-plus bound) order — exactly the layout order build_struct_tab appended the $wit
+    // fields. The k-th type-param's concrete type-arg is `ty`'s k-th argument. Returns ", w0, w1, …" (leading
+    // comma per witness) to splice after the declared field values.
+    fn emit_struct_witnesses(self, sid: int, ty: ps.Ty) -> string {
+        let base = self.st.base_of(sid)
+        var s = ""
+        var k = 0
+        var row = 0
+        loop {
+            if row >= self.st.sg_owner.len() {
+                break
+            }
+            if self.st.sg_owner[row] == base {
+                if self.st.sg_bound[row] != "" {
+                    let concrete = nth_targ_head(ty, k)
+                    let bounds = split_plus_list(self.st.sg_bound[row])
+                    var bi = 0
+                    loop {
+                        if bi >= bounds.len() {
+                            break
+                        }
+                        s = s + ", " + self.emit_witness(bounds[bi], concrete)
+                        bi = bi + 1
+                    }
+                }
+                k = k + 1
+            }
+            row = row + 1
+        }
+        return s
+    }
+
+
     fn emit_struct_lit(mut self, ty: ps.Ty, fields: [ps.SLitField]) -> string {
-        let sid = self.st.sid_of_ty(ty)
+        var sid = self.st.sid_of_ty(ty)
+        let base = self.st.base_sid_of_ty(ty)
+        // An ERASED construction of a BOUNDED generic (Map<string,int>) uses the BASE sid (witness VALUES ride
+        // as trailing fields; the layout is the base's). A type-param generic construction (`MapEntry<K,V>{…}`
+        // inside a generic body) has no concrete collected instance, so also falls back to the base. Mirrors
+        // codegen.ig's struct_is_bounded / lit_struct_id. OFI-218 (erased generics).
+        if base >= 0 && self.st.struct_is_bounded(base) {
+            sid = base
+        } else if sid < 0 {
+            sid = base
+        }
         if sid < 0 {
             return cgc_internal_error("struct literal with an unresolved struct id (OFI-173)")
         }
@@ -3611,12 +4066,14 @@ struct CgcGen {
             return s + " \})"
         }
         // BOXED struct → em_struct(&g_em, <sid>, <fcount>, f0, f1, …) — a heap ObjStruct whose fields are
-        // dropped by drop_value. Fields in DECLARED order; a field value is CONSUMED (an owned binding is
-        // MOVED in via emit_call_arg, a scalar / fresh temp passed as-is).
+        // dropped by drop_value. DECLARED fields in order (a field value is CONSUMED — an owned binding MOVED
+        // in, a scalar / fresh temp as-is); then, for a BOUNDED generic, the hidden witness records are
+        // appended (fcount already counts them, via field_count). OFI-174.
         var s = "em_struct(&g_em, {sid}, {fc}"
+        let declared = self.st.struct_declared_field_count(sid)
         var f = 0
         loop {
-            if f >= fc {
+            if f >= declared {
                 break
             }
             let fname = self.st.f_name[self.st.flat_index(sid, f)]
@@ -3625,6 +4082,9 @@ struct CgcGen {
                 s = s + ", " + self.emit_field_consume(sid, fname, fields[fpos].value)   // a boxed struct CONSUMES its fields (owned ones moved in; `[]` at the field's kind)
             }
             f = f + 1
+        }
+        if self.st.struct_is_bounded(sid) {
+            s = s + self.emit_struct_witnesses(sid, ty)    // trailing $wit records: em_enum(0,0,count,INT_VAL(id)…)
         }
         return s + ")"
     }
@@ -4513,6 +4973,31 @@ struct CgcGen {
                             i = i + 1
                         }
                         return s + ")"
+                    }
+                }
+                // A bounded-method call on a TYPE-PARAM receiver (`key.hash()` — a param typed K; `e.key.eq(k)`
+                // — a K-typed field) dispatches through self's witness field (the concrete Hash/Eq impl for this
+                // instance's type-arg). Only inside a bounded-struct method (cur_owner has bounded params). OFI-174.
+                if self.cur_owner >= 0 {
+                    var wtp = ""
+                    match object.value {
+                        case EIdent(rn) {
+                            wtp = self.lookup_tp_tname(rn)
+                        }
+                        case EGet(wobj, wfname) {
+                            let wosid = self.struct_sid_any(wobj.value)
+                            if wosid >= 0 {
+                                let cand = self.st.field_tpname_of(wosid, wfname)
+                                if cand != "" && self.st.struct_bound_of(self.cur_owner, cand) != "" {
+                                    wtp = cand
+                                }
+                            }
+                        }
+                        case _ {
+                        }
+                    }
+                    if wtp != "" && self.bound_for_method(self.cur_owner, wtp, mname) != "" {
+                        return self.emit_witness_call(object.value, wtp, mname, args)
                     }
                 }
                 // UFCS (Phase 3): a NON-STRUCT value receiver (an enum like Option, …) whose method
@@ -6679,7 +7164,7 @@ fn enum_payload_generic(ty: ps.Ty, generics: [ps.GenericParam]) -> bool {
 
 
 fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fn_ret_kind: [int], fn_ret_render: [int], fn_ret_opt_param: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab, lambda_start: int, fn_ret_det_arg: [int], fn_ret_det_elem: [bool], fn_ret_lam_arg: [int], fn_ret_lam_in: [int], fn_hof_srcs: [int], fn_param_gen_mask: [int], lam_pstr: [bool], lam_pkind: [int], extern_names: [string], extern_ret_kind: [int], extern_ret_str: [bool]) -> [int] {
-    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_is_array: [], sc_elem_elem_kind: [], sc_elem_struct: [], sc_refc: [], sc_tyvar: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_render: fn_ret_render, fn_ret_opt_param: fn_ret_opt_param, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, fn_param_gen_mask: fn_param_gen_mask, lam_recs: [], extern_names: extern_names, extern_ret_kind: extern_ret_kind, extern_ret_str: extern_ret_str }
+    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_is_array: [], sc_elem_elem_kind: [], sc_elem_struct: [], sc_refc: [], sc_tyvar: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, fn_ret_kind: fn_ret_kind, fn_ret_render: fn_ret_render, fn_ret_opt_param: fn_ret_opt_param, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_owner: owner_sid, cur_tp_pname: [], cur_tp_tname: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, fn_param_gen_mask: fn_param_gen_mask, lam_recs: [], extern_names: extern_names, extern_ret_kind: extern_ret_kind, extern_ret_str: extern_ret_str }
     // For a lifted lambda, lam_pstr/lam_pkind type its OWN params (the trailing params after the captures) so
     // the body dispatches `.len()`/concat/arithmetic like stage-0 (the C signature stays all-`Value`). Captures
     // lead and stay untyped. caps = (non-self param count) − (own params typed) — OFI-206 follow-on.
@@ -6772,6 +7257,13 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: Stru
                 // binds its erased payload as a refcounted borrow too.
                 if enum_payload_generic(f.params[p].ty[0], f.generics) {
                     g.cur_gopt.append(f.params[p].name)
+                }
+                // A param typed as one of the OWNER struct's BOUNDED type-params (`key: K` in a Map<K,V> method)
+                // — record it so a bounded-method call `key.hash()`/`key.eq(..)` dispatches through self's witness.
+                let otp = owner_tparam_name(f.params[p].ty[0], st, owner_sid)
+                if otp != "" {
+                    g.cur_tp_pname.append(f.params[p].name)
+                    g.cur_tp_tname.append(otp)
                 }
             }
             ai = ai + 1
