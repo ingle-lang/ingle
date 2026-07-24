@@ -3811,6 +3811,21 @@ struct CgcGen {
                         return "em_enum_field(&g_em, {self.emit_expr(object.value)}, {fidx})"
                     }
                 }
+                // A MODULE-QUALIFIED CONSTANT `verify.VERIFY_CAP` — the receiver is an import ALIAS (not a
+                // binding / struct), the name a module-level folded int constant. Emit its literal (the
+                // qualifier is erased, like an unqualified constant read).
+                match object.value {
+                    case EIdent(recv) {
+                        if self.lookup_cname(recv) == "" && self.lookup_struct(recv) < 0 {
+                            let ci = self.consts.lookup_idx(name)
+                            if ci >= 0 {
+                                return "INT_VAL({self.consts.vals[ci]}LL)"
+                            }
+                        }
+                    }
+                    case _ {
+                    }
+                }
                 return cgc_internal_error("unsupported field access `.{name}` — boxed-generic element or qualified variant (OFI-173/OFI-202)")
             }
             case ELambda(params, body) {
@@ -4787,6 +4802,36 @@ struct CgcGen {
                 if name == "panic" && args.len() == 1 {
                     return "(em_panic_val(&g_em, {self.emit_expr(args[0])}), INT_VAL(0))"
                 }
+                // Concurrency CHANNEL builtins: channel(n) → a buffered channel; send(ch, v) enqueues (v moved
+                // in); recv(ch)/try_recv(ch) → Option<elem> (blocking / non-blocking poll); close(ch). recv wraps
+                // the value in Some/None, so it carries the Option enum id + Some(0)/None(1) tags. (cgen_c.c M4.)
+                if name == "channel" && args.len() == 1 {
+                    return "em_channel_new(&g_em, AS_INT({self.emit_expr(args[0])}))"
+                }
+                if name == "send" && args.len() == 2 {
+                    return "em_channel_send(&g_em, {self.emit_expr(args[0])}, {self.emit_consume_arg(args[1])})"
+                }
+                if name == "recv" && args.len() == 1 {
+                    let eid = self.en.prelude_enum_id("Some")
+                    return "em_channel_recv(&g_em, {self.emit_expr(args[0])}, {eid}, 0, 1)"
+                }
+                if name == "try_recv" && args.len() == 1 {
+                    let eid = self.en.prelude_enum_id("Some")
+                    return "em_channel_try_recv(&g_em, {self.emit_expr(args[0])}, {eid}, 0, 1)"
+                }
+                if name == "close" && args.len() == 1 {
+                    return "em_channel_close({self.emit_expr(args[0])})"
+                }
+                // int↔float REINTERPRET intrinsics (the bits, not a numeric cast) + monotonic clock. (cgen_c.c M5.)
+                if name == "to_float" && args.len() == 1 {
+                    return "em_to_float({self.emit_expr(args[0])})"
+                }
+                if name == "to_int" && args.len() == 1 {
+                    return "em_to_int({self.emit_expr(args[0])})"
+                }
+                if name == "clock" && args.len() == 0 {
+                    return "em_clock()"
+                }
                 let nid = native_id_for_name(name)
                 if is_em_native_id(nid) {
                     // a native runtime builtin (byte_slice, read_file, math, …) → em_native(&g_em, <id>, <argc>,
@@ -4862,6 +4907,18 @@ struct CgcGen {
                         let sep = self.emit_expr(args[0])
                         return "em_str_split(&g_em, {recv}, {sep})"
                     }
+                    if mname == "parse_int" {
+                        // s.parse_int() → Option<int>; em_str_parse_int carries the Option enum id + Some(0)/
+                        // None(1) tags. A fresh string TEMP receiver is measured then dropped; a borrow is read
+                        // as-is. (cgen_c.c string_op 4.)
+                        let eid = self.en.prelude_enum_id("Some")
+                        if self.recv_is_temp(object.value) {
+                            let t = self.fresh_var()
+                            let rv = self.fresh_var()
+                            return "(\{ Value v{t} = {self.emit_expr(object.value)}; Value v{rv} = em_str_parse_int(&g_em, v{t}, {eid}, 0, 1); drop_value(&g_em, v{t}); v{rv}; \})"
+                        }
+                        return "em_str_parse_int(&g_em, {self.emit_expr(object.value)}, {eid}, 0, 1)"
+                    }
                 }
                 // A built-in array method. `.len()` returns the length scalar; `.append(x)` grows the array.
                 if self.is_array_expr(object.value) {
@@ -4880,6 +4937,32 @@ struct CgcGen {
                         let recv = self.emit_expr(object.value)
                         let el = self.emit_consume_arg(args[0])   // the array CONSUMES the element (owned ones moved in); source order (OFI-166)
                         return "em_array_append(&g_em, {recv}, {el})"
+                    }
+                    if mname == "remove_at" {
+                        // arr.remove_at(i) → removes + RETURNS element i (shifting the tail down). Receiver +
+                        // index are borrows; the returned element is a fresh owned value.
+                        let recv = self.emit_expr(object.value)
+                        let ix = self.emit_expr(args[0])
+                        return "em_array_remove_at(&g_em, {recv}, {ix})"
+                    }
+                    if mname == "clone" {
+                        // arr.clone() → a DEEP copy. An index read of an aggregate element (`m[i]` of a `[[T]]`)
+                        // is ALREADY an owned clone (em_index materialises) → emit as-is; a fresh owned temp is
+                        // cloned then dropped; a borrow (binding/param/field) is deep-cloned by own_into_slot.
+                        // (A value-struct clone is unsupported here, as in stage-0's native backend — OFI-082.)
+                        match object.value {
+                            case EIndex(a, ix) {
+                                return self.emit_expr(object.value)
+                            }
+                            case _ {
+                            }
+                        }
+                        if self.recv_is_temp(object.value) {
+                            let t = self.fresh_var()
+                            let rv = self.fresh_var()
+                            return "(\{ Value v{t} = {self.emit_expr(object.value)}; Value v{rv} = own_into_slot(&g_em, v{t}); drop_value(&g_em, v{t}); v{rv}; \})"
+                        }
+                        return "own_into_slot(&g_em, {self.emit_expr(object.value)})"
                     }
                 }
                 // A struct method call `recv.m(args)` → em_fn_<K>(recv, args…): self is arg 0, the method's
@@ -5038,7 +5121,18 @@ struct CgcGen {
             case _ {
             }
         }
-        return cgc_internal_error("unsupported call form — unresolved callee (OFI-173)")
+        var desc = "?"
+        match callee {
+            case EIdent(n) {
+                desc = "{n}(…)"
+            }
+            case EGet(o, m) {
+                desc = ".{m}(…)"
+            }
+            case _ {
+            }
+        }
+        return cgc_internal_error("unsupported call form — unresolved callee {desc} (OFI-173)")
     }
 
 
@@ -5817,6 +5911,14 @@ struct CgcGen {
                 match object.value {
                     case EIdent(aname) {
                         return self.lookup_array(aname) && self.lookup_elem_is_array(aname)
+                    }
+                    case EGet(gobj, gname) {
+                        // `self.dk_tabs[i]` of a `[[T]]` FIELD is itself an array — the field's element type is
+                        // an array (`[[string]]`'s element is `[string]`).
+                        let sid = self.struct_sid_any(gobj.value)
+                        if sid >= 0 {
+                            return is_array_ty(elem_ty_of(self.st.field_ty(sid, gname)))
+                        }
                     }
                     case _ {
                     }
