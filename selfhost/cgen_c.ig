@@ -5261,7 +5261,11 @@ struct CgcGen {
                                 s = s + "Value c{aid} = {self.emit_call_arg_gen(args[i], fi, i)}; "
                                 i = i + 1
                             }
-                            s = s + "Value c{rid} = em_fn_{fi}(" + self.emit_expr(object.value)   // self inline
+                            var mrtype = "Value"
+                            if fi >= 0 && fi < self.fn_ret_struct.len() && self.fn_ret_struct[fi] >= 0 {
+                                mrtype = "em_s{self.fn_ret_struct[fi]}"   // a VALUE-struct method return: em_s aggregate, not Value
+                            }
+                            s = s + "{mrtype} c{rid} = em_fn_{fi}(" + self.emit_expr(object.value)   // self inline
                             var j = 0
                             loop {
                                 if j >= argids.len() {
@@ -5404,7 +5408,11 @@ struct CgcGen {
                 s = s + "Value c{aid} = {self.emit_call_arg_gen(args[i], fi, i)}; "
                 i = i + 1
             }
-            s = s + "Value c{rid} = em_fn_{fi}("
+            var rtype = "Value"
+            if fi >= 0 && fi < self.fn_ret_struct.len() && self.fn_ret_struct[fi] >= 0 {
+                rtype = "em_s{self.fn_ret_struct[fi]}"   // a VALUE-struct return: the result temp is the em_s aggregate, not a Value
+            }
+            s = s + "{rtype} c{rid} = em_fn_{fi}("
             var j = 0
             loop {
                 if j >= argids.len() {
