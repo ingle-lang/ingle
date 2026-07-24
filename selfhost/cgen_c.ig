@@ -3325,6 +3325,9 @@ struct CgcGen {
                                // (own_into_slot on return), matching stage-0's erased-generic ownership (OFI-205)
     cur_owner: int             // the current method's OWNER struct sid (-1 for a free fn) — the witness fields live
                                // on `self` of this struct, so a bounded-method call reads em_enum_field(self, idx)
+    cur_module: string         // the SOURCE-MODULE path of the function being emitted — an UNQUALIFIED free call
+                               // to a name shared across merged modules (`_is_digit` in std/json + std/highlight)
+                               // resolves to THIS module's definition first (matching stage-0's scope resolution)
     cur_tp_pname: [string]     // param names typed as one of the owner's TYPE-PARAMS (`key: K`) — a bounded-method
     cur_tp_tname: [string]     // ...call on such a param dispatches through a witness; parallel tparam name ("K")
     cur_lambda: int            // the em_fn index of the NEXT lambda this body lifts (fn_count + prior lambdas),
@@ -5448,7 +5451,16 @@ struct CgcGen {
                 if self.fn_index(name) < 0 && cgc_cextern_index(name) >= 0 {
                     return self.emit_ffi_call(name, args)
                 }
-                let fi = self.fn_index_argc(name, args.len())   // arity-disambiguate a free-fn name shared across merged modules (`tab_labels/1` vs `/2`)
+                // Resolve the free-fn slot: a name shared across merged modules resolves to THIS module's
+                // definition first (`_is_digit` in the caller's own module, not another's same-named fn — matching
+                // stage-0's scope resolution), then falls back to arity disambiguation (`tab_labels/1` vs `/2`).
+                var fi = 0 - 1
+                if self.cur_module != "" {
+                    fi = self.fn_index_module(name, self.cur_module, args.len())
+                }
+                if fi < 0 {
+                    fi = self.fn_index_argc(name, args.len())
+                }
                 if fi >= 0 {
                     return self.emit_free_call(fi, args)
                 }
@@ -8127,7 +8139,13 @@ fn enum_payload_generic(ty: ps.Ty, generics: [ps.GenericParam]) -> bool {
 
 
 fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: StructTab, en: EnumTab, fn_names: [string], fnres: FnResolve, fn_ret_kind: [int], fn_ret_render: [int], fn_ret_opt_param: [int], fn_ret_str: [bool], fn_ret_array: [bool], fn_ret_elem_kind: [int], fn_ret_elem_struct: [int], fn_ret_struct: [int], fn_ret_enum: [bool], consts: ConstTab, lambda_start: int, fn_ret_det_arg: [int], fn_ret_det_elem: [bool], fn_ret_lam_arg: [int], fn_ret_lam_in: [int], fn_hof_srcs: [int], fn_param_gen_mask: [int], lam_pstr: [bool], lam_pkind: [int], extern_names: [string], extern_ret_kind: [int], extern_ret_str: [bool]) -> [int] {
-    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_is_array: [], sc_elem_elem_kind: [], sc_elem_struct: [], sc_refc: [], sc_tyvar: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, res: fnres, fn_ret_kind: fn_ret_kind, fn_ret_render: fn_ret_render, fn_ret_opt_param: fn_ret_opt_param, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_owner: owner_sid, cur_tp_pname: [], cur_tp_tname: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, fn_param_gen_mask: fn_param_gen_mask, lam_recs: [], extern_names: extern_names, extern_ret_kind: extern_ret_kind, extern_ret_str: extern_ret_str, nursery_ids: [] }
+    // This function's source module — an unqualified free call inside it prefers a same-module definition when
+    // the name collides across merged modules (a lifted lambda idx runs past the table; "" leaves it unqualified).
+    var cur_mod = ""
+    if idx >= 0 && idx < fnres.modules.len() {
+        cur_mod = fnres.modules[idx]
+    }
+    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_is_array: [], sc_elem_elem_kind: [], sc_elem_struct: [], sc_refc: [], sc_tyvar: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, res: fnres, fn_ret_kind: fn_ret_kind, fn_ret_render: fn_ret_render, fn_ret_opt_param: fn_ret_opt_param, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_owner: owner_sid, cur_module: cur_mod, cur_tp_pname: [], cur_tp_tname: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, fn_param_gen_mask: fn_param_gen_mask, lam_recs: [], extern_names: extern_names, extern_ret_kind: extern_ret_kind, extern_ret_str: extern_ret_str, nursery_ids: [] }
     // For a lifted lambda, lam_pstr/lam_pkind type its OWN params (the trailing params after the captures) so
     // the body dispatches `.len()`/concat/arithmetic like stage-0 (the C signature stays all-`Value`). Captures
     // lead and stay untyped. caps = (non-self param count) − (own params typed) — OFI-206 follow-on.
