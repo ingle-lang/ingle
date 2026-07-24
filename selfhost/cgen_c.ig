@@ -7033,6 +7033,12 @@ fn native_id_for_name(name: string) -> int {
     if name == "from_bytes" {
         return 23
     }
+    if name == "float_bits" {
+        return 24
+    }
+    if name == "list_dir" {
+        return 25
+    }
     // Graphics builtins (ids 100-142) drive raylib through em_native → ember_gfx_native (the same
     // dispatcher the VM uses); only reachable when linked against the graphics runtime. Mirrors
     // codegen.ig / src/cgen_c.c (the graphics arm of the native band). Needed so the self-hosted
@@ -7173,14 +7179,14 @@ fn native_id_for_name(name: string) -> int {
 // is_em_native_id reports whether a native id goes through the em_native dispatcher (the READ_LINE..EXIT band
 // plus byte_slice and from_bytes; print/println keep their own em_print/em_println path, and 20/21 are witness-only).
 fn is_em_native_id(nid: int) -> bool {
-    return (nid >= 2 && nid <= 19) || nid == 22 || nid == 23 || (nid >= 100 && nid <= 142)
+    return (nid >= 2 && nid <= 19) || nid == 22 || nid == 23 || nid == 24 || nid == 25 || (nid >= 100 && nid <= 142)
 }
 
 
 // native_ret_kind classifies a native builtin's OWNED return: -3 a string, -2 an array, -1 scalar/unit
 // (not droppable), -4 = not a builtin. Drives owned-binding tracking for `let x = byte_slice(…)`.
 fn native_ret_kind(name: string) -> int {
-    if name == "read_line" || name == "read_file" || name == "env" || name == "from_char_code" || name == "byte_slice" || name == "concat" || name == "from_bytes" {
+    if name == "read_line" || name == "read_file" || name == "env" || name == "from_char_code" || name == "byte_slice" || name == "concat" || name == "from_bytes" || name == "list_dir" {
         return 0 - 3
     }
     if name == "args" {
