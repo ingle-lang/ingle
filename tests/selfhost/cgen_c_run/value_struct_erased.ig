@@ -18,6 +18,7 @@ struct Point {
 struct Container {
     inner: Point
     tag: int
+    name: string       // a heap field makes Container a BOXED struct — `inner` is an INLINE value-struct field
 }
 
 
@@ -52,7 +53,7 @@ fn main() {
     println("{shape_sum(Seg(Point { x: 1, y: 2 }, Point { x: 3, y: 4 }))}")   // 1 + 4 = 5
 
     // boxed-struct INLINE value-struct field: build-then-place construction + em_enum_field/unbox read
-    let c = Container { inner: Point { x: 7, y: 8 }, tag: 100 }
+    let c = Container { inner: Point { x: 7, y: 8 }, tag: 100, name: "c" }
     println("{c.inner.x}")                                      // 7
     println("{c.inner.y}")                                      // 8
     println("{c.tag}")                                          // 100
@@ -71,7 +72,7 @@ fn main() {
     poly2.pts.append(Point { x: 11, y: 22 })
     poly2.pts.append(Point { x: 33, y: 44 })
     println("{poly2.pts[1].x}")                                 // 33
-    var c2 = Container { inner: Point { x: 0, y: 0 }, tag: 0 }
+    var c2 = Container { inner: Point { x: 0, y: 0 }, tag: 0, name: "c2" }
     c2.inner = Point { x: 99, y: 88 }                           // field write of a value struct
     println("{c2.inner.x}")                                     // 99
 }
