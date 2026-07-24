@@ -3815,6 +3815,26 @@ struct CgcGen {
                 if elems.len() == 0 {
                     return "em_array(&g_em, 0, 0)"
                 }
+                let esid = self.struct_sid_of(elems[0])
+                if esid >= 0 {
+                    // A VALUE-struct array literal → em_struct_array(&g_em, n, <elem sid>, <boxed e0>, …): an
+                    // INLINE value-struct array (elements packed, materialised on index). Each element is BOXED
+                    // (em_box_struct) first — em_struct_array unpacks it into the buffer. `arr[i]` reads it back
+                    // via em_index + em_unbox_struct. varargs em_array can't carry packed em_s bytes. Mirrors
+                    // stage-0. (OFI-218)
+                    let fc = self.st.field_count(esid)
+                    var sa = "em_struct_array(&g_em, {elems.len()}, {esid}"
+                    var j = 0
+                    loop {
+                        if j >= elems.len() {
+                            break
+                        }
+                        let iv = self.fresh_var()
+                        sa = sa + ", (\{ em_s{esid} v{iv} = {self.emit_expr(elems[j])}; em_box_struct(&g_em, {esid}, (Value*)&v{iv}, {fc}); \})"
+                        j = j + 1
+                    }
+                    return sa + ")"
+                }
                 let ek = self.elem_kind_of_expr(elems[0])
                 var s = "em_array(&g_em, {elems.len()}, {ek}"
                 var i = 0

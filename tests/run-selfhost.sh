@@ -382,6 +382,37 @@ if [ -f "$CCSRC" ]; then
     echo "selfhost cgen_c: $ccpass/$((ccpass + ccfail)) M5 C-emit fixtures byte-identical to stage-0 --emit=c"
     pass=$((pass + ccpass)); fail=$((fail + ccfail))
 
+    # cgen_c_run: RUNTIME-diff fixtures (NOT byte-identical). Programs whose self-hosted C-emit LEGITIMATELY
+    # diverges from stage-0 because the self-hosted backend ERASES value structs where stage-0 monomorphises
+    # (OFI-218). Byte-identity is the wrong oracle; the oracle is RUNTIME equality — the self-hosted native
+    # binary must print the SAME as the bytecode VM. Needs a C compiler (skipped otherwise, like the fixed point).
+    if [ -n "$ccbin" ]; then
+        crpass=0; crfail=0
+        for src in $(cd "$ROOT" && find tests/selfhost/cgen_c_run -name '*.ig' 2>/dev/null | sort); do
+            want=$(cd "$ROOT" && "$BIN" --emit=run "$src" 2>/dev/null | sed '/^=> 0$/d')
+            crc="${TMPDIR:-/tmp}/emberc_cgenc_run_$$.c"
+            crbin="${TMPDIR:-/tmp}/emberc_cgenc_run_$$"
+            (cd "$ROOT" && "$ccbin" "$src" 2>/dev/null) | sed '/^=> 0$/d' > "$crc"
+            if cc -std=c17 -O2 -D_DEFAULT_SOURCE -I"$ROOT/include" "$crc" "$ROOT/build/libember_rt.a" -lm -o "$crbin" 2>/dev/null; then
+                got=$("$crbin" 2>/dev/null | sed '/^=> 0$/d')
+                if [ "$want" = "$got" ]; then
+                    crpass=$((crpass + 1))
+                else
+                    crfail=$((crfail + 1))
+                    echo "FAIL    self-hosted C-emit RUNS differently from the VM on $src"
+                fi
+            else
+                crfail=$((crfail + 1))
+                echo "FAIL    self-hosted C-emit output did not compile: $src"
+            fi
+            rm -f "$crc" "$crbin"
+        done
+        if [ $((crpass + crfail)) -gt 0 ]; then
+            echo "selfhost cgen_c: $crpass/$((crpass + crfail)) cgen_c_run fixtures RUN identical to the VM (erased value structs — not byte-identical to stage-0)"
+        fi
+        pass=$((pass + crpass)); fail=$((fail + crfail))
+    fi
+
     # The real payoff: whole self-hosted MODULES whose C-emit is byte-identical to stage-0 (not fixtures —
     # actual compiler source). The first native-bootstrap milestone. This list grows as each module's
     # features land in cgen_c.ig.
