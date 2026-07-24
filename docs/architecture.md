@@ -1870,3 +1870,39 @@ seed (the Rust-drops-OCaml / Go-retires-its-C-compiler end state).
 
 The campaign is earned the same way every prior stage was — one differential-green, `make selfhost`-gated
 increment at a time, with stage 0 as the oracle — never a big-bang rewrite.
+
+## Decision: the flip is realized — the language is developed IN Ingle, and Ingle builds Ingle (`make bootstrap`)
+
+The campaign above reached its two defining milestones (OFI-218 Phases 5 and 6); this entry records the
+end state so the workflow change is not lost.
+
+- **The flip (Phase 5): selfhost is canonical, stage 0 is the mirror.** The first Ingle-first feature —
+  the diverging **`panic(msg)`** primitive (plus checker divergence analysis) — was designed and
+  implemented in the self-hosted compiler (`selfhost/checker.ig` + both selfhost backends) **first**,
+  proven on the successor oracles (VM run, native binary, the reproduction fixed point), and only *then*
+  mirrored into stage 0's `src/`. The parity rule is unchanged — every feature still lands in both,
+  byte-identical while feature-equal — but the **direction inverted permanently**: new language work
+  originates in Ingle. (This also retired Phase 0's own wart: `panic` gives the language real divergence,
+  so a diverging trap no longer needs an unreachable trailing return to satisfy the type checker.)
+
+- **Bootstrap independence (Phase 6): `make bootstrap`.** The Ingle compiler now rebuilds itself from a
+  **checked-in C seed** (`bootstrap/seed/inglec_boot.c` — the self-hosted C-emit backend's output for the
+  whole self-hosted compiler) with the `src/` **frontend entirely out of the loop**. `cc` compiles the
+  seed + the runtime into N1 (a native Ingle→C compiler); N1 compiles the current `selfhost/*.ig` into a
+  self-reproducing N2. Proven frontend-independent: `make clean && make bootstrap` compiles only
+  `runtime.c` + `cextern.c` (the runtime library — a dependency every Ingle binary links, not the
+  compiler), never `check.c`/`codegen.c`/`cgen_c.c`/`parser.c`/`main.c`, and does not build the stage-0
+  binary. The target depends on `$(RT_LIB)` alone, deliberately not on `$(BIN)`. See
+  [`bootstrap/README.md`](https://github.com/ingle-lang/ingle/blob/main/bootstrap/README.md).
+
+- **The deferred Phase-5 sub-decision is resolved: the Rust/Go reality.** The Ingle compiler uses new
+  language features freely; re-bootstrapping uses a prior seed, not a from-C-only rebuild. `make bootstrap`
+  follows the **Go-1.5 model** — the seed need not be byte-identical to the current source, only able to
+  compile it — so a routine selfhost edit does not force a 16k-line seed regeneration; `make
+  bootstrap-refresh` re-snapshots it as a deliberate release-time "raise the floor" step. Stage 0 stays the
+  frozen from-C re-bootstrap oracle (`stage0-v0.3.42`) and the mirror/tooling host; it is no longer on the
+  path to *building* Ingle.
+
+The net effect: extending the language is now **edit `selfhost/*.ig` → `make bootstrap`** — the compiler,
+written in Ingle, compiles the edited Ingle sources into a new self-reproducing compiler, no C frontend
+touched. Ingle is developed and built upon in Ingle.

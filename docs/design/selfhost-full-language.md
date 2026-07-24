@@ -233,7 +233,7 @@ fixtures byte-identical on the C-emit; `make selfhost` count grows accordingly.*
 *Gate: corpus at full breadth, zero tolerated verdicts, dodge checklist empty, both fixed points
 green on un-dodged sources — **OFI-174 closes here.***
 
-### Phase 5 — The flip: the first Ingle-first feature
+### Phase 5 — The flip: the first Ingle-first feature ✅ (2026-07-24, core — `panic`; `unwrap`/`expect` deferred)
 
 Ship the diverging **`panic(msg)` primitive** (as a Fault, per the existing plan: builtin trap →
 `em_panic` runtime hook, checker divergence so a `None` arm that panics type-checks) plus
@@ -250,7 +250,7 @@ stays — only the *direction* flips.
 
 *Gate: the feature green on the selfhost gates before a line of the C mirror exists.*
 
-### Phase 6 — Bootstrap independence and stage-0 demotion
+### Phase 6 — Bootstrap independence and stage-0 demotion ✅ (2026-07-24 — `make bootstrap`; fuzzer re-point + stage-0 archival remain follow-ons)
 
 - Check in the **generated-C seed** (`bootstrap/seed/` — the self-hosted C-emit's output for the
   compiler itself, refreshed at releases; the Zig/OCaml move).
@@ -307,6 +307,34 @@ bare-metal codegen rides — strengthening selfhost strengthens the endgame.
 ---
 
 ## 8. Progress log
+
+- **2026-07-24 — PHASE 6 COMPLETE: bootstrap independence — Ingle builds Ingle (`dcc281a`).** The capstone.
+  `make bootstrap` rebuilds the compiler from a checked-in C seed (`bootstrap/seed/inglec_boot.c`, ~16k
+  lines = the self-hosted C-emit's output for the whole self-hosted compiler) with the `src/` FRONTEND out
+  of the loop: `cc(seed + runtime) → N1`; N1 compiles the current `selfhost/*.ig` → a self-reproducing N2;
+  N1/N2 agree on every module; N1 compiles+runs a program end-to-end. Proven frontend-independent —
+  `make clean && make bootstrap` compiles ONLY `runtime.c` + `cextern.c` (the runtime library, a
+  dependency every Ingle binary links — not the compiler), never the frontend, and does not build the
+  stage-0 binary (`bootstrap:` depends on `$(RT_LIB)` alone, not `$(BIN)`). Go-1.5 model: the seed need only
+  COMPILE the current source, so routine selfhost edits don't force a seed regen; `make bootstrap-refresh`
+  re-snapshots it deliberately. Added to `make verify`. Extending the language is now **edit `selfhost/*.ig`
+  → `make bootstrap`**. See `bootstrap/README.md` + the architecture Decision entry. The deferred Phase-5
+  sub-decision (subset-restriction vs free-feature-use) is resolved: the Rust/Go reality (seed-seeded
+  rebuilds). **This is the end state the campaign set out to reach: the language is developed IN Ingle.**
+
+- **2026-07-24 — PHASE 5 COMPLETE (core): `panic(msg)` — the first Ingle-first feature (`e98150b`).** THE
+  FLIP. A diverging `panic` primitive was designed + implemented in the SELF-HOSTED compiler first (checker
+  divergence via `stmt_is_panic` wired into the three return-flow walks + both selfhost backends), proven
+  end-to-end on the successor oracles (VM `error[panic]` Fault, native `em_panic_val` abort, reproduction
+  fixed point), THEN mirrored to stage-0 byte-identical (bytecode AND C-emit). Runtime substrate: `OP_PANIC`
+  (opcode 91, OPS0, pops the message Value), `panic_fault` (FCAT_RUNTIME code "panic"), `em_panic_val`.
+  Never release-elided (unlike assert); message is a runtime string (so `expect` can pass its param). Gates:
+  `make test` 456/0, `make selfhost` 1507/0, `make opcheck` 92 opcodes. Behaviour corpus: `tests/run/panic.ig`
+  (trap), `panic_diverges.ig` + native mirror (divergence-typing + happy path). **`unwrap`/`expect` deferred**
+  as ergonomics: on both Option and Result they can't be prelude free-fns (no overloading, no enum methods),
+  so they need a tag-based intrinsic (mapped: reuse the `?`/EXPR_TRY extract via `OP_GET_FIELD_OWNED` /
+  `em_enum_take`, fail-arm = `panic`; ~4 codegen sites + move-checker receiver-consume) — a `?`-comparable
+  effort that does NOT advance the extend-in-Ingle capability, so it waits.
 
 - **2026-07-23 — Phase 4 CHECKER REJECT-PARITY (IN PROGRESS): 16 not-yet-rejected misses → 6 (10 checks
   closed, 0 false-rejects throughout).** The self-hosted checker (`selfhost/checker.ig`) accepted 16 programs stage-0 rejects.
