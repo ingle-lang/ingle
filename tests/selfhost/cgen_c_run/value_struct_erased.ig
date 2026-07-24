@@ -65,4 +65,13 @@ fn main() {
     // plain value-struct local (regression — a direct em_s, no unbox)
     let p = Point { x: 42, y: 43 }
     println("{p.x}")                                            // 42
+
+    // value-struct ARRAY APPEND (em_array_append) + value-struct FIELD WRITE (em_set_field) — both BOX the em_s
+    var poly2 = Poly { pts: [], name: "grow" }
+    poly2.pts.append(Point { x: 11, y: 22 })
+    poly2.pts.append(Point { x: 33, y: 44 })
+    println("{poly2.pts[1].x}")                                 // 33
+    var c2 = Container { inner: Point { x: 0, y: 0 }, tag: 0 }
+    c2.inner = Point { x: 99, y: 88 }                           // field write of a value struct
+    println("{c2.inner.x}")                                     // 99
 }

@@ -4312,6 +4312,17 @@ struct CgcGen {
     // refcounted FIELD / ELEMENT / owning-temp read is owned in (own_into_slot); a scalar / literal / fresh
     // temp is passed as-is.
     fn emit_consume_arg(mut self, e: ps.Expr) -> string {
+        let cvsid = self.struct_sid_of(e)
+        if cvsid >= 0 {
+            // A VALUE struct moved into a container whose slot is an erased boxed Value — an ARRAY element
+            // (em_array_append), a CHANNEL (em_channel_send), or a boxed-struct FIELD write (em_set_field): the
+            // em_s aggregate is PACKED into a heap ObjStruct first. (Array LITERALS use em_struct_array and
+            // enum payloads / inline struct fields have their own boxing, so they never reach here.) Mirrors
+            // stage-0. (OFI-218)
+            let fc = self.st.field_count(cvsid)
+            let tmp = self.fresh_var()
+            return "(\{ em_s{cvsid} v{tmp} = {self.emit_expr(e)}; em_box_struct(&g_em, {cvsid}, (Value*)&v{tmp}, {fc}); \})"
+        }
         match e {
             case EIdent(name) {
                 if self.lookup_drop(name) {
