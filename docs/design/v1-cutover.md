@@ -123,6 +123,14 @@ Almost none of this is hard engineering — it is decisions and mechanics.
   **narrower** CLI than `main.c` — no `--lsp`, `--doctor`, `--run-bytecode`, in-process `--emit=run`
   VM, or `--freestanding`. Decide (Fork 2): unify these into one Ingle-driven `inglec`, or keep a thin
   C tooling entry that hosts them.
+  - **Verified at G1 — the two self-hosted drivers split check from C-emit, and neither does both.**
+    `cgen_c_dump.ig` (what the seed / `build/inglec-self` runs) is parse→C-emit and **trusts its input**:
+    it emitted valid-looking C for `let x: int = "hello"` (a type error stage-0 rejects with exit 65) and
+    exited 0. `emberc.ig` *does* run the checker (rejected the same program, exit 65) but emits **bytecode**,
+    not C. So the G4 default `inglec` cannot be the bare C-emit driver — `inglec -o` must be
+    **check → C-emit → cc** and must reject exactly what stage-0 rejects. Both halves exist
+    (`selfhost/checker.ig`, `selfhost/cgen_c.ig`); the work is fusing them into one driver. Bounded
+    integration, not new algorithms — but it *is* real G4 work, not a one-variable flip.
 - **D. Sever the LSP/tooling coupling** (the hard dependency). Either port the LSP/`--doctor`/prover
   onto the self-hosted frontend (needs selfhost-checker source positions first) or retain stage-0 as a
   **frozen tooling host behind the language frontier**. Fork 1.
@@ -263,3 +271,15 @@ exactly where Go 1.5 and Rust 1.0 stood.
   bootstrap-refresh` restored it (16,177→19,720 lines) and the frontend-free fixed point is **GREEN**
   again (seed committed `cd6698c`). Finding recorded in §8: the fixed point is seed-*strict*, so a
   seed-drift tripwire is a G1 item. All gates now green; baseline established. Next: **G1**.
+- **2026-07-25 — G1 COMPLETE.** (1) `make inglec-self` → `build/inglec-self`, the persistent
+  frontend-free self-hosted compiler (881 KB from seed + runtime alone); reproduces the seed
+  byte-for-byte and runs real programs identically to the VM (`examples/06_calculator` native ==
+  stage-0 VM). (2) `bootstrap-refresh` re-homed off `$(BIN)` → `tools/bootstrap-reseed.sh`, a
+  two-generation frontend-free reseed (the F item — seed refresh now survives frontend retirement).
+  (3) CI tripwire: Linux CI runs `make bootstrap` after `selfhost` (closes the G0 drift gap). Commit
+  `7e3a2d8`. **Findings for later gates:** (a) *G4* — no single self-hosted driver does check+C-emit
+  (`cgen_c_dump` trusts input, `emberc` checks but emits bytecode); the default `inglec` must fuse
+  `selfhost/checker.ig` + `selfhost/cgen_c.ig` and match stage-0's accept/reject. (b) *G3* — the
+  self-hosted C-emit omits a `drop_value` stage-0 emits (a missed free = leak-direction, sound; not a
+  crash) — one entry for the coverage catalog. Next: **G2** (oracle succession) or **G4** (the flip)
+  — G4's check+emit fusion is the critical-path item.
