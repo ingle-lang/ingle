@@ -57,10 +57,13 @@ frontend" means *take it off the build and install path*, not *erase the history
 
 Verified against the live tree, not memory.
 
-**Green gates today** (cite the current numbers, not the doc's frozen snapshots):
-- `make selfhost` **1517/0** (HEAD `b02eec7` body; the transitional self-hosting differential).
-- `make test` **456/0**, `make opcheck` **92 opcodes** — *last recorded snapshots (Phase-5 log); may
-  have moved.* → **G0 re-establishes these fresh.**
+**Green gates — G0 fresh baseline (2026-07-25, verified this session):**
+- `make test` **458/0** (was 456; +2), `make opcheck` **92 opcodes / 396 corpus programs**.
+- `make selfhost` **1517/0** — reproduction fixed point intact (the *current* compiler regenerates
+  itself byte-identical over all 6 sources).
+- `make bootstrap` — **was RED, now GREEN.** The checked-in seed had gone output-stale after the last
+  8 `cgen_c.ig` hardening commits (see §8); `make bootstrap-refresh` re-snapshotted it (16,177→19,720
+  lines) and restored the frontend-free fixed point. Committed `cd6698c`.
 - Checker verdict parity **655/656** (1 miss, `error_resource_clone_match`); parser AST **665/665**.
 
 **The build topology** (the surgery map):
@@ -217,6 +220,18 @@ exactly where Go 1.5 and Rust 1.0 stood.
   refresh the seed. If a future selfhost edit needs a feature the current seed can't compile, there's no
   C fallback — so seed-refresh cadence (refresh whenever a change raises the language floor) becomes part
   of the release process. Mirrors Go's requirement that 1.4 build 1.5.
+- **The bootstrap fixed point is seed-*strict*, not tolerant — found live at G0.** `make bootstrap` was
+  RED this session: its step-3/4 checks compare the **seed-built N1's** emit against N2's, so *any*
+  output-changing `cgen_c.ig` commit reds the gate until `make bootstrap-refresh` runs (the header
+  comment's "Go-1.5 tolerance" covers only step 2, "seed can compile current source" — the reproduction
+  checks are stricter). The last 8 hardening commits changed the emit and never refreshed; `make
+  selfhost` stayed green throughout, so nothing flagged the drift. **G1 decision:** either (a) enforce
+  refresh-on-`cgen_c`-change — cheapest is a CI/`verify` check that fails when the seed is behind, so the
+  drift can't land silently (recommended: post-cutover a strict, always-current seed is *safer* — a
+  from-scratch bootstrap is then never more than the current source, with no multi-generation
+  convergence risk and no C fallback needed), or (b) relax the fixed point to the tolerant `N2==N3` form
+  (two current-logic generations agree) so a stale seed never reds the gate. Recommend (a): keep the
+  strict seed, add the tripwire.
 
 ---
 
@@ -242,3 +257,9 @@ exactly where Go 1.5 and Rust 1.0 stood.
   host behind the frontier; the LSP port + full `src/` archival (G6) are a **v1.1** follow-on. Forks 2/3
   fold into that (keep the thin C tooling entry for v1.0; `git mv` the frontend to a frozen tree rather
   than `rm`). Starting **G0** — fresh baseline.
+- **2026-07-25 — G0 COMPLETE.** Fresh gate baseline: `make test` **458/0**, `make opcheck` **92/396**,
+  `make selfhost` **1517/0** (reproduction fixed point intact). `make bootstrap` was **RED** — the
+  checked-in seed had gone output-stale after the last 8 `cgen_c.ig` hardening commits; `make
+  bootstrap-refresh` restored it (16,177→19,720 lines) and the frontend-free fixed point is **GREEN**
+  again (seed committed `cd6698c`). Finding recorded in §8: the fixed point is seed-*strict*, so a
+  seed-drift tripwire is a G1 item. All gates now green; baseline established. Next: **G1**.
