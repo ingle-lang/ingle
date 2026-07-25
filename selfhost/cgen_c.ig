@@ -347,6 +347,8 @@ struct FnResolve {
     param_quals: [[int]]       // per-em_fn declared param qualifiers (0 none / 1 mut / 2 move), self excluded
     imp_alias: [string]        // import alias -> module path (parallel to imp_path)
     imp_path: [string]
+    newtypes: [string]         // every `type Name = Base [where …]` (DType) name — a construction `Name(x)`
+                               // erases to its base value (OFI-202), so emit_call lowers it to the bare arg
 }
 
 
@@ -3491,6 +3493,21 @@ struct CgcGen {
     }
 
 
+    fn is_newtype(self, name: string) -> bool {
+        var i = 0
+        loop {
+            if i >= self.res.newtypes.len() {
+                break
+            }
+            if self.res.newtypes[i] == name {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+
     fn push(mut self, name: string, cname: string, kind: int, unboxed: bool, drop: bool, is_arr: bool, elem_kind: int) {
         self.sc_name.append(name)
         self.sc_cname.append(cname)
@@ -5573,6 +5590,12 @@ struct CgcGen {
                 }
                 if self.en.is_case_variant(name) {
                     return self.emit_enum_ctor(name, args)   // an enum-variant construction `Circle(4)` / prelude `Some(5)`
+                }
+                if self.is_newtype(name) && args.len() == 1 {
+                    // A newtype CONSTRUCTION `UserId(5)` / `Pct(50)` erases to its base value (zero runtime
+                    // cost; stage-0 emits the bare argument, no predicate check even for a refined `where`
+                    // type). So the wrapper is a no-op — emit the base value directly. (OFI-202, un-dodged.)
+                    return self.emit_expr(args[0])
                 }
                 // panic(msg) in EXPRESSION position (e.g. a `case None { panic(m) }` arm whose value is used):
                 // em_panic_val diverges (renders the runtime string + exit 70), so wrap it in a comma expression
@@ -9320,6 +9343,30 @@ fn count_lambdas_expr(e: ps.Expr) -> int {
 }
 
 
+// build_newtypes collects every `type Name = Base [where …]` (DType) declaration name. A newtype
+// CONSTRUCTION `Name(x)` is ERASED to its base value at zero runtime cost — stage-0 emits `UserId(5)` /
+// `Pct(50)` as the plain base value (`INT_VAL(5)`), with NO predicate check even for a refined `where`
+// type in `--emit=c`. So the C-emit lowers `Name(arg)` to the bare argument. (OFI-202, un-dodged.)
+fn build_newtypes(decls: [ps.Decl]) -> [string] {
+    var out: [string] = []
+    var i = 0
+    loop {
+        if i >= decls.len() {
+            break
+        }
+        match decls[i] {
+            case DType(name, base, pred) {
+                out.append(name)
+            }
+            case _ {
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
 // emit_program writes the whole C translation unit for the merged module declarations, byte-identical to
 // stage-0 `inglec --emit=c`. It iterates `decls` once per section, keeping a shared em_fn_N counter.
 fn emit_program(decls: [ps.Decl], decl_mods: [string], imp_alias: [string], imp_path: [string], filename: string) {
@@ -9329,7 +9376,7 @@ fn emit_program(decls: [ps.Decl], decl_mods: [string], imp_alias: [string], imp_
     let fn_modules = build_fn_modules(decls, decl_mods)  // per-em_fn source module (module-aware qualified resolution)
     let fn_ret_gopt = build_fn_ret_gopt(decls)           // per-em_fn: returns a generic Option/Result (erased-payload own_into_slot)
     let fn_param_quals = build_fn_param_quals(decls)     // per-em_fn declared param qualifiers (honour `move` at call sites)
-    let fnres = FnResolve { param_counts: fn_param_counts, modules: fn_modules, ret_gopt: fn_ret_gopt, param_quals: fn_param_quals, imp_alias: imp_alias, imp_path: imp_path }
+    let fnres = FnResolve { param_counts: fn_param_counts, modules: fn_modules, ret_gopt: fn_ret_gopt, param_quals: fn_param_quals, imp_alias: imp_alias, imp_path: imp_path, newtypes: build_newtypes(decls) }
     let fn_ret_kind = build_fn_ret_kinds(decls)
     let fn_ret_render = build_fn_ret_render(decls)
     let fn_ret_opt_param = build_ret_opt_param(decls)   // per-method Option/Result generic-payload param index
