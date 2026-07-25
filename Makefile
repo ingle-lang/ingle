@@ -175,7 +175,7 @@ DEPS    := $(OBJECTS:.o=.d)
 GEN_BIN := build/gen_editor_assets
 GRAMMAR := editors/vscode/syntaxes/ember.tmLanguage.json
 
-.PHONY: all test test-update test-lsp doctor help release asan asan-par asan-trace install install-vscode build-zed install-zed parallel mn tsan-mn asan-mn mn-stress mn-graphics mn-net-graphics graphics web wasm wasm-hydrate net net-graphics db test-db test-quog test-quog-native quog install-quog test-graphics test-web test-net test-parallel kernel test-kernel selfhost bootstrap bootstrap-refresh crucible ceilings ledger opcheck verify docs string-diff bench parbench gen-editor-assets check-editor-sync clean
+.PHONY: all test test-update test-lsp doctor help release asan asan-par asan-trace install install-vscode build-zed install-zed parallel mn tsan-mn asan-mn mn-stress mn-graphics mn-net-graphics graphics web wasm wasm-hydrate net net-graphics db test-db test-quog test-quog-native quog install-quog test-graphics test-web test-net test-parallel kernel test-kernel selfhost bootstrap bootstrap-refresh inglec-self crucible ceilings ledger opcheck verify docs string-diff bench parbench gen-editor-assets check-editor-sync clean
 
 all: $(BIN) $(RT_LIB) $(RT_LIB_PAR)
 
@@ -608,14 +608,29 @@ selfhost: all
 bootstrap: $(RT_LIB)
 	@tools/bootstrap.sh
 
+# --- OFI-224 G1: the self-hosted compiler as a first-class, frontend-free artifact ---
+SEED        := bootstrap/seed/inglec_boot.c
+INGLEC_SELF := build/inglec-self
+
+# build/inglec-self — the self-hosted C-emit compiler (selfhost/cgen_c.ig), built from the checked-in
+# SEED + the runtime ALONE, with NO src/ frontend. This is the same binary bootstrap.sh calls N1, kept
+# as a persistent, named artifact: an Ingle→C compiler (reads an .ig file, writes C to stdout — pipe to
+# cc for a native binary, as public/inglenook/run-selfhost.sh does). It is the compiler that OFI-224 G4
+# promotes to the default `inglec`. Depends only on $(SEED) + $(RT_LIB), so it survives frontend retirement.
+$(INGLEC_SELF): $(SEED) $(RT_LIB)
+	@echo "building the self-hosted compiler from the seed (no src/ frontend)…"
+	$(CC) -std=c17 -O2 -D_DEFAULT_SOURCE -Iinclude $(SEED) $(RT_LIB) -lm -o $@
+	@echo "built $@ — the frontend-free Ingle→C compiler."
+
+inglec-self: $(INGLEC_SELF)
+
 # Re-snapshot the seed from the CURRENT selfhost sources (a deliberate maintenance step — the Go-1.5
 # model only requires the seed able to COMPILE the current source, which `make bootstrap` proves, so a
-# refresh is a "raise the floor" action at releases, not per-edit). Uses the reference compiler to emit
-# the fresh seed; `make bootstrap` then re-verifies the fixed point with no frontend.
-bootstrap-refresh: $(BIN)
-	@echo "refreshing bootstrap/seed/inglec_boot.c from the current selfhost sources…"
-	@EMBER_STD="$(CURDIR)/std" $(BIN) --emit=c selfhost/cgen_c_dump.ig > bootstrap/seed/inglec_boot.c
-	@echo "seed re-snapshotted; run 'make bootstrap' to verify the fixed point."
+# refresh is a "raise the floor" action at releases, not per-edit). FRONTEND-FREE (OFI-224 G1, F): the
+# two-generation reseed uses only the current seed + cc + runtime, so it survives frontend retirement —
+# the old `$(BIN) --emit=c … > seed` one-liner (which needed the C reference compiler) is in git history.
+bootstrap-refresh: $(RT_LIB)
+	@tools/bootstrap-reseed.sh
 
 # Crucible — the memory-ownership fuzzer (tools/crucible.{c,sh}). Generates danger-zone programs
 # (value-structs through erased generics/aggregates, field mutation, interpolation, loops) and runs

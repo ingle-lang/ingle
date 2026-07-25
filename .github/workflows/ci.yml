@@ -41,6 +41,13 @@ jobs:
       - name: Self-hosting differential
         run: make selfhost
 
+      # --- Bootstrap independence: Ingle rebuilds its own compiler from the checked-in seed with NO
+      #     src/ frontend in the loop. Its step-3 fixed point is seed-STRICT, so an output-changing
+      #     selfhost/cgen_c.ig commit that forgets `make bootstrap-refresh` reds it — this step is the
+      #     tripwire that catches seed drift on Linux (macOS runs it via `make verify`). See OFI-224 G1. ---
+      - name: Bootstrap independence (frontend-free fixed point)
+        run: make bootstrap
+
       # --- Concurrency: the multicore runtime (-pthread on Linux) + its correctness suite ---
       - name: Parallel build
         run: make parallel
