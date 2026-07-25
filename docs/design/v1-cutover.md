@@ -171,10 +171,24 @@ first honest map of what the self-hosted **native** path can and cannot compile:
   | **OFI-206** — lambda lifting | **6** | a lambda passed to `map`/`and_then`/… as an argument |
   | (nested boxed field access) | 1 | `match_nested` — `.x` on a boxed-generic element |
 
-  **This is the real remaining engineering to a G4-honest v1.0.** Closing **OFI-173 clears 25/47 (53%)**;
-  +OFI-202 → 40/47 (85%); +OFI-206 → all 47. It is the C-emit half of the OFI-174 completeness campaign,
-  now measured against the corpus rather than estimated. Order by lever: **173 → 202 → 206.**
-  Harness: `scratchpad/parity.sh` (rebuildable from this doc).
+  **Refinement (after diving into OFI-173).** The error-message buckets above are *not* clean root causes —
+  the "unresolved callee" text conflates four different problems. Re-partitioning against `--emit=c` (not
+  `--emit=check`) and reading the actual callees:
+  - **clone.ig is a SHARED limitation, not a self-hosted gap** — stage-0's *C-emit* also rejects value-struct
+    `.clone()` (OFI-082); only 1 of the 47 is shared, so **46 are real self-hosted-only gaps**.
+  - The 25 "unresolved callee (OFI-173)" cases decompose into: **`remove_last`/`pop` (3, now DONE)**;
+    **newtype construction `UserId(…)`/`Pct(…)` (7 → really OFI-202)**; **witness/bounded-method
+    `a.compare()`/`k.eq()` (5 → OFI-174 Tier-3)**; and **method-on-element / return-typing (~10 → the deep
+    OFI-173 core)**.
+  - **The unifying root cause is RETURN-TYPE PROPAGATION.** The checker-less C-emit doesn't track what type a
+    method call or element read *returns*, so a downstream use — `s.len()` on a popped value, a method on an
+    element, a newtype ctor, witness dispatch — can't resolve. `remove_last` was the one genuinely-isolated
+    branch (add `em_array_pop`); the rest need the emit to carry types the checker would otherwise stamp.
+    That is the OFI-174 C-emit-completeness campaign, not a handful of method branches.
+  - **Order by isolation/lever:** `remove_last` (done) → OFI-202 construction (newtype + qualified variant +
+    boxed-generic field, ~20 cases, mostly self-contained) → OFI-206 lambda lifting (6) → the return-typing
+    core + OFI-174 witnesses (the deep, cross-cutting part).
+  Harness: `scratchpad/parity.sh` + `parity3.sh` (real-vs-shared partition).
 
 ---
 
@@ -322,3 +336,12 @@ exactly where Go 1.5 and Rust 1.0 stood.
   check gate is done, the C-emit coverage is the OFI-174 C-emit completeness work, now corpus-measured
   and ranked. Recommended next: close **OFI-173** (method-call-on-element resolution — clears 53% of
   the gap in one lever). `selfhost/compile_c.ig` committed.
+- **2026-07-25 — OFI-173 dived in: `remove_last` DONE + the frontier re-characterised (see §4a).**
+  Implemented `arr.remove_last()` → `em_array_pop` in the self-hosted C-emit (`c0c163f`, gated
+  `cgen_c_run/array_remove_last.ig`, `make selfhost` 1522/0, bootstrap green after frontend-free reseed).
+  **Key correction:** the "53% in one lever" estimate was wrong — the OFI-173 error-message bucket
+  conflates `remove_last` (isolated, done), newtype construction (OFI-202), witness dispatch (OFI-174),
+  and the deep **return-type-propagation** core. Only `remove_last` was a clean isolated branch; the rest
+  need the checker-less C-emit to carry return/element types (the OFI-174 completeness campaign). Also:
+  clone.ig is a *shared* stage-0 limitation (46 real gaps, not 47). This is the honest cost/benefit
+  inflection: the full C-emit close is a major campaign, not mechanics — decision point recorded for Karl.
