@@ -284,6 +284,12 @@ Three options; phases 0–5 are unaffected by the choice, Phase 6 embodies it.
 Also aligned: the C-emit path that becomes canonical here is the same road the kernel campaign's
 bare-metal codegen rides — strengthening selfhost strengthens the endgame.
 
+**Follow-on (2026-07-25):** option (a) is now scoped and tracked as **OFI-224 — the v1.0 cutover**
+([v1-cutover.md](v1-cutover.md)): make the bootstrapped compiler the default + installed `inglec`,
+complete the §3 oracle succession, and archive `src/`. Its Fork 1 asks whether v1.0 ships *at* the
+tooling-host stage (recommended) or waits for the LSP port — i.e. it ratifies the boundary this
+section opened.
+
 ---
 
 ## 7. Risks and honest unknowns
