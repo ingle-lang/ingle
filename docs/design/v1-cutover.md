@@ -145,11 +145,36 @@ Almost none of this is hard engineering — it is decisions and mechanics.
 
 | Bucket | Items | Verdict |
 |--------|-------|---------|
-| **Blocks compiling real programs** | *(none)* | The self-hosted compiler builds itself **and** Inglenook. |
-| **Silent-wrong-answer risk** | *(structurally closed)* | P0/P1 made coverage holes hard-fail (`internal_error`), not miscompile. Latent representational gaps (OFI-203 value-struct-in-enum payload, OFI-202 `Color.Red` value form, OFI-163 generic Option/Result payload refcount, OFI-164 inline-struct array literal) are **not corpus-reachable** — fail loudly if ever hit. |
+| **C-emit coverage frontier (measured at G4)** | OFI-173 (25), OFI-202 (15), OFI-206 (6) | **The real remaining work.** The self-hosted C-emit builds itself + Inglenook, but **47 of ~267 corpus programs hard-fail the emit (exit 70, loud)** — see §4a. Bounded to 3 ranked OFIs; closing them makes G4 (flip the default) honest. |
+| **Silent-wrong-answer risk** | *(structurally closed — confirmed at G4)* | P0/P1 made coverage holes hard-fail (`internal_error` exit 70), not miscompile — **verified**: all 47 emit gaps abort loudly, zero produced runnable-but-wrong C. Latent representational gaps (OFI-203 value-struct-in-enum payload, OFI-163 generic Option/Result payload refcount, OFI-164 inline-struct array literal) fail loudly if ever hit. |
 | **Diagnostic / reject-parity** | OFI-223 (cross-module struct field, worked around), OFI-222 (partial named-arg validation), OFI-199 (over-u64 literal not rejected), the 1 verdict miss `error_resource_clone_match` | Ship as known-limitations or close opportunistically. None blocks extend-in-Ingle. |
 | **Ergonomic / cosmetic** | `unwrap`/`expect` (deferred; `panic` already shipped), bool-render `0/1` vs `true/false` in interpolation, OFI-200 bytecode source-map delta, OFI-221 empty-array-arg AEK | Post-1.0 polish. |
 | **Tooling** | LSP frontend coupling (Fork 1), fuzzer re-point (trivial) | The real v1.0 tooling decision. |
+
+### 4a. The C-emit coverage frontier (measured 2026-07-25, G4)
+
+Running the fused checked compiler `selfhost/compile_c.ig` (see §5 G4) over the whole corpus gives the
+first honest map of what the self-hosted **native** path can and cannot compile:
+
+- **Checker — cutover-ready.** Over the accept corpus (examples + `tests/run`, 220 programs stage-0
+  accepts): **0 false-rejects** — the self-hosted checker never rejects a valid program. Over the 90
+  fixtures stage-0 rejects *at check time*: **87/90 match**; the 3 under-rejections are the documented
+  `error_resource_clone_match` (needs Result/Option generic-payload typing) + two contract-`ensures`
+  edge cases — all *under*-rejection (accept-too-much), the safe direction, and all documented.
+- **C-emit — 47 of ~267 corpus programs hard-fail (exit 70, loud — no silent miscompile).** The
+  failures collapse to **three known, ranked OFIs**, not 47 independent bugs:
+
+  | Root cause | Programs | What trips it |
+  |---|---|---|
+  | **OFI-173** — method call on an array-element / struct-field receiver | **25** | `xs[i].clone()`, `self.items.remove_last()` — the C-emit can't resolve the receiver's type to pick the method |
+  | **OFI-202** — qualified-variant / newtype construction | **15** | `UserId(5)`, `Color.Red` — construction call form unhandled |
+  | **OFI-206** — lambda lifting | **6** | a lambda passed to `map`/`and_then`/… as an argument |
+  | (nested boxed field access) | 1 | `match_nested` — `.x` on a boxed-generic element |
+
+  **This is the real remaining engineering to a G4-honest v1.0.** Closing **OFI-173 clears 25/47 (53%)**;
+  +OFI-202 → 40/47 (85%); +OFI-206 → all 47. It is the C-emit half of the OFI-174 completeness campaign,
+  now measured against the corpus rather than estimated. Order by lever: **173 → 202 → 206.**
+  Harness: `scratchpad/parity.sh` (rebuildable from this doc).
 
 ---
 
@@ -283,3 +308,17 @@ exactly where Go 1.5 and Rust 1.0 stood.
   self-hosted C-emit omits a `drop_value` stage-0 emits (a missed free = leak-direction, sound; not a
   crash) — one entry for the coverage catalog. Next: **G2** (oracle succession) or **G4** (the flip)
   — G4's check+emit fusion is the critical-path item.
+- **2026-07-25 — G4 IN PROGRESS: the fused check+C-emit driver built.** New `selfhost/compile_c.ig` =
+  `cgen_c_dump.ig`'s load-and-emit path with `emberc.ig`'s `ck.check` gate fused in front (the load_modules
+  machinery is duplicated for now; driver consolidation is later Fork-2 work). Built via stage-0 into a
+  1.09 MB checked compiler. Spot-verified: **rejects** a type error `let x: int = "hello"` with exit 65
+  (parity with stage-0), **accepts** a valid `var`-loop program (emits C → compiles → runs `sum=16`), and
+  its C emit is **byte-identical** to the unchecked driver's (the check is a pure front gate, no emit
+  change).
+- **2026-07-25 — G4 parity + coverage MEASURED (see §4a).** Checker: **0 false-rejects** over 220
+  accept programs; **87/90** check-reject parity (3 documented under-rejections). C-emit: **47 of ~267
+  corpus programs hard-fail loudly (exit 70)** — no silent miscompiles — bounded to **OFI-173 (25) →
+  OFI-202 (15) → OFI-206 (6)**. **This is the real remaining engineering to a G4-honest v1.0**: the
+  check gate is done, the C-emit coverage is the OFI-174 C-emit completeness work, now corpus-measured
+  and ranked. Recommended next: close **OFI-173** (method-call-on-element resolution — clears 53% of
+  the gap in one lever). `selfhost/compile_c.ig` committed.
