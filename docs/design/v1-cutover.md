@@ -345,3 +345,15 @@ exactly where Go 1.5 and Rust 1.0 stood.
   need the checker-less C-emit to carry return/element types (the OFI-174 completeness campaign). Also:
   clone.ig is a *shared* stage-0 limitation (46 real gaps, not 47). This is the honest cost/benefit
   inflection: the full C-emit close is a major campaign, not mechanics — decision point recorded for Karl.
+- **2026-07-25 — Karl chose (A). OFI-202 newtype construction DONE (46 → 38 gaps).** `Name(x)` erases to
+  its base value (`build_newtypes` + emit_call branch, `5a2c4c7`, byte-identical fixture
+  `cgen_c/newtype_construct.ig`, `make selfhost` 1525/0, bootstrap green). newtype_basic/soundness run
+  native==VM; newtype_ops's only residual is the pre-existing bool-render cosmetic gap. **Qualified nullary
+  variant (`Color.Red`, 2 files) attempted then REVERTED** — the emit itself is one line (`em_enum(id,tag,0)`)
+  but the *ownership* side spreads: the value must be recognised as owned-enum by `is_enum_expr` AND the
+  SLet retain-dance classifier AND (unfound) more sites, or the binding under-retains and crashes. Not
+  worth 2 files now; deferred with the deeper element-typing frontier. **Remaining 38:** boxed-generic
+  ELEMENT field access (`arr[i].x`, ~12 — the return/element-typing core), witness/bounded-method
+  (`a.compare()`, ~5 → OFI-174), lambda lifting (~6 → OFI-206), qualified variant (2, deferred), misc.
+  The cheap-isolated wins (remove_last, newtype ctor) are now banked; **what's left is the return-/
+  element-type propagation core** — the genuinely deep, cross-cutting part of the OFI-174 campaign.
