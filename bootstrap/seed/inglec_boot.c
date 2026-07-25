@@ -14578,12 +14578,21 @@ static Value em_fn_308(Value a0, Value a1) {
                 } else {
                 }
             }
+        } else if (v1 == 10) {
+            Value v22 = em_enum_field(&g_em, v0, 0);
+            Value v23 = em_enum_field(&g_em, v0, 1);
+            if (em_truthy(em_gt(em_array_len(v22), INT_VAL(0LL), 0))) {
+                { Value v24 = em_fn_263(a0, own_into_slot(&g_em, em_index(&g_em, v22, INT_VAL(0LL))));
+                    drop_value(&g_em, a1);
+                    return v24;
+                }
+            }
         } else {
         }
     }
-    { Value v22 = em_sub(INT_VAL(0LL), INT_VAL(1LL), 0);
+    { Value v25 = em_sub(INT_VAL(0LL), INT_VAL(1LL), 0);
         drop_value(&g_em, a1);
-        return v22;
+        return v25;
     }
     drop_value(&g_em, a1);
     return INT_VAL(0);

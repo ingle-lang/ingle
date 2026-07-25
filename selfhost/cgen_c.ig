@@ -6492,6 +6492,14 @@ struct CgcGen {
                     }
                 }
             }
+            case EArray(elems, lines) {
+                // An inferred array LITERAL of struct values (`var arr = [P{…}, …]`, no `[Struct]` annotation)
+                // — the element struct sid is the FIRST element's, so `arr[i].field` / `let e = arr[i]; e.field`
+                // resolve exactly as the annotated `var arr: [P]` path does. (OFI-202/OFI-173, un-dodged.)
+                if elems.len() > 0 {
+                    return self.struct_sid_any(elems[0])
+                }
+            }
             case _ {
             }
         }
