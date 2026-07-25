@@ -5749,6 +5749,15 @@ struct CgcGen {
                         let ix = self.emit_expr(args[0])
                         return "em_array_remove_at(&g_em, {recv}, {ix})"
                     }
+                    if mname == "remove_last" {
+                        // arr.remove_last() → removes + RETURNS the last element (length--), mutating the array
+                        // IN PLACE. The receiver is a BORROW: a binding/param read, or a field read `self.items`
+                        // (em_enum_field returns the boxed array as-is, aliasing the heap array), so the shrink
+                        // sticks through the alias — no read-modify-write-back (mirrors stage-0's em_array_pop on
+                        // the borrowed receiver). remove_last through a reads-as-copy place is rejected by the
+                        // checker (OFI-072), so an EIndex receiver never reaches here. (OFI-173, un-dodged.)
+                        return "em_array_pop(&g_em, {self.emit_expr(object.value)})"
+                    }
                     if mname == "slice" {
                         // arr.slice(lo, hi) → a fresh OWNED copy of the [lo, hi) range. Receiver + bounds borrows.
                         let recv = self.emit_expr(object.value)
