@@ -4538,6 +4538,13 @@ struct CgcGen {
                         }
                     }
                     case EGet(object, mname) {
+                        // An array-ELEMENT-returning builtin `arr.remove_at(i)` / `arr.remove_last()` / `arr.pop()`
+                        // RETURNS one element — its struct sid is the array's element struct, so a binding of the
+                        // result (`let c = cv.remove_at(1); c.title`) resolves like `let c = cv[i]`. (OFI-173
+                        // return-typing, un-dodged — the checker-typed stage-0 gets this from the element type.)
+                        if (mname == "remove_at" || mname == "remove_last" || mname == "pop") && self.is_array_expr(object.value) {
+                            return self.array_elem_struct_of(object.value)
+                        }
                         let rsid = self.struct_sid_any(object.value)
                         if rsid >= 0 {
                             let fi = self.fn_index("{self.st.names[rsid]}.{mname}")
