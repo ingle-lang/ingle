@@ -367,3 +367,16 @@ exactly where Go 1.5 and Rust 1.0 stood.
   best closed by that checker-type-threading campaign, approached deliberately, not one file at a time.**
   Banked so far this session: G0 (bootstrap un-redded), G1 (frontend-free artifact + reseed + CI
   tripwire), G4 check gate (0 false-rejects), and 3 C-emit fixes (46 → 37 native gaps) — all gate-green.
+- **2026-07-25 — two more return-typing slices (37 → 34).** (1) `remove_at`/`remove_last`/`pop` result
+  struct typing — `let c = cv.remove_at(i); c.title` (`struct_sid_any` EGet arm, `8e9b729`, byte-identical).
+  (2) Option/Result CONCRETE-struct payload typing — a plain `match o { case Some(v) }` on a local/param
+  now tracks v's struct via a new `sc_opt_payload` facet + `match_payload_sid` EIdent arm (`9174aaa`,
+  byte-identical). The payload work is guarded to concrete structs; a **generic-instance payload
+  (`Option<Box<int>>`) is category-C** (type-param field substitution) — deferred, and tracking it emitted
+  broken C so it's explicitly skipped. **The recon workflow mapped the field-access bucket into A/B/C/D**:
+  A (concrete payload, DONE), B (map `local.get(k)` — needs an instance-key facet on locals), C (nested
+  generic-instance field `b.value.value` — instance-sid preservation + key substitution), D (`Box<T>` param —
+  a one-line base fallback). The `sc_opt_payload` facet is the foundation B/C build on. **Session total: 46
+  → 34 (26% of the frontier), 5 byte-identical C-emit fixes, all gate-green (selfhost 1534/0), bootstrap
+  green throughout.** Remaining: field-access B/C/D (~10), witness/OFI-174 (~6), lambda/OFI-206 (~6),
+  for-loop element-typing (~3), qualified-variant (2), misc.
