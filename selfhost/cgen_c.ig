@@ -3435,6 +3435,8 @@ struct CgcGen {
     sc_tyvar: [bool]           // ...is this an OWNED erased TYPE-PARAM local (`var acc = init`, init: U)? a whole-value
                                // consume MOVES it (nil-slot), not own_into_slot — stage-0's moves_local==1 (OFI-176, F2)
     sc_struct: [int]           // ...for a VALUE-STRUCT binding: its struct sid (so `p.f` / storage type resolve), else -1
+    sc_opt_payload: [int]      // ...for an Option<Struct>/Result<Struct,_> binding: the payload's base struct sid, so a
+                               // plain `match o { case Some(v) }` on this local/param tracks v's struct (OFI-173 return-typing)
     sc_render: [int]           // ...its interpolation render-kind (int_kind: 0 int, 8 f32, 9 float, 10 bool, 1..7 sized), for `{x}`
     indent: int                // current C indentation depth (1 = the function-body level, 4 spaces each)
     st: StructTab              // the declared-struct table (value/boxed classification + field resolution)
@@ -3523,6 +3525,7 @@ struct CgcGen {
         self.sc_refc.append(false)            // default: not a refcounted borrow (set_last_refc overrides)
         self.sc_tyvar.append(false)           // default: not an owned type-param local (set_last_tyvar overrides)
         self.sc_struct.append(0 - 1)          // default: not a struct binding (set_last_struct overrides)
+        self.sc_opt_payload.append(0 - 1)     // default: not an Option/Result-of-struct binding (set_last_opt_payload overrides)
         self.sc_render.append(0)              // default: int render-kind (set_last_render overrides for float/bool/sized)
     }
 
@@ -3665,6 +3668,28 @@ struct CgcGen {
     // so `p.field` reads and the binding's C storage type resolve. Called right after push for a struct let.
     fn set_last_struct(mut self, sid: int) {
         self.sc_struct[self.sc_struct.len() - 1] = sid
+    }
+
+
+    // set_last_opt_payload records the payload base struct sid of the most-recently pushed Option/Result-of-struct
+    // binding, so a `match o { case Some(v) }` on a plain local/param scrutinee tracks v's struct. (OFI-173.)
+    fn set_last_opt_payload(mut self, sid: int) {
+        self.sc_opt_payload[self.sc_opt_payload.len() - 1] = sid
+    }
+
+
+    fn lookup_opt_payload(self, name: string) -> int {
+        var i = self.sc_name.len() - 1
+        loop {
+            if i < 0 {
+                break
+            }
+            if self.sc_name[i] == name {
+                return self.sc_opt_payload[i]
+            }
+            i = i - 1
+        }
+        return 0 - 1
     }
 
 
@@ -4122,6 +4147,12 @@ struct CgcGen {
                     }
                 }
             }
+            case EIdent(name) {
+                // A plain `match o { case Some(v) }` / `match node { case Some(c) }` where the scrutinee is a
+                // LOCAL or PARAM typed Option<Struct>/Result<Struct,_> — the payload's base struct sid was
+                // recorded on the binding (sc_opt_payload), so `v.field` / `c.head` resolve. (OFI-173, un-dodged.)
+                return self.lookup_opt_payload(name)
+            }
             case _ {
             }
         }
@@ -4136,6 +4167,30 @@ struct CgcGen {
             case TyGeneric(q, n, args) {
                 if (n == "Option" || n == "Result") && args.len() >= 1 {
                     return self.st.base_sid_of_ty(args[0])
+                }
+            }
+            case _ {
+            }
+        }
+        return 0 - 1
+    }
+
+
+    // option_payload_concrete_sid is option_payload_base_sid restricted to a CONCRETE struct payload
+    // (`Option<Cons>` -> Cons). A GENERIC-INSTANCE payload (`Option<Box<int>>` — a Box whose `value` field is
+    // a type-param) is skipped (-1): reading its type-param field needs category-C instance substitution the
+    // C-emit doesn't do yet, and tracking it would emit broken C. Used to record sc_opt_payload safely. (OFI-173.)
+    fn option_payload_concrete_sid(self, ty: ps.Ty) -> int {
+        match ty {
+            case TyGeneric(q, n, args) {
+                if (n == "Option" || n == "Result") && args.len() >= 1 {
+                    match args[0] {
+                        case TyName(q2, sname) {
+                            return self.st.sid_of(sname)
+                        }
+                        case _ {
+                        }
+                    }
                 }
             }
             case _ {
@@ -7369,6 +7424,14 @@ struct CgcGen {
                     if bsid >= 0 {
                         self.set_last_struct(bsid)          // track the boxed-struct sid so `c.field` resolves
                     }
+                    if ty.len() > 0 {
+                        // An Option<Struct>/Result<Struct,_> binding: record the CONCRETE payload struct sid so a
+                        // plain `match o { case Some(v) }` on this local tracks v's struct (OFI-173 return-typing).
+                        let ops = self.option_payload_concrete_sid(ty[0])
+                        if ops >= 0 {
+                            self.set_last_opt_payload(ops)
+                        }
+                    }
                     if owned {
                         // `var acc = init` / `let a = d` where the RHS reads an erased TYPE-PARAM binding: the
                         // new owner is an owned type-param local — a whole-value consume MOVES it (nil-slot),
@@ -8485,7 +8548,7 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: Stru
     if idx >= 0 && idx < fnres.modules.len() {
         cur_mod = fnres.modules[idx]
     }
-    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_is_array: [], sc_elem_elem_kind: [], sc_elem_struct: [], sc_refc: [], sc_tyvar: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, res: fnres, fn_ret_kind: fn_ret_kind, fn_ret_render: fn_ret_render, fn_ret_opt_param: fn_ret_opt_param, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, consts: consts, cur_gopt: [], cur_owner: owner_sid, cur_module: cur_mod, cur_tp_pname: [], cur_tp_tname: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, fn_param_gen_mask: fn_param_gen_mask, lam_recs: [], extern_names: extern_names, extern_ret_kind: extern_ret_kind, extern_ret_str: extern_ret_str, nursery_ids: [] }
+    var g = CgcGen{ next_var: 0, sc_name: [], sc_cname: [], sc_kind: [], sc_unboxed: [], sc_drop: [], sc_array: [], sc_elem_kind: [], sc_elem_aek: [], sc_elem_is_array: [], sc_elem_elem_kind: [], sc_elem_struct: [], sc_refc: [], sc_tyvar: [], sc_struct: [], sc_render: [], indent: 1, st: st, en: en, fn_names: fn_names, res: fnres, fn_ret_kind: fn_ret_kind, fn_ret_render: fn_ret_render, fn_ret_opt_param: fn_ret_opt_param, fn_ret_str: fn_ret_str, fn_ret_array: fn_ret_array, fn_ret_elem_kind: fn_ret_elem_kind, fn_ret_elem_struct: fn_ret_elem_struct, fn_ret_struct: fn_ret_struct, fn_ret_enum: fn_ret_enum, sc_opt_payload: [], consts: consts, cur_gopt: [], cur_owner: owner_sid, cur_module: cur_mod, cur_tp_pname: [], cur_tp_tname: [], cur_lambda: lambda_start, fn_ret_det_arg: fn_ret_det_arg, fn_ret_det_elem: fn_ret_det_elem, fn_ret_lam_arg: fn_ret_lam_arg, fn_ret_lam_in: fn_ret_lam_in, fn_hof_srcs: fn_hof_srcs, fn_param_gen_mask: fn_param_gen_mask, lam_recs: [], extern_names: extern_names, extern_ret_kind: extern_ret_kind, extern_ret_str: extern_ret_str, nursery_ids: [] }
     // For a lifted lambda, lam_pstr/lam_pkind type its OWN params (the trailing params after the captures) so
     // the body dispatches `.len()`/concat/arithmetic like stage-0 (the C signature stays all-`Value`). Captures
     // lead and stay untyped. caps = (non-self param count) − (own params typed) — OFI-206 follow-on.
@@ -8564,6 +8627,14 @@ fn emit_fn_body(f: ps.FnDecl, idx: int, has_self: bool, owner_sid: int, st: Stru
             }
             if psid >= 0 {
                 g.set_last_struct(psid)           // value param → read via aN.fM; boxed param → a borrowed Value
+            }
+            if f.params[p].ty.len() > 0 {
+                // An Option<Struct>/Result<Struct,_> PARAM (`node: Option<Cons>`): record the CONCRETE payload
+                // struct sid so a plain `match node { case Some(c) }` on it tracks c's struct (OFI-173).
+                let pops = g.option_payload_concrete_sid(f.params[p].ty[0])
+                if pops >= 0 {
+                    g.set_last_opt_payload(pops)
+                }
             }
             if pesid >= 0 {
                 g.set_last_elem_struct(pesid)     // struct-array param → `a[i]` types as a boxed struct
