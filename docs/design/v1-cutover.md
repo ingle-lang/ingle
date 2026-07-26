@@ -357,3 +357,13 @@ exactly where Go 1.5 and Rust 1.0 stood.
   (`a.compare()`, ~5 → OFI-174), lambda lifting (~6 → OFI-206), qualified variant (2, deferred), misc.
   The cheap-isolated wins (remove_last, newtype ctor) are now banked; **what's left is the return-/
   element-type propagation core** — the genuinely deep, cross-cutting part of the OFI-174 campaign.
+- **2026-07-25 — one more incremental win: inferred struct-array element access (38 → 37).** `var arr =
+  [P{…}]` (no annotation) now infers its element struct sid from the first element (`value_elem_struct`
+  EArray case, `d3a88b1`, gated `cgen_c_run/inferred_struct_array.ig`, run==VM, 1528/0, bootstrap green).
+  **Observation: the incremental fixes now clear ~1 file each** (remaining cases each need a *different*
+  slice of the same missing type info), while the deep fix — the self-hosted **checker stamping resolved
+  types into a side table the C-emit consumes** (possible now that `compile_c.ig` runs both in one
+  process) — would unblock the return-typing cases *together*. **Recommendation: the remaining ~37 are
+  best closed by that checker-type-threading campaign, approached deliberately, not one file at a time.**
+  Banked so far this session: G0 (bootstrap un-redded), G1 (frontend-free artifact + reseed + CI
+  tripwire), G4 check gate (0 false-rejects), and 3 C-emit fixes (46 → 37 native gaps) — all gate-green.
